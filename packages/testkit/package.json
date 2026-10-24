@@ -1,0 +1,15 @@
+{
+  "name": "@ops/testkit",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./conformance": "./src/conformance.ts"
+  },
+  "dependencies": {
+    "@ops/contracts": "workspace:*",
+    "zod": "^4.0.0"
+  }
+}

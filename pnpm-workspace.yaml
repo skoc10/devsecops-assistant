@@ -1,0 +1,7 @@
+packages:
+  - "packages/*"
+  - "packages/adapters/*"
+  - "packages/runtimes/*"
+
+# Tedarik zinciri: hiçbir bağımlılığın yaşam-döngüsü (install) scripti çalışmaz.
+onlyBuiltDependencies: []

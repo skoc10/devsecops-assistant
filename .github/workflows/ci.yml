@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Not: eylemler etiketle sabitlendi; sürüm sabitleme (SHA) için docs/design/13 "doğrulanacak" listesine bakın.
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # Bağımlılık yaşam-döngüsü scriptleri kapalı (pnpm-workspace.yaml: onlyBuiltDependencies: [])
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test

@@ -2,13 +2,14 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: başlangıç (yalnız tasarım belgeleri).
+Son güncelleme: WP1 tamamlandı (sözleşmeler + testkit çekirdeği).
 
 ## Faz 0
 
 | Kontrol | Etiket | Paket | Test |
 |---|---|---|---|
-| Sözleşmeler (Profile, Target, ToolDescriptor, ToolResult, ...) | Planned | `packages/contracts` | WP1 |
+| Sözleşmeler (Profile, Target, ToolDescriptor, ToolResult, PolicyDecision, AuditRecord, ModelProvider, AgentRuntime, DatabaseDriver, SecretStore) | **Enforced** (zod şemaları; strict, secret alanı yok) | `packages/contracts` | `contracts/test/*` |
+| Testkit çekirdeği: canary (ham/base64/url/hex/json/bölünmüş), CaptureSink, imzalı sahte profil, izole `OPS_HOME`, ScriptedProvider, FakeAdapter, adapter yapı denetimi | **Enforced** | `packages/testkit` | `testkit/test/*` |
 | Denetim hash zinciri + fail-closed yazıcı | Planned | `packages/audit` | S-08 |
 | Redaksiyon M1/M2/M3/M5/M6 + kompaktlaştırma | Planned | `packages/redaction` | S-06, B-03 |
 | Politika v0 + PEP boru hattı | Planned | `packages/policy`, `packages/core` | S-03, S-04, S-12, S-13 |

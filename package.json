@@ -1,0 +1,24 @@
+{
+  "name": "ops-assistant",
+  "private": true,
+  "version": "0.0.0",
+  "license": "UNLICENSED",
+  "description": "Genel amaçlı DevSecOps asistanı (tek kullanıcılı, yerel).",
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "ops": "node packages/cli/src/bin.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "fast-check": "^4.10.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
