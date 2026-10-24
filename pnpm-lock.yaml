@@ -29,6 +29,15 @@ importers:
       '@ops/contracts':
         specifier: workspace:*
         version: link:../../contracts
+      '@ops/diff':
+        specifier: workspace:*
+        version: link:../../diff
+      '@ops/redaction':
+        specifier: workspace:*
+        version: link:../../redaction
+      '@ops/workspace':
+        specifier: workspace:*
+        version: link:../../workspace
       yaml:
         specifier: ^2.0.0
         version: 2.9.1
@@ -45,9 +54,6 @@ importers:
       '@ops/policy':
         specifier: workspace:*
         version: link:../../policy
-      '@ops/redaction':
-        specifier: workspace:*
-        version: link:../../redaction
       '@ops/testkit':
         specifier: workspace:*
         version: link:../../testkit

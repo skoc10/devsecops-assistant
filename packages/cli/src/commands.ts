@@ -60,7 +60,7 @@ const USAGE = [
   "  profile add db --id ID --env E --host H [--port 5432] --database D --user U --scope public,sales [--ca-file PEM]",
   "              [--default-schema S] [--datasource AD] [--name AD] [--tls verify-full|disable] [--replace]",
   "              (parola: OPS_DB_PASSWORD_FILE ile 0600 dosya veya yankısız TTY istemi; bağlantı DİZESİ kabul edilmez)",
-  "  profile add pipeline|scm --id ID --env E --scope sahip/depo,sahip/* [--api-url https://api.github.com] [--ca-file PEM]",
+  "  profile add pipeline|scm --id ID --env E --scope sahip/depo,sahip/* [--api-url https://api.github.com] [--ca-file PEM] [--ceiling read|mutate|deploy]",
   "              [--log-hosts h1,h2] [--name AD] [--replace]   (belirteç: OPS_GITHUB_TOKEN_FILE ile 0600 dosya veya yankısız TTY; salt okunur fine-grained belirteç önerilir)",
   "  profile list | rm ID | doctor ID",
   "  profile rbac --sa-namespace NS --namespace a,b [--cluster-read] [--name AD]   (manifest üretir, UYGULAMAZ)",

@@ -1,5 +1,6 @@
 import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError, parseSince, riskRank } from "@ops/contracts";
 import type {
+  ActionPreview,
   Adapter,
   AdapterCall,
   AdapterManifest,
@@ -16,7 +17,13 @@ import type { CredentialResolver } from "@ops/broker";
 import { GithubClient, ghError, isAllowedLogHost } from "./client.ts";
 import type { GhResponse } from "./client.ts";
 import { assertRepo, int, isoOrUndefined, pathProblem, safeName, sha40 } from "./safe.ts";
-import { PIPELINE_TOOLS, SCM_TOOLS } from "./tools.ts";
+import { PIPELINE_TOOLS, PIPELINE_WRITE_TOOLS, SCM_TOOLS, SCM_WRITE_TOOLS } from "./tools.ts";
+import { doCancel, doPr, doRerun, previewCancel, previewPr, previewRerun, validatePr } from "./change.ts";
+import type { PrArgs } from "./change.ts";
+
+const PIPELINE_ALL = [...PIPELINE_TOOLS, ...PIPELINE_WRITE_TOOLS] as const;
+const SCM_ALL = [...SCM_TOOLS, ...SCM_WRITE_TOOLS] as const;
+const WRITE_NAMES: ReadonlySet<string> = new Set([...PIPELINE_WRITE_TOOLS, ...SCM_WRITE_TOOLS].map((t) => t.descriptor.name));
 import { workflowFacts } from "./workflow.ts";
 
 type Args = Record<string, unknown>;
@@ -60,7 +67,7 @@ abstract class GithubBase implements Adapter {
     if (profile.kind !== this.profileKind) p.push(`profil türü '${this.profileKind}' olmalı: ${profile.kind}`);
     if (!profile.targetPin.endpoint.startsWith("https://")) p.push("pin uç noktası https olmalı");
     if (profile.credentialSource.kind !== "static") p.push(`kimlik kaynağı henüz desteklenmiyor: ${profile.credentialSource.kind}`);
-    if (profile.classCeiling !== "read") p.push(`${this.profileKind} profilleri bu sürümde yalnız 'read' tavanlıdır`);
+    if (riskRank(profile.classCeiling) > riskRank("deploy")) p.push(`${this.profileKind} profilleri en çok 'deploy' tavanlı olabilir (destroy aracı yok)`);
     return p;
   }
 
@@ -72,16 +79,39 @@ abstract class GithubBase implements Adapter {
       const why = pathProblem(str(a, "path") ?? "");
       if (why) throw new OpsError("path_denied", `yol reddedildi: ${why}`);
     }
+    if (tool === "scm.pr.create") validatePr({ ...(a as unknown as PrArgs), repo });
     return { profileId: profile.id, kind: profile.kind, endpoint: profile.targetPin.endpoint, scopes: [repo], refs: this.refsFor(tool, a, repo) };
   }
 
-  protected client(handle: CredentialHandle | null, profile: Profile, call: { maxBytes: number; timeoutMs: number; signal?: AbortSignal }): GithubClient {
+  protected client(handle: CredentialHandle | null, profile: Profile, call: { maxBytes: number; timeoutMs: number; signal?: AbortSignal; allowWrite?: boolean }): GithubClient {
     if (!handle) throw new OpsError("lease_inactive", "kimlik tutamacı yok");
-    return new GithubClient(this.resolver.token(handle), profile.targetPin, { maxBytes: call.maxBytes, timeoutMs: call.timeoutMs, ...(call.signal ? { signal: call.signal } : {}) });
+    return new GithubClient(this.resolver.token(handle), profile.targetPin, {
+      maxBytes: call.maxBytes,
+      timeoutMs: call.timeoutMs,
+      ...(call.signal ? { signal: call.signal } : {}),
+      ...(call.allowWrite ? { allowWrite: true } : {}),
+    });
   }
 
   protected callClient(call: AdapterCall): GithubClient {
-    return this.client(call.handle, call.profile, { maxBytes: Math.min(call.limits.maxBytes * 2, 2_000_000), timeoutMs: call.limits.timeoutMs, signal: call.signal });
+    return this.client(call.handle, call.profile, { maxBytes: Math.min(call.limits.maxBytes * 2, 2_000_000), timeoutMs: call.limits.timeoutMs, signal: call.signal, allowWrite: WRITE_NAMES.has(call.tool) });
+  }
+
+  /** Mutasyon önizlemesi: salt OKUMA istemcisiyle (yazma yetkisiz). */
+  async preview(call: AdapterCall): Promise<ActionPreview> {
+    const a = (call.args ?? {}) as Args;
+    const repo = assertRepo(str(a, "repo") ?? "");
+    const c = this.client(call.handle, call.profile, { maxBytes: 2_000_000, timeoutMs: Math.min(call.limits.timeoutMs, 30_000), signal: call.signal });
+    switch (call.tool) {
+      case "scm.pr.create":
+        return previewPr(c, { ...(a as unknown as PrArgs), repo });
+      case "pipeline.run.rerun":
+        return previewRerun(c, { repo, runId: a["runId"] as number, ...(a["failedOnly"] === true ? { failedOnly: true } : {}) });
+      case "pipeline.run.cancel":
+        return previewCancel(c, { repo, runId: a["runId"] as number });
+      default:
+        throw new OpsError("no_preview", `araç önizleme desteklemiyor: ${call.tool}`);
+    }
   }
 
   async connectCheck(handle: CredentialHandle, profile: Profile): Promise<{ identity: string; targetFingerprint: string }> {
@@ -151,8 +181,9 @@ abstract class GithubBase implements Adapter {
       const scopes = scopesHeader.split(",").map((s) => s.trim()).filter(Boolean);
       const writeLike = scopes.filter((s) => s === "repo" || s === "workflow" || s === "delete_repo" || s.startsWith("write:") || s.startsWith("admin:") || s === "gist" || s === "user");
       if (writeLike.length > 0) {
-        add("error", "classic_write_scope", `klasik belirteç yazma yetkili kapsamlar içeriyor: ${writeLike.slice(0, 6).join(", ")} — salt okunur fine-grained belirteç kullanın`);
-        raise("mutate");
+        const allowsWrite = riskRank(profile.classCeiling) >= riskRank("mutate");
+        add(allowsWrite ? "warn" : "error", "classic_write_scope", `klasik belirteç yazma yetkili kapsamlar içeriyor: ${writeLike.slice(0, 6).join(", ")} — ${allowsWrite ? "tavan yazmaya izin veriyor ama klasik kapsamlar geniştir (workflow/delete_repo dahil olabilir); dar fine-grained belirteç tercih edin" : "salt okunur fine-grained belirteç kullanın"}`);
+        raise(writeLike.includes("delete_repo") || writeLike.includes("workflow") ? "deploy" : "mutate");
       }
     } else {
       add("warn", "permissions_unverified", "belirteç izinleri API'den doğrulanamıyor (fine-grained/App): yalnız 'Contents/Actions/Pull requests: Read-only' izinli belirteç kullanın");
@@ -169,7 +200,8 @@ abstract class GithubBase implements Adapter {
           const perms = obj(obj(JSON.parse(r.body))["permissions"]);
           if (perms["push"] === true || perms["admin"] === true || perms["maintain"] === true) {
             // klasik belirteçte rol = belirteç yetkisi; fine-grained'de kullanıcı rolünü yansıtabilir
-            add(scopesHeader !== undefined ? "error" : "warn", "repo_write_role", `${repo}: hesap bu depoya yazabiliyor (push/admin/maintain)${scopesHeader === undefined ? "; belirtecin salt okunur olduğunu GitHub ayarlarında doğrulayın" : ""}`);
+            const allowsWrite = riskRank(profile.classCeiling) >= riskRank("mutate");
+            add(allowsWrite ? "info" : scopesHeader !== undefined ? "error" : "warn", "repo_write_role", `${repo}: hesap bu depoya yazabiliyor (push/admin/maintain)${allowsWrite ? " — tavan yazmaya izin veriyor" : scopesHeader === undefined ? "; belirtecin salt okunur olduğunu GitHub ayarlarında doğrulayın" : ""}`);
             if (scopesHeader !== undefined) raise("mutate");
           }
         } else {
@@ -180,6 +212,7 @@ abstract class GithubBase implements Adapter {
       }
     }
     if (exact.length > 0 && checked.length === 0) add("error", "no_repo_access", "izinli depoların hiçbirine erişilemedi");
+    if (riskRank(effective) > riskRank(profile.classCeiling)) add("error", "ceiling_exceeded_by_token", `beyan edilen tavan '${profile.classCeiling}', belirtecin fiili yetkisi '${effective}'; profil oturuma bağlanmaz`);
     const bindable = !findings.some((f) => f.severity === "error");
     return report({ connected: true, identity, effectiveClass: effective, scopesChecked: checked, bindable });
   }
@@ -223,13 +256,13 @@ export class GithubActionsAdapter extends GithubBase {
       kind: "pipeline",
       profileKinds: ["pipeline"],
       credentialKinds: ["static"],
-      capabilities: ["pagination", "log-redirect-guard"],
-      tools: PIPELINE_TOOLS.map((t) => t.descriptor),
+      capabilities: ["pagination", "log-redirect-guard", "preview", "toctou"],
+      tools: PIPELINE_ALL.map((t) => t.descriptor),
     });
   }
 
   get definitions(): readonly ToolDefinition[] {
-    return PIPELINE_TOOLS;
+    return PIPELINE_ALL;
   }
 
   protected refsFor(tool: string, a: Args, repo: string): string[] {
@@ -260,6 +293,10 @@ export class GithubActionsAdapter extends GithubBase {
         return this.workflowDefinition(c, repo, a);
       case "pipeline.artifacts.list":
         return this.artifacts(c, repo, a, call);
+      case "pipeline.run.rerun":
+        return doRerun(c, { repo, runId: a["runId"] as number, ...(a["failedOnly"] === true ? { failedOnly: true } : {}) }, call.approvedVersion);
+      case "pipeline.run.cancel":
+        return doCancel(c, { repo, runId: a["runId"] as number }, call.approvedVersion);
       default:
         throw new OpsError("unknown_tool", `bilinmeyen araç: ${call.tool}`);
     }
@@ -399,18 +436,21 @@ export class GithubScmAdapter extends GithubBase {
       kind: "scm",
       profileKinds: ["scm"],
       credentialKinds: ["static"],
-      capabilities: ["pagination", "secret-path-denylist"],
-      tools: SCM_TOOLS.map((t) => t.descriptor),
+      capabilities: ["pagination", "secret-path-denylist", "preview", "toctou"],
+      tools: SCM_ALL.map((t) => t.descriptor),
     });
   }
 
   get definitions(): readonly ToolDefinition[] {
-    return SCM_TOOLS;
+    return SCM_ALL;
   }
 
   protected refsFor(tool: string, a: Args, repo: string): string[] {
     const refs = [`Repo/${repo}`];
     if (tool === "scm.file.read" && typeof a["path"] === "string") refs.push(`File/${repo}/${a["path"]}`);
+    if (tool === "scm.pr.create" && Array.isArray(a["files"])) {
+      for (const f of a["files"]) if (f !== null && typeof f === "object" && typeof (f as Obj)["path"] === "string") refs.push(`File/${repo}/${String((f as Obj)["path"])}`);
+    }
     return refs;
   }
 
@@ -432,6 +472,8 @@ export class GithubScmAdapter extends GithubBase {
         return this.prList(c, repo, a, call);
       case "scm.commit.list":
         return this.commitList(c, repo, a, call);
+      case "scm.pr.create":
+        return doPr(c, { ...(a as unknown as PrArgs), repo }, call.approvedVersion);
       default:
         throw new OpsError("unknown_tool", `bilinmeyen araç: ${call.tool}`);
     }

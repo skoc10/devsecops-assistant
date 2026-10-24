@@ -41,6 +41,7 @@ export class SkillRegistry implements SkillCatalog {
   private readonly skills = new Map<string, Skill>();
   readonly issues: SkillIssue[] = [];
   private available: ReadonlySet<string> | null = null;
+  private provider: (() => Iterable<string>) | null = null;
 
   static async load(opts: LoadOptions): Promise<SkillRegistry> {
     const reg = new SkillRegistry();
@@ -56,8 +57,19 @@ export class SkillRegistry implements SkillCatalog {
     this.available = new Set(ids);
   }
 
+  /**
+   * Kullanılabilirlik her sorguda yeniden hesaplanır (ör. profil eklendikçe/bağlı alan değiştikçe): skill
+   * yalnız gerçekten kullanılabilecekse ilan edilir → gereksiz meta token yok (D15).
+   */
+  setAvailabilityProvider(fn: () => Iterable<string>): void {
+    this.provider = fn;
+  }
+
   private isAvailable(s: Skill): boolean {
-    return this.available === null || s.sidecar.requires.adapters.every((a) => this.available?.has(a));
+    const av = this.provider ? new Set(this.provider()) : this.available;
+    if (av === null) return true;
+    const r = s.sidecar.requires;
+    return r.adapters.every((a) => av.has(a)) && (r.anyOf.length === 0 || r.anyOf.some((a) => av.has(a)));
   }
 
   private async scan(root: string, tier: SkillTier): Promise<void> {

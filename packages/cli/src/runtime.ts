@@ -203,7 +203,11 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     workspaceNote = `${active.ws.id} (${active.ws.engine})`;
   }
   if (mcp) availableAdapters.push("mcp-bridge");
-  skills.setAvailableAdapters(availableAdapters);
+  // Skill ilanı, YAPILANDIRILMIŞ profillere göre dinamiktir: profili olmayan adapter'ın skill'i ilan edilmez
+  // (gereksiz meta token yok); çalışma alanı/terminal/MCP gibi profilsiz yetenekler sabit listeden gelir.
+  const KIND_ADAPTER: Readonly<Record<string, string>> = { k8s: "kubernetes", db: "postgres", pipeline: "github-actions", scm: "github-scm" };
+  const PROFILELESS = availableAdapters.filter((a) => !["kubernetes", "postgres", "github-actions", "github-scm"].includes(a));
+  skills.setAvailabilityProvider(() => [...PROFILELESS, ...registry.list().flatMap((p) => (KIND_ADAPTER[p.kind] ? [KIND_ADAPTER[p.kind] as string] : []))]);
 
   const gateway = new ToolGateway({
     registry: toolRegistry,

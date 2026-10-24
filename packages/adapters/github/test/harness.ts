@@ -6,7 +6,7 @@ import { DEFAULT_POLICY, PolicyEngine } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
 import { BUILD_REPO, CaptureSink, FakeGithubApi, generateTestPki, makeCanary, makeTestProfile, seedBuildDeploy } from "@ops/testkit";
 import type { Canary } from "@ops/testkit";
-import type { Profile, ProfileInput, ToolResult } from "@ops/contracts";
+import type { ApprovalGate, Profile, ProfileInput, ToolResult } from "@ops/contracts";
 import { GithubActionsAdapter, GithubScmAdapter } from "../src/index.ts";
 
 export interface GhHarnessOpts {
@@ -20,6 +20,8 @@ export interface GhHarnessOpts {
   readonly vaultApiBase?: string;
   readonly noCaPin?: boolean;
   readonly injection?: string;
+  readonly approval?: ApprovalGate;
+  readonly forbidWrites?: boolean;
 }
 
 export async function makeGhHarness(opts: GhHarnessOpts = {}) {
@@ -30,7 +32,7 @@ export async function makeGhHarness(opts: GhHarnessOpts = {}) {
     workflowSecret: makeCanary("workflow-secret"),
     envFileSecret: makeCanary("envfile-secret"),
   };
-  const api = await FakeGithubApi.start({ pki, token: canaries.token.value, ...(opts.logRedirect ? { logRedirect: opts.logRedirect } : {}), ...(opts.oauthScopes !== undefined ? { oauthScopes: opts.oauthScopes } : {}) });
+  const api = await FakeGithubApi.start({ pki, token: canaries.token.value, ...(opts.logRedirect ? { logRedirect: opts.logRedirect } : {}), ...(opts.oauthScopes !== undefined ? { oauthScopes: opts.oauthScopes } : {}), ...(opts.forbidWrites ? { forbidWrites: true } : {}) });
   seedBuildDeploy(api, canaries, opts.injection ? { injection: opts.injection } : {});
   const kind = opts.kind ?? "pipeline";
   const imp = buildTokenCredential({ apiBase: opts.vaultApiBase ?? api.url, token: opts.wrongToken ? makeCanary("wrong").value : canaries.token.value, caPem: pki.caPem });
@@ -57,10 +59,11 @@ export async function makeGhHarness(opts: GhHarnessOpts = {}) {
   const broker = new LocalBroker({ store });
   const adapter = kind === "pipeline" ? new GithubActionsAdapter(broker.resolver) : new GithubScmAdapter(broker.resolver);
   registry.register(adapter, adapter.definitions);
-  const gateway = new ToolGateway({ registry, session, policy: new PolicyEngine(DEFAULT_POLICY), audit, broker, evidence, known });
+  const gateway = new ToolGateway({ registry, session, policy: new PolicyEngine(DEFAULT_POLICY), audit, broker, evidence, known, ...(opts.approval ? { approval: opts.approval } : {}) });
   session.bind(profile);
 
-  const call = (tool: string, args: unknown): Promise<ToolResult> => gateway.invoke({ tool, args, profile: profile.id, providerZone: "local" });
+  const call = (tool: string, args: unknown, over: { cited?: string[] } = {}): Promise<ToolResult> =>
+    gateway.invoke({ tool, args, profile: profile.id, providerZone: "local", ...(over.cited ? { citedEvidence: over.cited } : {}) });
   const sinkFor = async (results: readonly ToolResult[]): Promise<CaptureSink> => {
     const sink = new CaptureSink();
     sink.push("audit", (await storage.readLines()).join("\n"));

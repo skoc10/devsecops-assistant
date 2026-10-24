@@ -161,3 +161,65 @@ export const commitList = defineTool(
 
 export const PIPELINE_TOOLS: readonly ToolDefinition[] = [runsList, runGet, jobsList, jobLogs, workflowDefinition, artifactsList];
 export const SCM_TOOLS: readonly ToolDefinition[] = [fileRead, diffGet, prList, commitList];
+
+// ---- değişiklik araçları (Faz 2c): ayrı toolset'ler, önizleme + onay + TOCTOU ----------------------------
+
+const writeLimits = { timeoutMs: 60_000, maxBytes: 300_000, maxItems: 20, maxOutputTokens: 1_000 };
+
+export const runRerun = defineTool(
+  {
+    ...pipelineBase,
+    name: "pipeline.run.rerun",
+    description: "Tamamlanmış workflow koşusunu yeniden çalıştırır (failedOnly: yalnız başarısız işler). Dağıtım tetikleyebilir; onay ekranı koşuyu gösterir.",
+    class: "deploy",
+    idempotent: false,
+    toolset: "pipelines-change",
+    limits: writeLimits,
+    untrustedOutput: false,
+    typicalOutputTokens: 150,
+  },
+  z.strictObject({ repo, runId: id, failedOnly: z.boolean().optional() }),
+);
+
+export const runCancel = defineTool(
+  {
+    ...pipelineBase,
+    name: "pipeline.run.cancel",
+    description: "Süren/kuyruktaki workflow koşusunu iptal eder.",
+    class: "mutate",
+    idempotent: false,
+    toolset: "pipelines-change",
+    limits: writeLimits,
+    untrustedOutput: false,
+    typicalOutputTokens: 150,
+  },
+  z.strictObject({ repo, runId: id }),
+);
+
+const headBranch = z.string().regex(/^ops\/[a-z0-9][a-z0-9._-]{0,60}$/);
+
+export const prCreate = defineTool(
+  {
+    ...scmBase,
+    name: "scm.pr.create",
+    description: "Yeni 'ops/...' dalına dosyaları yazıp TASLAK pull request açar. Hedef dala doğrudan yazılmaz; CI tanımları ve gizli dosyalar yazılamaz. Diff onay ekranında gösterilir.",
+    class: "mutate",
+    idempotent: false,
+    toolset: "scm-change",
+    limits: writeLimits,
+    untrustedOutput: false,
+    typicalOutputTokens: 200,
+  },
+  z.strictObject({
+    repo,
+    base: gitRef,
+    branch: headBranch,
+    title: z.string().min(3).max(200),
+    body: z.string().max(5_000).optional(),
+    files: z.array(z.strictObject({ path: z.string().min(1).max(300), content: z.string().max(60_000) })).min(1).max(20),
+    draft: z.boolean().optional(),
+  }),
+);
+
+export const PIPELINE_WRITE_TOOLS: readonly ToolDefinition[] = [runRerun, runCancel];
+export const SCM_WRITE_TOOLS: readonly ToolDefinition[] = [prCreate];

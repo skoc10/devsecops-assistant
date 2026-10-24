@@ -15,7 +15,7 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
   it("yüklenir, hata yok, gövde sınırları içinde; tier dizinden gelir", async () => {
     const reg = await SkillRegistry.load({ builtinDir });
     expect(reg.issues).toEqual([]);
-    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "database", "generic-diagnosis", "kubernetes", "kubernetes-change", "local-shell", "pipelines", "terraform"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "database", "generic-diagnosis", "github-change", "kubernetes", "kubernetes-change", "local-shell", "pipelines", "terraform"]);
     for (const s of reg.all()) {
       expect(s.tier).toBe("builtin");
       expect(s.tokens).toBeLessThanOrEqual(LIMITS.bodyTokens);
@@ -34,8 +34,9 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     expect(reg.get("terraform")!.tokens).toBeLessThanOrEqual(850);
     expect(reg.get("ansible")!.tokens).toBeLessThanOrEqual(850);
     // tüm yerleşik skill'ler AYNI ANDA görünürse üst sınır; gerçek oturumlarda yalnız uygun olanlar ilan edilir
-    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(340);
+    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(380);
     expect(reg.get("kubernetes-change")!.tokens).toBeLessThanOrEqual(700);
+    expect(reg.get("github-change")!.tokens).toBeLessThanOrEqual(650);
   });
 
   it("gerektirdiği adapter kayıtlı değilse skill ilan edilmez", async () => {
@@ -46,6 +47,23 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes", "kubernetes-change"]);
     reg.setAvailableAdapters(["kubernetes", "terminal"]);
     expect(reg.all().length).toBe(4);
+  });
+
+  it("kullanılabilirlik sağlayıcısı her sorguda yeniden hesaplanır (profil eklendikçe skill belirir); anyOf: en az biri yeterli", async () => {
+    const reg = await SkillRegistry.load({ builtinDir });
+    let have: string[] = [];
+    reg.setAvailabilityProvider(() => have);
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis"]);
+    have = ["github-scm"]; // yalnız SCM profili
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "github-change", "pipelines"]);
+    expect(reg.get("pipelines")).toBeTruthy();
+    have = ["github-actions"]; // yalnız pipeline profili
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "github-change", "pipelines"]);
+    have = ["kubernetes"];
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes", "kubernetes-change"]);
+    expect(reg.get("pipelines")).toBeUndefined();
+    have = [];
+    expect(reg.metadata().map((m) => m.name)).toEqual(["generic-diagnosis"]);
   });
 
   it("IaC skill'leri yalnız etkin çalışma alanının motoruna göre ilan edilir (terraform ↔ ansible)", async () => {

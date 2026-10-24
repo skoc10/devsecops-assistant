@@ -1,4 +1,4 @@
-import { OpsError, ProfileSchema } from "@ops/contracts";
+import { OpsError, ProfileSchema, riskRank } from "@ops/contracts";
 import type { Environment, Profile, RiskClass, SecretStore, TrustZone } from "@ops/contracts";
 import { credentialKey } from "./broker.ts";
 import { ambientFor, validateBindPath } from "./exec-runner.ts";
@@ -212,13 +212,14 @@ export class ProfileService {
   /** `pipeline`/`scm` profili (GitHub REST). Belirteç kasaya yazılır; profil/uyarılar belirteç içermez. */
   async addToken(req: AddTokenRequest): Promise<AddResult> {
     const ceiling: RiskClass = req.classCeiling ?? "read";
-    if (ceiling !== "read") throw new OpsError("ceiling_unsupported", `${req.kind} profilleri bu sürümde yalnız 'read' tavanlıdır (yazma Faz 2)`);
+    if (riskRank(ceiling) > riskRank("deploy")) throw new OpsError("ceiling_unsupported", `${req.kind} profilleri en çok 'deploy' tavanlı olabilir (destroy aracı yok)`);
     const scopes = [...req.allowedScopes].map((x) => x.toLowerCase()); // GitHub depo adları büyük/küçük harfe duyarsızdır
     if (scopes.length === 0) throw new OpsError("scope_required", "izinli depo belirtilmedi (allowedScopes verin: sahip/depo, sahip/* veya *)");
     for (const sc of scopes) if (!REPO_SCOPE.test(sc)) throw new OpsError("scope_invalid", `depo kapsamı geçersiz (sahip/depo | sahip/* | *): ${sc.slice(0, 60)}`);
     const imp = buildTokenCredential({ apiBase: req.apiBase, token: req.token, ...(req.caPem !== undefined ? { caPem: req.caPem } : {}) });
     const warnings = [...imp.warnings];
     if (scopes.includes("*")) warnings.push("allowedScopes '*': erişilebilen tüm depolar izinli");
+    if (riskRank(ceiling) > riskRank("read")) warnings.push(`tavan '${ceiling}': yazma araçları (PR açma${ceiling === "deploy" ? ", koşu yeniden çalıştırma" : ""}) belirtecin yazma izni olduğunda çalışır; belirteci yalnız gereken depolara ve izinlere (Contents/Pull requests/Actions) daraltın — her yazma önizleme + onaydan geçer`);
     const profile = ProfileSchema.parse({
       id: req.id,
       kind: req.kind,
@@ -229,7 +230,7 @@ export class ProfileService {
       allowedScopes: scopes,
       credentialSource: { kind: "static", ambientDependencies: [] },
       egressClass: req.egressClass ?? defaultEgressFor(req.kind, req.environment),
-      attributes: { ...(req.attributes ?? {}), role: "reader" },
+      attributes: { ...(req.attributes ?? {}), role: riskRank(ceiling) > riskRank("read") ? "writer" : "reader" },
     });
     const key = credentialKey(profile.id);
     const had = await this.store.get(key);

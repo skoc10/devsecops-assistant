@@ -1,0 +1,5 @@
+requires:
+  anyOf: [github-actions, github-scm]
+requests:
+  toolsets: [pipelines, scm, pipelines-change, scm-change, change]
+model_hint: large

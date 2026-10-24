@@ -8,7 +8,14 @@ const FrontMatter = z.object({ name: z.string(), description: z.string() }).pass
 
 /** `ops.skill.yaml`: ürüne özgü alanlar (SKILL.md `metadata`'sı yalnız string→string olduğundan ayrı dosya). */
 export const SidecarSchema = z.strictObject({
-  requires: z.strictObject({ adapters: z.array(z.string().regex(/^[a-z][a-z0-9-]*$/)).default([]) }).default({ adapters: [] }),
+  requires: z
+    .strictObject({
+      /** HEPSİ gerekir. */
+      adapters: z.array(z.string().regex(/^[a-z][a-z0-9-]*$/)).default([]),
+      /** En az BİRİ gerekir (boşsa koşul yok). */
+      anyOf: z.array(z.string().regex(/^[a-z][a-z0-9-]*$/)).default([]),
+    })
+    .default({ adapters: [], anyOf: [] }),
   requests: z.strictObject({ toolsets: z.array(z.string().regex(TOOLSET_PATTERN)).default([]) }).default({ toolsets: [] }),
   model_hint: z.enum(["small", "large"]).optional(),
   runbook: z.array(z.string().min(1).max(300)).max(30).optional(),

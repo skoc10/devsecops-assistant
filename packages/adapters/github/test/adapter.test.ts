@@ -1,3 +1,4 @@
+import type { Adapter } from "@ops/contracts";
 import { describe, expect, it } from "vitest";
 import { adapterConformance } from "@ops/testkit/conformance";
 import { BUILD_DIGEST, BUILD_REPO, BUILD_SHA, checkAdapterStructure } from "@ops/testkit";
@@ -11,19 +12,23 @@ adapterConformance("github-actions", () => new GithubActionsAdapter(resolver()))
 adapterConformance("github-scm", () => new GithubScmAdapter(resolver()));
 
 describe("yapı", () => {
-  it("araç adları/sınıflar/profil türleri; hepsi read; küçük şemalar", () => {
+  it("araç adları/sınıflar/profil türleri; okuma araçları read, değişiklik araçları ayrı toolset'te; küçük şemalar", () => {
     const p = new GithubActionsAdapter(resolver());
     const s = new GithubScmAdapter(resolver());
     expect(checkAdapterStructure(p)).toEqual([]);
     expect(checkAdapterStructure(s)).toEqual([]);
-    expect(p.manifest.tools.map((t) => t.name).sort()).toEqual(["pipeline.artifacts.list", "pipeline.job.logs", "pipeline.jobs.list", "pipeline.run.get", "pipeline.runs.list", "pipeline.workflow.definition"]);
-    expect(s.manifest.tools.map((t) => t.name).sort()).toEqual(["scm.commit.list", "scm.diff.get", "scm.file.read", "scm.pr.list"]);
-    for (const t of [...p.manifest.tools, ...s.manifest.tools]) expect(t.class).toBe("read");
+    const reads = (a: Adapter) => a.manifest.tools.filter((t) => !t.toolset.endsWith("-change"));
+    const writes = (a: Adapter) => Object.fromEntries(a.manifest.tools.filter((t) => t.toolset.endsWith("-change")).map((t) => [t.name, t.class]));
+    expect(reads(p).map((t) => t.name).sort()).toEqual(["pipeline.artifacts.list", "pipeline.job.logs", "pipeline.jobs.list", "pipeline.run.get", "pipeline.runs.list", "pipeline.workflow.definition"]);
+    expect(reads(s).map((t) => t.name).sort()).toEqual(["scm.commit.list", "scm.diff.get", "scm.file.read", "scm.pr.list"]);
+    expect(writes(p)).toEqual({ "pipeline.run.rerun": "deploy", "pipeline.run.cancel": "mutate" });
+    expect(writes(s)).toEqual({ "scm.pr.create": "mutate" });
+    for (const t of [...reads(p), ...reads(s)]) expect(t.class).toBe("read");
     expect(p.manifest.tools.every((t) => t.profileKind === "pipeline")).toBe(true);
     expect(s.manifest.tools.every((t) => t.profileKind === "scm")).toBe(true);
     for (const n of ["pipeline.job.logs"]) expect(p.manifest.tools.find((t) => t.name === n)?.untrustedOutput).toBe(true);
     for (const n of ["scm.file.read", "scm.diff.get", "scm.pr.list", "scm.commit.list"]) expect(s.manifest.tools.find((t) => t.name === n)?.untrustedOutput).toBe(true);
-    const specs = JSON.stringify([...p.manifest.tools, ...s.manifest.tools].map((t) => ({ n: t.name, d: t.description, s: t.inputSchema })));
+    const specs = JSON.stringify([...reads(p), ...reads(s)].map((t) => ({ n: t.name, d: t.description, s: t.inputSchema })));
     expect(estimateTokens(specs)).toBeLessThanOrEqual(2_800);
   });
 

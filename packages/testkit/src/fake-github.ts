@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer } from "node:https";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -10,7 +11,12 @@ export interface GhRecordedRequest {
   readonly query: Readonly<Record<string, string>>;
   /** Authorization başlığının TAMAMI (testler belirtecin yalnız doğru hosta gittiğini doğrular). */
   readonly authorization: string | null;
+  /** İstek gövdesi (yazma istekleri). */
+  readonly body: string;
 }
+
+/** Git blob SHA-1 (gerçek GitHub ile aynı hesap): testler güncelleme `sha` ön koşulunu doğrular. */
+export const gitBlobSha = (content: string): string => createHash("sha1").update(`blob ${Buffer.byteLength(content)}\0`).update(content).digest("hex");
 
 export interface GhRun {
   id: number;
@@ -74,6 +80,14 @@ export interface GhRepo {
   commits: GhCommit[];
   pulls: GhPull[];
   compare: Record<string, { status: string; ahead_by: number; behind_by: number; commits: GhCommit[]; files: GhFile[] }>;
+  /** dal adı → commit SHA (varsayılan dal otomatik vardır). */
+  branches: Record<string, string>;
+  /** Yazma ile oluşan dalların dosyaları (varsayılan dal `files` kullanır). */
+  branchFiles: Record<string, Record<string, string>>;
+  protectedBranches: string[];
+  nextPr: number;
+  /** Bu yollara PUT 422 döner (yarım kalan işlem simülasyonu). */
+  failPut: string[];
 }
 
 export interface FakeGithubOptions {
@@ -84,6 +98,8 @@ export interface FakeGithubOptions {
   readonly oauthScopes?: string;
   /** Günlükler için ayrı (blob) sunucuya yönlendir; yönlendirme hedef host'u. */
   readonly logRedirect?: "blob" | "evil" | "none";
+  /** Yazma fiilleri 403 döner ("Resource not accessible by personal access token"). */
+  readonly forbidWrites?: boolean;
 }
 
 const emptyRepo = (): GhRepo => ({
@@ -97,6 +113,11 @@ const emptyRepo = (): GhRepo => ({
   commits: [],
   pulls: [],
   compare: {},
+  branches: { main: "b".repeat(40) },
+  branchFiles: {},
+  protectedBranches: ["main"],
+  nextPr: 100,
+  failPut: [],
 });
 
 const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void => {
@@ -132,7 +153,7 @@ export class FakeGithubApi {
     let self: FakeGithubApi | undefined;
     const tls = { key: opts.pki.serverKeyPem, cert: opts.pki.serverCertPem };
     const blob = createServer(tls, (req, res) => self?.handleBlob(req, res));
-    const server = createServer(tls, (req, res) => self?.handle(req, res));
+    const server = createServer(tls, (req, res) => void self?.handle(req, res));
     await new Promise<void>((r) => blob.listen(0, "127.0.0.1", r));
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     self = new FakeGithubApi(opts, server, blob, (server.address() as AddressInfo).port, (blob.address() as AddressInfo).port);
@@ -154,7 +175,7 @@ export class FakeGithubApi {
     await Promise.all([new Promise((r) => this.server.close(r)), new Promise((r) => this.blob.close(r))]);
   }
 
-  private record(req: IncomingMessage, into: GhRecordedRequest[]): URL {
+  private record(req: IncomingMessage, into: GhRecordedRequest[], body = ""): URL {
     const u = new URL(req.url ?? "/", "https://x");
     into.push({
       method: req.method ?? "GET",
@@ -162,8 +183,94 @@ export class FakeGithubApi {
       path: u.pathname,
       query: Object.fromEntries(u.searchParams),
       authorization: typeof req.headers.authorization === "string" ? req.headers.authorization : null,
+      body,
     });
     return u;
+  }
+
+  /** Yazma fiilleri: dal oluşturma/silme, dosya yazma (sha ön koşulu), PR açma, koşu rerun/cancel. */
+  private handleWrite(method: string, u: URL, body: string, res: ServerResponse, hdr: Record<string, string>): void {
+    const p = u.pathname;
+    const m = /^\/repos\/([^/]+\/[^/]+)(\/.*)?$/.exec(p);
+    const repo = m ? this.repos.get(m[1] as string) : undefined;
+    if (!m || !repo) return send(res, 404, { message: "Not Found" }, hdr);
+    const rest = m[2] ?? "";
+    let json: Record<string, unknown> = {};
+    if (body.trim() !== "") {
+      try {
+        json = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        return send(res, 400, { message: "Problems parsing JSON" }, hdr);
+      }
+    }
+    let mr: RegExpExecArray | null;
+
+    if (method === "POST" && rest === "/git/refs") {
+      const ref = String(json["ref"] ?? "");
+      const sha = String(json["sha"] ?? "");
+      const name = /^refs\/heads\/(.+)$/.exec(ref)?.[1];
+      if (!name) return send(res, 422, { message: "Invalid ref" }, hdr);
+      if (repo.branches[name] !== undefined) return send(res, 422, { message: "Reference already exists" }, hdr);
+      const from = Object.entries(repo.branches).find(([, v]) => v === sha);
+      if (!from) return send(res, 422, { message: "Object does not exist" }, hdr);
+      repo.branches[name] = sha;
+      repo.branchFiles[name] = { ...this.filesFor(repo, sha) };
+      return send(res, 201, { ref, object: { type: "commit", sha } }, hdr);
+    }
+    mr = /^\/git\/refs\/heads\/(.+)$/.exec(rest);
+    if (method === "DELETE" && mr) {
+      const name = decodeURIComponent(mr[1] as string);
+      if (repo.branches[name] === undefined) return send(res, 404, { message: "Reference does not exist" }, hdr);
+      if (repo.protectedBranches.includes(name)) return send(res, 403, { message: "Cannot delete a protected branch" }, hdr);
+      delete repo.branches[name];
+      delete repo.branchFiles[name];
+      res.writeHead(204, hdr);
+      return void res.end();
+    }
+    mr = /^\/contents\/(.+)$/.exec(rest);
+    if (method === "PUT" && mr) {
+      const path = decodeURIComponent(mr[1] as string);
+      const branch = String(json["branch"] ?? repo.defaultBranch);
+      if (repo.branches[branch] === undefined) return send(res, 404, { message: "Branch not found" }, hdr);
+      if (repo.protectedBranches.includes(branch)) return send(res, 403, { message: "Protected branch update failed" }, hdr);
+      if (repo.failPut.includes(path)) return send(res, 422, { message: "Validation Failed (simulated)" }, hdr);
+      const files = (repo.branchFiles[branch] ??= { ...repo.files });
+      const cur = files[path];
+      if (cur !== undefined && json["sha"] !== gitBlobSha(cur)) return send(res, 409, { message: `${path} does not match ${String(json["sha"])}` }, hdr);
+      if (cur === undefined && json["sha"] !== undefined) return send(res, 422, { message: "sha provided for a new file" }, hdr);
+      const content = Buffer.from(String(json["content"] ?? ""), "base64").toString("utf8");
+      files[path] = content;
+      const commit = createHash("sha1").update(`${repo.branches[branch]}:${path}:${content}`).digest("hex");
+      repo.branches[branch] = commit;
+      repo.commits.push({ sha: commit, message: String(json["message"] ?? ""), author: "ops-bot", date: new Date().toISOString() });
+      return send(res, cur === undefined ? 201 : 200, { content: { path, sha: gitBlobSha(content) }, commit: { sha: commit } }, hdr);
+    }
+    if (method === "POST" && rest === "/pulls") {
+      const head = String(json["head"] ?? "");
+      const base = String(json["base"] ?? "");
+      if (repo.branches[head] === undefined || repo.branches[base] === undefined || head === base) return send(res, 422, { message: "Validation Failed" }, hdr);
+      const number = repo.nextPr++;
+      repo.pulls.push({ number, title: String(json["title"] ?? ""), state: "open", user: "ops-bot", head_ref: head, base_ref: base, head_sha: repo.branches[head] as string, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), merged_at: null, draft: json["draft"] === true });
+      return send(res, 201, { number, html_url: `https://github.invalid/${m[1]}/pull/${number}`, state: "open", draft: json["draft"] === true }, hdr);
+    }
+    mr = /^\/actions\/runs\/(\d+)\/(rerun|rerun-failed-jobs|cancel)$/.exec(rest);
+    if (method === "POST" && mr) {
+      const run = repo.runs.find((r) => r.id === Number(mr?.[1]));
+      if (!run) return send(res, 404, { message: "Not Found" }, hdr);
+      if (mr[2] === "cancel") {
+        if (run.status === "completed") return send(res, 409, { message: "Cannot cancel a workflow run that is completed." }, hdr);
+        run.status = "completed";
+        run.conclusion = "cancelled";
+        return send(res, 202, {}, hdr);
+      }
+      if (run.status !== "completed") return send(res, 403, { message: "Workflow is already running" }, hdr);
+      if (mr[2] === "rerun-failed-jobs" && run.conclusion !== "failure") return send(res, 403, { message: "Cannot rerun failed jobs: no failed jobs" }, hdr);
+      run.status = "queued";
+      run.conclusion = null;
+      run.run_attempt += 1;
+      return send(res, 201, {}, hdr);
+    }
+    return send(res, 404, { message: "Not Found" }, hdr);
   }
 
   private handleBlob(req: IncomingMessage, res: ServerResponse): void {
@@ -175,11 +282,28 @@ export class FakeGithubApi {
     send(res, 200, log);
   }
 
-  private handle(req: IncomingMessage, res: ServerResponse): void {
-    const u = this.record(req, this.requests);
+  private filesFor(repo: GhRepo, ref: string | null): Record<string, string> {
+    if (ref) {
+      if (repo.branchFiles[ref]) return repo.branchFiles[ref] as Record<string, string>;
+      const byName = Object.entries(repo.branches).find(([, sha]) => sha === ref);
+      if (byName && repo.branchFiles[byName[0]]) return repo.branchFiles[byName[0]] as Record<string, string>;
+    }
+    return repo.files;
+  }
+
+  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(c as Buffer);
+    const body = Buffer.concat(chunks).toString("utf8");
+    const u = this.record(req, this.requests, body);
     const hdr = { "x-ratelimit-remaining": String(this.rateLimitRemaining), ...(this.opts.oauthScopes !== undefined ? { "x-oauth-scopes": this.opts.oauthScopes } : {}) };
-    if (req.method !== "GET") return send(res, 405, { message: "Method Not Allowed" }, hdr);
+    const method = req.method ?? "GET";
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "DELETE") return send(res, 405, { message: "Method Not Allowed" }, hdr);
     if (req.headers.authorization !== `Bearer ${this.opts.token}`) return send(res, 401, { message: "Bad credentials" }, hdr);
+    if (method !== "GET") {
+      if (this.opts.forbidWrites) return send(res, 403, { message: "Resource not accessible by personal access token" }, hdr);
+      return this.handleWrite(method, u, body, res, hdr);
+    }
     const p = u.pathname;
     const q = u.searchParams;
     const per = Math.min(100, Number(q.get("per_page") ?? 30));
@@ -230,15 +354,21 @@ export class FakeGithubApi {
     mr = /^\/contents\/(.+)$/.exec(rest);
     if (mr) {
       const path = decodeURIComponent(mr[1] as string);
-      const content = repo.files[path];
+      const content = this.filesFor(repo, q.get("ref"))[path];
       if (content === undefined) return send(res, 404, { message: "Not Found" }, hdr);
-      return send(res, 200, { type: "file", path, size: Buffer.byteLength(content), sha: "f".repeat(40), encoding: "base64", content: Buffer.from(content).toString("base64") }, hdr);
+      return send(res, 200, { type: "file", path, size: Buffer.byteLength(content), sha: gitBlobSha(content), encoding: "base64", content: Buffer.from(content).toString("base64") }, hdr);
     }
     mr = /^\/compare\/(.+)$/.exec(rest);
     if (mr) {
       const c = repo.compare[decodeURIComponent(mr[1] as string)];
       if (!c) return send(res, 404, { message: "Not Found" }, hdr);
       return send(res, 200, { status: c.status, ahead_by: c.ahead_by, behind_by: c.behind_by, total_commits: c.commits.length, commits: c.commits.map(commitJson), files: c.files }, hdr);
+    }
+    mr = /^\/git\/ref\/heads\/(.+)$/.exec(rest);
+    if (mr) {
+      const name = decodeURIComponent(mr[1] as string);
+      const sha = repo.branches[name];
+      return sha ? send(res, 200, { ref: `refs/heads/${name}`, object: { type: "commit", sha } }, hdr) : send(res, 404, { message: "Not Found" }, hdr);
     }
     if (rest === "/pulls") {
       const state = q.get("state") ?? "open";

@@ -17,11 +17,15 @@ export interface GhClientOptions {
   readonly maxBytes: number;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
+  /** POST/PUT/DELETE'e izin (savunma derinliği): YALNIZ yazma araçları için `true`. */
+  readonly allowWrite?: boolean;
 }
 
 type Query = Readonly<Record<string, string | number | undefined>>;
 
 function once(opts: {
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  body?: string;
   host: string;
   port: number;
   path: string;
@@ -36,11 +40,11 @@ function once(opts: {
     if (opts.signal?.aborted) return reject(new OpsError("aborted", "çağrı iptal edildi"));
     const req = request(
       {
-        method: "GET",
+        method: opts.method ?? "GET",
         host: opts.host,
         port: opts.port,
         path: opts.path,
-        headers: opts.headers,
+        headers: opts.body !== undefined ? { ...opts.headers, "content-type": "application/json", "content-length": String(Buffer.byteLength(opts.body)) } : opts.headers,
         agent: false,
         rejectUnauthorized: true,
         minVersion: "TLSv1.2",
@@ -78,12 +82,13 @@ function once(opts: {
     req.on("timeout", () => req.destroy(new OpsError("timeout", "GitHub isteği zaman aşımına uğradı")));
     req.on("error", reject);
     opts.signal?.addEventListener("abort", () => req.destroy(new OpsError("aborted", "çağrı iptal edildi")), { once: true });
+    if (opts.body !== undefined) req.write(opts.body);
     req.end();
   });
 }
 
 /**
- * GitHub REST istemcisi (yalnız GET). Belirteç YALNIZ pinli adrese ve doğrulanmış TLS ile gider:
+ * GitHub REST istemcisi (varsayılan yalnız GET; POST/PUT/DELETE yalnız `allowWrite` ile). Belirteç YALNIZ pinli adrese ve doğrulanmış TLS ile gider:
  * adres/CA pini kimlik kullanılmadan ÖNCE denetlenir; yönlendirmeler İZLENMEZ (günlük indirmesi
  * hariç, bkz. `fetchSigned`: Authorization OLMADAN ve izinli host'a).
  */
@@ -110,12 +115,38 @@ export class GithubClient {
   }
 
   async get(path: string, query: Query = {}): Promise<GhResponse> {
+    return this.send("GET", path, query);
+  }
+
+  private requireWrite(): void {
+    if (this.opts.allowWrite !== true) throw new OpsError("write_not_allowed", "bu istemci salt okunur (yazma araçları dışında POST/PUT/DELETE yapılamaz)");
+  }
+
+  post(path: string, body: unknown): Promise<GhResponse> {
+    this.requireWrite();
+    return this.send("POST", path, {}, JSON.stringify(body));
+  }
+
+  put(path: string, body: unknown): Promise<GhResponse> {
+    this.requireWrite();
+    return this.send("PUT", path, {}, JSON.stringify(body));
+  }
+
+  del(path: string): Promise<GhResponse> {
+    this.requireWrite();
+    return this.send("DELETE", path, {});
+  }
+
+  private async send(method: "GET" | "POST" | "PUT" | "DELETE", path: string, query: Query, body?: string): Promise<GhResponse> {
+    if (!path.startsWith("/")) throw new OpsError("path_refused", "yol / ile başlamalı");
     const qs = Object.entries(query)
       .filter((e): e is [string, string | number] => e[1] !== undefined)
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
       .join("&");
     const base = this.url.pathname.replace(/\/+$/, "");
     return once({
+      method,
+      ...(body !== undefined ? { body } : {}),
       host: this.url.hostname.replace(/^\[|\]$/g, ""),
       port: this.url.port ? Number(this.url.port) : 443,
       path: `${base}${path}${qs ? `?${qs}` : ""}`,
