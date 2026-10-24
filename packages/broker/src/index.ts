@@ -1,8 +1,12 @@
 export * from "./vault/index.ts";
 export { ProfileRegistry } from "./profiles.ts";
 export type { ProfileRegistryOptions } from "./profiles.ts";
-export { importKubeconfig } from "./kubeconfig.ts";
-export type { KubeCredentialBlob, KubeImportOptions, KubeImportResult } from "./kubeconfig.ts";
+export { importKubeconfig, hashFile, resolveBinaryDefault } from "./kubeconfig.ts";
+export type { KubeCredentialBlob, KubeExecSpec, KubeImportOptions, KubeImportResult, ResolvedBinary } from "./kubeconfig.ts";
+export { BUILTIN_EXEC_TEMPLATES, matchExecSpec } from "./exec-templates.ts";
+export type { ExecMatch, ExecSpecInput, ExecTemplate, FlagRule } from "./exec-templates.ts";
+export { ExecCredentialRunner, ambientFor, parseAmbient, parseExecCredential } from "./exec-runner.ts";
+export type { ExecCredentialResult, ExecRunnerOptions } from "./exec-runner.ts";
 export { scanAmbientCredentials, scanAmbientEnv } from "./ambient.ts";
 export type { AmbientFinding } from "./ambient.ts";
 export { LocalBroker, credentialKey } from "./broker.ts";

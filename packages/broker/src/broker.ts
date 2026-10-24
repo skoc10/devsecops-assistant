@@ -9,12 +9,20 @@ import type {
   SecretSink,
   SecretStore,
 } from "@ops/contracts";
+import type { ExecCredentialRunner, ExecCredentialResult } from "./exec-runner.ts";
 import type { KubeCredentialBlob } from "./kubeconfig.ts";
 
 export const credentialKey = (profileId: string): string => `profile/${profileId}/credential`;
 
 /** Adapter'ın TLS istemcisini kurmak için gereken malzeme. Yalnız `CredentialResolver` ile okunur. */
-export type KubeCredential = Omit<KubeCredentialBlob, "v" | "kind">;
+export interface KubeCredential {
+  readonly server: string;
+  readonly caPem?: string;
+  readonly token?: string;
+  readonly clientCertPem?: string;
+  readonly clientKeyPem?: string;
+  readonly tlsServerName?: string;
+}
 
 /**
  * Tutamaç → malzeme çözücü. Bu yetenek (capability) YALNIZ composition root'ta, birinci taraf
@@ -42,7 +50,7 @@ function parseBlob(raw: Uint8Array): KubeCredentialBlob {
     throw new OpsError("credential_corrupt", "kasadaki kimlik materyali okunamadı");
   }
   const b = j as Partial<KubeCredentialBlob> | null;
-  if (!b || b.v !== 1 || b.kind !== "k8s-static" || typeof b.server !== "string") {
+  if (!b || b.v !== 1 || (b.kind !== "k8s-static" && b.kind !== "k8s-exec") || typeof b.server !== "string") {
     throw new OpsError("credential_corrupt", "kasadaki kimlik materyali tanınmıyor");
   }
   return b as KubeCredentialBlob;
@@ -51,7 +59,19 @@ function parseBlob(raw: Uint8Array): KubeCredentialBlob {
 export interface LocalBrokerOptions {
   readonly store: SecretStore;
   readonly maxConcurrentLeases?: number;
+  /** `exec` kimlik kaynakları için; yoksa exec profilleri açık hata verir. */
+  readonly exec?: ExecCredentialRunner;
+  readonly now?: () => Date;
 }
+
+interface CachedExec {
+  readonly result: ExecCredentialResult;
+  readonly validUntil: number;
+}
+/** Süresi bildirilmeyen eklenti çıktısı en çok bu kadar önbelleğe alınır. */
+const NO_EXPIRY_CACHE_MS = 30_000;
+/** Bitişe bu kadar kala yenilenir. */
+const EXPIRY_SKEW_MS = 30_000;
 
 /**
  * Yerel kimlik aracısı: kasadaki materyali çağrı başına bağlar ve bırakınca düşürür. Statik
@@ -61,6 +81,9 @@ export interface LocalBrokerOptions {
 export class LocalBroker implements CredentialBroker {
   private readonly store: SecretStore;
   private readonly maxLeases: number;
+  private readonly execRunner: ExecCredentialRunner | undefined;
+  private readonly now: () => Date;
+  private readonly execCache = new Map<string, CachedExec>();
   private readonly materials = new WeakMap<object, Material>();
   private active = 0;
   readonly resolver: CredentialResolver;
@@ -68,13 +91,22 @@ export class LocalBroker implements CredentialBroker {
   constructor(opts: LocalBrokerOptions) {
     this.store = opts.store;
     this.maxLeases = opts.maxConcurrentLeases ?? 8;
+    this.execRunner = opts.exec;
+    this.now = opts.now ?? (() => new Date());
     this.resolver = {
       k8s: (handle) => {
         const m = this.materials.get(handle);
         if (!m || !m.active) throw new OpsError("lease_inactive", "kimlik tutamacı geçersiz veya süresi dolmuş");
         if (!m.kubeBlob) throw new OpsError("credential_kind_mismatch", "tutamaç k8s kimliği taşımıyor");
-        const { v: _v, kind: _k, ...cred } = m.kubeBlob;
-        return cred;
+        const b = m.kubeBlob;
+        return {
+          server: b.server,
+          ...(b.caPem ? { caPem: b.caPem } : {}),
+          ...(b.token ? { token: b.token } : {}),
+          ...(b.clientCertPem ? { clientCertPem: b.clientCertPem } : {}),
+          ...(b.clientKeyPem ? { clientKeyPem: b.clientKeyPem } : {}),
+          ...(b.tlsServerName ? { tlsServerName: b.tlsServerName } : {}),
+        };
       },
     };
   }
@@ -84,24 +116,57 @@ export class LocalBroker implements CredentialBroker {
   }
 
   private async load(profile: Profile): Promise<Buffer> {
-    if (profile.credentialSource.kind !== "static") {
-      throw new OpsError("credential_source_unsupported", `kimlik kaynağı henüz desteklenmiyor: ${profile.credentialSource.kind}`);
+    const kind = profile.credentialSource.kind;
+    if (kind !== "static" && kind !== "exec") {
+      throw new OpsError("credential_source_unsupported", `kimlik kaynağı henüz desteklenmiyor: ${kind}`);
     }
     const raw = await this.store.get(credentialKey(profile.id));
     if (!raw) throw new OpsError("credential_missing", `kasada kimlik yok: ${profile.id}`);
     return Buffer.from(raw);
   }
 
-  /** Profil secret'larını çağrıdan ÖNCE M3'e kaydeder. */
+  /**
+   * Profil secret'larını çağrıdan ÖNCE M3'e kaydeder. `exec` kaynaklarında token henüz YOKTUR
+   * (lease anında üretilir): o profiller için `prime` hiçbir şey kaydetmez; token `acquire`'da
+   * kaydedilir ve intent denetim kaydı token içeremez (model tokenı bilmez).
+   */
   async prime(profile: Profile, sink: SecretSink): Promise<void> {
     const raw = await this.load(profile);
     try {
       const blob = parseBlob(raw);
+      if (blob.kind === "k8s-exec") return;
       if (blob.token) sink.add(`profile:${profile.id}:token`, blob.token);
       if (blob.clientKeyPem) sink.add(`profile:${profile.id}:client-key`, blob.clientKeyPem);
     } finally {
       raw.fill(0);
     }
+  }
+
+  /** Eklentiyi (gerekirse) çalıştırır; sonucu bitişe kadar bellekte önbelleğe alır. */
+  private async materializeExec(profile: Profile, blob: KubeCredentialBlob): Promise<KubeCredentialBlob> {
+    if (!blob.exec) throw new OpsError("credential_corrupt", "exec kimliği eksik");
+    if (!this.execRunner) throw new OpsError("sandbox_unavailable", "exec kimlik eklentisi için çalıştırıcı yapılandırılmamış");
+    const nowMs = this.now().getTime();
+    let hit = this.execCache.get(profile.id);
+    if (!hit || hit.validUntil <= nowMs) {
+      const result = await this.execRunner.run(blob.exec, profile.credentialSource.ambientDependencies);
+      const validUntil = result.expiresAt ? result.expiresAt.getTime() - EXPIRY_SKEW_MS : nowMs + NO_EXPIRY_CACHE_MS;
+      hit = { result, validUntil };
+      if (validUntil > nowMs) this.execCache.set(profile.id, hit);
+    }
+    const r = hit.result;
+    return {
+      ...blob,
+      ...(r.token ? { token: r.token } : {}),
+      ...(r.clientCertPem ? { clientCertPem: r.clientCertPem } : {}),
+      ...(r.clientKeyPem ? { clientKeyPem: r.clientKeyPem } : {}),
+    };
+  }
+
+  /** Önbelleği düşürür (oturum sonu / profil silme). */
+  clearExecCache(profileId?: string): void {
+    if (profileId) this.execCache.delete(profileId);
+    else this.execCache.clear();
   }
 
   async acquire(req: LeaseRequest, sink: SecretSink): Promise<Lease> {
@@ -113,6 +178,14 @@ export class LocalBroker implements CredentialBroker {
     } catch (e) {
       raw.fill(0);
       throw e;
+    }
+    if (blob.kind === "k8s-exec") {
+      try {
+        blob = await this.materializeExec(req.profile, blob);
+      } catch (e) {
+        raw.fill(0);
+        throw e;
+      }
     }
     if (blob.token) sink.add(`profile:${req.profile.id}:token`, blob.token);
     if (blob.clientKeyPem) sink.add(`profile:${req.profile.id}:client-key`, blob.clientKeyPem);

@@ -48,6 +48,9 @@ importers:
       '@ops/policy':
         specifier: workspace:*
         version: link:../../policy
+      '@ops/sandbox':
+        specifier: workspace:*
+        version: link:../../sandbox
       '@ops/testkit':
         specifier: workspace:*
         version: link:../../testkit
@@ -63,6 +66,9 @@ importers:
       '@ops/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@ops/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       yaml:
         specifier: ^2.0.0
         version: 2.9.1
@@ -122,6 +128,16 @@ importers:
         version: link:../testkit
 
   packages/redaction:
+    dependencies:
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      '@ops/testkit':
+        specifier: workspace:*
+        version: link:../testkit
+
+  packages/sandbox:
     dependencies:
       '@ops/contracts':
         specifier: workspace:*

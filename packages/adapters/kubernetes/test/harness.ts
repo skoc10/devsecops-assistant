@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { AuditLog, MemoryAuditStorage, MemoryHeadAnchor } from "@ops/audit";
-import { LocalBroker, MemorySecretStore, credentialKey, importKubeconfig } from "@ops/broker";
+import { ExecCredentialRunner, LocalBroker, MemorySecretStore, ambientFor, credentialKey, importKubeconfig } from "@ops/broker";
+import type { ExecTemplate } from "@ops/broker";
+import type { Sandbox } from "@ops/sandbox";
 import { EvidenceStore, Session, ToolGateway, ToolRegistry, createLocalAdapter, formatForModel } from "@ops/core";
 import { DEFAULT_POLICY, PolicyEngine } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
@@ -17,7 +19,19 @@ import type { Canary, TestPki } from "@ops/testkit";
 import type { Profile, ProfileInput, ToolResult } from "@ops/contracts";
 import { KubernetesAdapter } from "../src/index.ts";
 
+export interface ExecHarnessOpts {
+  readonly template: ExecTemplate;
+  readonly binaryPath: string;
+  readonly args: readonly string[];
+  readonly sandbox: Sandbox | null;
+  readonly homeDir: string;
+}
+
 export interface K8sHarnessOpts {
+  /** API'nin beklediği bearer değeri (exec eklentisi bunu üretir). Verilmezse rastgele canary. */
+  readonly kubeToken?: string;
+  /** Kimlik exec eklentisiyle üretilir (token/sertifika kasada değildir). */
+  readonly exec?: ExecHarnessOpts;
   readonly auth?: "token" | "cert";
   readonly profile?: Partial<ProfileInput>;
   /** Kasadaki kubeconfig'in sunucusunu değiştirir (pin uyuşmazlığı testi). */
@@ -28,7 +42,7 @@ export interface K8sHarnessOpts {
 export async function makeK8sHarness(opts: K8sHarnessOpts = {}) {
   const pki: TestPki = await generateTestPki();
   const canaries = {
-    kubeToken: makeCanary("kube-token"),
+    kubeToken: opts.kubeToken ? { label: "kube-token", value: opts.kubeToken } : makeCanary("kube-token"),
     secretData: makeCanary("secret-data"),
     configToken: makeCanary("config-token"),
     envPassword: makeCanary("env-password"),
@@ -43,18 +57,27 @@ export async function makeK8sHarness(opts: K8sHarnessOpts = {}) {
   const kubeconfig = buildKubeconfig({
     server: opts.vaultServer ?? api.url,
     caPem: pki.caPem,
-    ...(opts.auth === "cert"
-      ? { clientCertPem: pki.clientCertPem, clientKeyPem: pki.clientKeyPem }
-      : { token: canaries.kubeToken.value }),
+    ...(opts.exec
+      ? {
+          userExtra: {
+            exec: { apiVersion: "client.authentication.k8s.io/v1", command: opts.exec.binaryPath, args: [...opts.exec.args] },
+          },
+        }
+      : opts.auth === "cert"
+        ? { clientCertPem: pki.clientCertPem, clientKeyPem: pki.clientKeyPem }
+        : { token: canaries.kubeToken.value }),
     namespace: "payments",
   });
-  const imp = await importKubeconfig(kubeconfig);
+  const imp = await importKubeconfig(kubeconfig, opts.exec ? { execCatalog: [opts.exec.template] } : {});
   const store = new MemorySecretStore();
   const profile: Profile = makeTestProfile({
     id: "k1",
     displayName: "Payments sandbox",
     targetPin: { endpoint: api.url, ...(opts.noCaPin ? {} : { caFingerprint: pki.caFingerprint }) },
     allowedScopes: ["payments"],
+    ...(opts.exec
+      ? { credentialSource: { kind: "exec" as const, execTemplateId: opts.exec.template.id, ambientDependencies: ambientFor(opts.exec.template) } }
+      : {}),
     ...(opts.profile ?? {}),
   });
   await store.set(credentialKey(profile.id), new Uint8Array(Buffer.from(JSON.stringify(imp.blob))));
@@ -67,7 +90,12 @@ export async function makeK8sHarness(opts: K8sHarnessOpts = {}) {
   const registry = new ToolRegistry();
   const local = createLocalAdapter(evidence);
   registry.register(local.adapter, local.definitions);
-  const broker = new LocalBroker({ store });
+  const broker = new LocalBroker({
+    store,
+    ...(opts.exec
+      ? { exec: new ExecCredentialRunner({ sandbox: opts.exec.sandbox, catalog: [opts.exec.template], homeDir: opts.exec.homeDir }) }
+      : {}),
+  });
   const adapter = new KubernetesAdapter(broker.resolver);
   registry.register(adapter, adapter.definitions);
   const gateway = new ToolGateway({ registry, session, policy: new PolicyEngine(DEFAULT_POLICY), audit, broker, evidence, known });

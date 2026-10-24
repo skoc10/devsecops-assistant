@@ -20,5 +20,10 @@ jobs:
           cache: pnpm
       # Bağımlılık yaşam-döngüsü scriptleri kapalı (pnpm-workspace.yaml: onlyBuiltDependencies: [])
       - run: pnpm install --frozen-lockfile
+      # Gerçek OS sandbox testleri (S-15) için bubblewrap. Ubuntu 24.04 runner'larında AppArmor
+      # kullanıcı ad alanlarını kısıtlar; kısıt kapatılamazsa sandbox testleri otomatik ATLANIR
+      # (detectSandbox yoklaması başarısız olur) — atlandığı test çıktısında uyarı olarak görünür.
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: pnpm typecheck
       - run: pnpm test

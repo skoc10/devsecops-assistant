@@ -61,7 +61,8 @@ describe("importKubeconfig", () => {
   it.each([
     ["insecure-skip-tls-verify", { server, clusterExtra: { "insecure-skip-tls-verify": true } }, "kubeconfig_insecure_tls"],
     ["proxy-url", { server, clusterExtra: { "proxy-url": "http://proxy.invalid:3128" } }, "kubeconfig_proxy"],
-    ["exec eklentisi", { server, userExtra: { exec: { command: "aws", args: ["eks", "get-token"] } } }, "kubeconfig_exec_unsupported"],
+    ["şablon dışı exec eklentisi", { server, token: undefined as never, userExtra: { exec: { apiVersion: "client.authentication.k8s.io/v1beta1", command: "aws", args: ["eks", "get-token"] } } }, "kubeconfig_exec_unsupported"],
+    ["exec + statik token birlikte", { server, userExtra: { exec: { apiVersion: "client.authentication.k8s.io/v1beta1", command: "aws", args: ["eks", "get-token", "--cluster-name", "c"] } } }, "kubeconfig_invalid"],
     ["auth-provider", { server, userExtra: { "auth-provider": { name: "gcp" } } }, "kubeconfig_auth_provider"],
     ["basic auth", { server, userExtra: { username: "u", password: "p" } }, "kubeconfig_basic_auth"],
     ["düz http", { server: "http://127.0.0.1:8080" }, "kubeconfig_insecure_tls"],

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@ops/contracts": "workspace:*",
+    "@ops/sandbox": "workspace:*",
     "yaml": "^2.0.0",
     "zod": "^4.0.0"
   },

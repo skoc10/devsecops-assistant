@@ -85,7 +85,7 @@ export class KubernetesAdapter implements Adapter {
       contract: ADAPTER_CONTRACT,
       kind: "kubernetes",
       profileKinds: ["k8s"],
-      credentialKinds: ["static"],
+      credentialKinds: ["static", "exec"],
       capabilities: ["pagination", "table-secrets"],
       tools: K8S_READ_TOOLS.map((t) => t.descriptor),
     });
@@ -99,7 +99,7 @@ export class KubernetesAdapter implements Adapter {
     const problems: string[] = [];
     if (profile.kind !== "k8s") problems.push(`profil türü 'k8s' olmalı: ${profile.kind}`);
     if (!profile.targetPin.endpoint.startsWith("https://")) problems.push("pin uç noktası https olmalı");
-    if (profile.credentialSource.kind !== "static") problems.push(`kimlik kaynağı henüz desteklenmiyor: ${profile.credentialSource.kind}`);
+    if (profile.credentialSource.kind !== "static" && profile.credentialSource.kind !== "exec") problems.push(`kimlik kaynağı henüz desteklenmiyor: ${profile.credentialSource.kind}`);
     return problems;
   }
 

@@ -1,14 +1,29 @@
 import { X509Certificate } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { basename, isAbsolute, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { access, constants, readFile, realpath } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { OpsError } from "@ops/contracts";
 import { parse } from "yaml";
+import { BUILTIN_EXEC_TEMPLATES, matchExecSpec } from "./exec-templates.ts";
+import type { ExecTemplate } from "./exec-templates.ts";
 
 /** Kasaya yazılan, normalize edilmiş TEK bağlam. Başka bağlamlar ve gereksiz alanlar atılır. */
+export interface KubeExecSpec {
+  readonly templateId: string;
+  /** Gerçek (symlink'siz) mutlak yol; çalıştırmadan önce hash'i yeniden doğrulanır. */
+  readonly binaryPath: string;
+  readonly binarySha256: string;
+  /** `binary` hariç, şablonca doğrulanmış argümanlar. */
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}
+
 export interface KubeCredentialBlob {
   readonly v: 1;
-  readonly kind: "k8s-static";
+  /** `k8s-static`: token/sertifika kasada. `k8s-exec`: kimlik her lease'te sandbox'lı eklentiyle üretilir. */
+  readonly kind: "k8s-static" | "k8s-exec";
   readonly server: string;
+  readonly exec?: KubeExecSpec;
   readonly caPem?: string;
   readonly token?: string;
   readonly clientCertPem?: string;
@@ -16,7 +31,34 @@ export interface KubeCredentialBlob {
   readonly tlsServerName?: string;
 }
 
+export interface ResolvedBinary {
+  readonly path: string;
+  readonly sha256: string;
+}
+
+export async function hashFile(path: string): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+/** Komut adını PATH'ten (veya mutlak yoldan) çözer, symlink'leri açar ve SHA-256'sını alır. */
+export async function resolveBinaryDefault(command: string, pathEnv = process.env["PATH"] ?? ""): Promise<ResolvedBinary> {
+  const candidates = isAbsolute(command) ? [command] : pathEnv.split(":").filter(Boolean).map((d) => join(d, command));
+  for (const c of candidates) {
+    try {
+      await access(c, constants.X_OK);
+      const real = await realpath(c);
+      return { path: real, sha256: await hashFile(real) };
+    } catch {
+      /* sonraki */
+    }
+  }
+  throw new OpsError("kubeconfig_exec_unsupported", `eklenti ikilisi bulunamadı: ${basename(command).slice(0, 40)}`);
+}
+
 export interface KubeImportOptions {
+  /** `exec` kimlik eklentileri için izinli şablonlar; varsayılan ürünle gelen katalog. */
+  readonly execCatalog?: readonly ExecTemplate[];
+  readonly resolveBinary?: (command: string) => Promise<ResolvedBinary>;
   readonly context?: string;
   /** Göreli dosya başvurularının çözüleceği dizin (kubeconfig'in bulunduğu dizin). */
   readonly baseDir?: string;
@@ -29,7 +71,9 @@ export interface KubeImportResult {
   readonly namespace?: string;
   /** İlk CA sertifikasının SHA-256 parmak izi (küçük harf hex). CA yoksa yok. */
   readonly caFingerprint?: string;
-  readonly auth: "token" | "client-cert" | "token+client-cert" | "none";
+  readonly auth: "token" | "client-cert" | "token+client-cert" | "exec" | "none";
+  /** `exec` kimliği için şablon bilgisi (profilin `credentialSource`'unu kurmak için). */
+  readonly exec?: { readonly template: ExecTemplate };
   readonly blob: KubeCredentialBlob;
   /** Secret içermez. */
   readonly warnings: string[];
@@ -62,8 +106,8 @@ function decodeData(b64: string, what: string): string {
 /**
  * Kubeconfig'i içe aktarma ve normalleştirme. Yalnız TEK bağlam çıkarılır; harici dosyalar
  * (CA, istemci sertifikası/anahtarı, tokenFile) satır içine alınır ki kasa kendi kendine yeterli
- * olsun. Reddedilenler: TLS doğrulamasını kapatma, proxy, düz http, exec/auth-provider/basic
- * auth (exec şablonları WP6'da). Hata ve uyarı mesajları secret veya dosya içeriği taşımaz.
+ * olsun. Reddedilenler: TLS doğrulamasını kapatma, proxy, düz http, şablon dışı exec, auth-provider, basic
+ * auth. Hata ve uyarı mesajları secret veya dosya içeriği taşımaz.
  */
 export async function importKubeconfig(text: string, opts: KubeImportOptions = {}): Promise<KubeImportResult> {
   let doc: unknown;
@@ -97,7 +141,6 @@ export async function importKubeconfig(text: string, opts: KubeImportOptions = {
   // Reddedilen güvensiz yapılandırmalar
   if (cl["insecure-skip-tls-verify"] === true) throw new OpsError("kubeconfig_insecure_tls", "insecure-skip-tls-verify reddedilir (TLS doğrulaması kapatılamaz)");
   if (str(cl["proxy-url"])) throw new OpsError("kubeconfig_proxy", "proxy-url reddedilir (kimlik başka bir uca yönlenebilir)");
-  if (us["exec"] !== undefined) throw new OpsError("kubeconfig_exec_unsupported", "exec kimlik eklentisi henüz desteklenmiyor (argv şablonu allowlist'i WP6)");
   if (us["auth-provider"] !== undefined) throw new OpsError("kubeconfig_auth_provider", "auth-provider (eski) desteklenmiyor");
   if (us["username"] !== undefined || us["password"] !== undefined) throw new OpsError("kubeconfig_basic_auth", "basic auth reddedilir");
 
@@ -110,6 +153,29 @@ export async function importKubeconfig(text: string, opts: KubeImportOptions = {
     throw new OpsError("kubeconfig_invalid", "sunucu adresi geçersiz");
   }
   if (url.protocol !== "https:") throw new OpsError("kubeconfig_insecure_tls", "sunucu adresi https olmalı");
+
+  // exec kimlik eklentisi: yalnız şablon kataloğundaki ikili + argv + env
+  let execSpec: KubeExecSpec | undefined;
+  let execTemplate: ExecTemplate | undefined;
+  if (us["exec"] !== undefined) {
+    const ex = us["exec"];
+    if (!isObj(ex)) throw new OpsError("kubeconfig_invalid", "exec girdisi geçersiz");
+    if (us["token"] !== undefined || us["tokenFile"] !== undefined || us["client-certificate"] !== undefined || us["client-certificate-data"] !== undefined) {
+      throw new OpsError("kubeconfig_invalid", "exec ile statik kimlik birlikte olamaz");
+    }
+    const apiVersion = str(ex["apiVersion"]) ?? "";
+    if (!/^client\.authentication\.k8s\.io\/v1(?:beta1)?$/.test(apiVersion)) throw new OpsError("kubeconfig_exec_unsupported", "exec apiVersion desteklenmiyor (v1/v1beta1 beklenir)");
+    if (ex["interactiveMode"] === "Always") throw new OpsError("kubeconfig_exec_unsupported", "etkileşimli exec eklentileri desteklenmiyor");
+    const command = str(ex["command"]);
+    if (!command) throw new OpsError("kubeconfig_invalid", "exec.command yok");
+    const args = Array.isArray(ex["args"]) ? (ex["args"] as unknown[]).map((a) => (typeof a === "string" ? a : "\u0000")) : [];
+    const envList = (Array.isArray(ex["env"]) ? (ex["env"] as unknown[]) : []).filter(isObj).map((e) => ({ name: String(e["name"] ?? ""), value: String(e["value"] ?? "") }));
+    const m = matchExecSpec({ command, args, env: envList }, opts.execCatalog ?? BUILTIN_EXEC_TEMPLATES);
+    const bin = await (opts.resolveBinary ?? resolveBinaryDefault)(command);
+    execTemplate = m.template;
+    execSpec = { templateId: m.template.id, binaryPath: bin.path, binarySha256: bin.sha256, args: m.args, env: m.env };
+    warnings.push(`kimlik exec eklentisiyle üretilir: ${m.template.id}. Bulut CLI'sının kendi kimlik deposu kasa DIŞINDA kalır (ortam kimliği); eklenti yalnız OS sandbox içinde çalışır`);
+  }
 
   const baseDir = opts.baseDir ?? process.cwd();
   const read = opts.readFile ?? ((p: string) => readFile(p));
@@ -148,15 +214,16 @@ export async function importKubeconfig(text: string, opts: KubeImportOptions = {
 
   const hasToken = Boolean(token);
   const hasCert = Boolean(clientCertPem);
-  const auth: KubeImportResult["auth"] = hasToken && hasCert ? "token+client-cert" : hasToken ? "token" : hasCert ? "client-cert" : "none";
+  const auth: KubeImportResult["auth"] = execSpec ? "exec" : hasToken && hasCert ? "token+client-cert" : hasToken ? "token" : hasCert ? "client-cert" : "none";
   if (auth === "none") warnings.push("kimlik doğrulama bilgisi yok (anonim erişim)");
 
   const tlsServerName = str(cl["tls-server-name"]);
   const namespace = str(cx["namespace"]);
   const blob: KubeCredentialBlob = {
     v: 1,
-    kind: "k8s-static",
+    kind: execSpec ? "k8s-exec" : "k8s-static",
     server,
+    ...(execSpec ? { exec: execSpec } : {}),
     ...(caPem ? { caPem } : {}),
     ...(token ? { token } : {}),
     ...(clientCertPem ? { clientCertPem } : {}),
@@ -169,6 +236,7 @@ export async function importKubeconfig(text: string, opts: KubeImportOptions = {
     ...(namespace ? { namespace } : {}),
     ...(caFingerprint ? { caFingerprint } : {}),
     auth,
+    ...(execTemplate ? { exec: { template: execTemplate } } : {}),
     blob,
     warnings,
   };

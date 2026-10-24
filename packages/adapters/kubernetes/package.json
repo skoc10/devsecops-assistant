@@ -18,6 +18,7 @@
     "@ops/audit": "workspace:*",
     "@ops/core": "workspace:*",
     "@ops/policy": "workspace:*",
-    "@ops/testkit": "workspace:*"
+    "@ops/testkit": "workspace:*",
+    "@ops/sandbox": "workspace:*"
   }
 }

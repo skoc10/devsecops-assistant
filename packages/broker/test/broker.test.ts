@@ -113,7 +113,7 @@ describe("LocalBroker", () => {
 
   it("static dışındaki kaynak açık hata verir (sessizce düşmez)", async () => {
     const { broker, known, req } = await setup();
-    const exec = makeTestProfile({ id: "e1", credentialSource: { kind: "exec", ambientDependencies: [] } as never });
+    const exec = makeTestProfile({ id: "e1", credentialSource: { kind: "sts", ambientDependencies: [] } as never });
     await expect(broker.acquire({ ...req(), profile: exec }, known)).rejects.toMatchObject({ code: "credential_source_unsupported" });
   });
 

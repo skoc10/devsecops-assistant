@@ -1,6 +1,7 @@
 import { OpsError, ProfileSchema } from "@ops/contracts";
 import type { Environment, Profile, RiskClass, SecretStore, TrustZone } from "@ops/contracts";
 import { credentialKey } from "./broker.ts";
+import { ambientFor, validateBindPath } from "./exec-runner.ts";
 import { importKubeconfig } from "./kubeconfig.ts";
 import type { KubeImportOptions } from "./kubeconfig.ts";
 import type { ProfileRegistry } from "./profiles.ts";
@@ -20,6 +21,15 @@ export interface AddKubeconfigRequest {
   readonly context?: string;
   readonly baseDir?: string;
   readonly readFile?: KubeImportOptions["readFile"];
+  /** exec kimlik eklentisi için: kullanıcı şablonları ve ikili çözümleyici (test). */
+  readonly execCatalog?: KubeImportOptions["execCatalog"];
+  readonly resolveBinary?: KubeImportOptions["resolveBinary"];
+  /** Kimlik içerebilen ortam değişkenlerinden sandbox'a geçirilmesine KULLANICININ açıkça onay verdikleri (ör. AWS_ACCESS_KEY_ID). */
+  readonly ambientOptInEnv?: readonly string[];
+  /** Eklentinin ihtiyaç duyduğu ek salt-okunur mutlak dizinler (ör. ~/google-cloud-sdk). */
+  readonly ambientPaths?: readonly string[];
+  /** OS sandbox kurulu mu? false ise exec profili eklenir ama uyarılır. */
+  readonly sandboxAvailable?: boolean;
   readonly classCeiling?: RiskClass;
   readonly allowedScopes?: readonly string[];
   readonly egressClass?: TrustZone;
@@ -50,6 +60,8 @@ export class ProfileService {
       ...(req.context ? { context: req.context } : {}),
       ...(req.baseDir ? { baseDir: req.baseDir } : {}),
       ...(req.readFile ? { readFile: req.readFile } : {}),
+      ...(req.execCatalog ? { execCatalog: req.execCatalog } : {}),
+      ...(req.resolveBinary ? { resolveBinary: req.resolveBinary } : {}),
     });
     const scopes = req.allowedScopes ? [...req.allowedScopes] : imp.namespace ? [imp.namespace] : [];
     if (scopes.length === 0) {
@@ -60,6 +72,19 @@ export class ProfileService {
     if (ceiling !== "read") warnings.push(`sınıf tavanı '${ceiling}': yazma araçları Faz 2'de gelir; bu profil o zamana kadar yalnız okuma yapar`);
     if (scopes.includes("*")) warnings.push("allowedScopes '*': tüm namespace'ler izinli");
 
+    let credentialSource: Profile["credentialSource"] = { kind: "static", ambientDependencies: [] };
+    if (imp.exec) {
+      for (const p of req.ambientPaths ?? []) validateBindPath(p);
+      const ambient = ambientFor(imp.exec.template, {
+        ...(req.ambientOptInEnv ? { optInEnv: req.ambientOptInEnv } : {}),
+        ...(req.ambientPaths ? { paths: req.ambientPaths } : {}),
+      });
+      credentialSource = { kind: "exec", execTemplateId: imp.exec.template.id, ambientDependencies: ambient };
+      warnings.push(`eklentiye geçirilecek ortam bağımlılıkları (kasa dışı): ${ambient.join(", ")}`);
+      if (imp.exec.template.network === "host") warnings.push("eklenti sandbox'ta HOST AĞI kullanır (ağ allowlist'i yok; bulut kimlik servislerine erişmesi gerekir)");
+      if (req.sandboxAvailable === false) warnings.push("OS sandbox bulunamadı: bu profil sandbox kurulana kadar kimlik üretemez (bubblewrap/seatbelt)");
+    }
+
     const profile = ProfileSchema.parse({
       id: req.id,
       kind: "k8s",
@@ -68,7 +93,7 @@ export class ProfileService {
       targetPin: { endpoint: imp.server, ...(imp.caFingerprint ? { caFingerprint: imp.caFingerprint } : {}) },
       classCeiling: ceiling,
       allowedScopes: scopes,
-      credentialSource: { kind: "static" },
+      credentialSource,
       egressClass: req.egressClass ?? defaultEgressFor("k8s", req.environment),
     });
 

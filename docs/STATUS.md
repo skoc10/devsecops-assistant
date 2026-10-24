@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP6a tamamlandı (can_i, workload.health, profil doktoru, RBAC manifest üreticisi).
+Son güncelleme: WP6 tamamlandı (OS sandbox, exec kimlik eklentileri, profil doktoru).
 
 ## Faz 0
 
@@ -34,7 +34,13 @@ Son güncelleme: WP6a tamamlandı (can_i, workload.health, profil doktoru, RBAC 
 | `ProfileService` (`add`/`list`/`rm`): kimlik yalnız kasaya, hata olursa geri alma | **Enforced** (CLI bağlantısı WP7) | `packages/broker` | `broker/test/service.test.ts` |
 | Ortam kimliği taraması (yalnız varlık + izin bitleri; içerik okunmaz) | **Enforced** | `packages/broker` | `broker/test/service.test.ts` |
 | Denetim HMAC anahtarı kasada (`audit/hmac-key`) | **Enforced** | `packages/broker` | `broker/test/service.test.ts` |
-| Exec kimlik eklentisi (argv şablonu + sandbox), `connectCheck`, profil doktoru | Planned (WP6) | `packages/broker`, `packages/sandbox` | S-14, S-15 |
+| OS sandbox: bubblewrap sarmalayıcı (tüm ad alanları ayrı, `--clearenv`, boş kök + salt-okunur `/usr`, `/home`/`/root`/`/run` yok, ağ varsayılan kapalı, zaman aşımı + çıktı sınırı + süreç grubu öldürme) | **Enforced** (Linux, bubblewrap ile — gerçek süreçlerle testli); bwrap yoksa/çalışmıyorsa `detectSandbox` `null` döner ve çağıranlar fail-closed davranır | `packages/sandbox` | S-15 (`sandbox/test`) |
+| OS sandbox: macOS seatbelt (`sandbox-exec`) | **Library-only** — yalnız profil/komut kurucusu birim testli; macOS'ta ELLE doğrulanmadı (`sandbox-exec` Apple'ca deprecated, doğrulanacak) | `packages/sandbox` | `sandbox.test.ts` |
+| `UnsafeDirectRunner` (izolasyonsuz; yalnız test ve açık kullanıcı onayı) | Bilinçli zayıf — ürün yolunda varsayılan DEĞİL | `packages/sandbox` | — |
+| Sandbox ağ allowlist'i (yalnız sağlayıcı uçları) | **Planned** — şu an ağ ya tamamen kapalı ya da host ağı; bulut CLI eklentileri host ağı kullanır (belgelenmiş sınır) | `packages/sandbox` | — |
+| Exec kimlik eklentisi: kapalı şablon kataloğu (aws eks, aws-iam-authenticator, gke-gcloud-auth-plugin, kubelogin; bayrak ve değer desenleri, yinelenen/bilinmeyen bayrak, env allowlist), ikili yol + SHA-256 pini, her çalıştırmada yeniden doğrulama, yalnız sandbox içinde, stderr taşınmaz, ambient bağımlılık beyanı (kimlikli env yalnız açık onayla), bitişe göre bellek önbelleği | **Enforced** (şablonlar **doğrulanacak**: bayrak adları sürüme bağlı; gerçek bulut CLI'larına karşı denenmedi) | `packages/broker` | S-15, T17 (`broker/test/exec.test.ts`) |
+| Exec profillerinde `prime` M3'e kayıt yapamaz (token lease anında doğar); intent denetim kaydı token içeremez, çıktı/result yolu M3 ile korunur | **Enforced** (belgelenmiş sınır) | `packages/broker`, `packages/core` | exec.test.ts |
+| `connectCheck`, profil doktoru | **Enforced** (WP6a) | `packages/adapters/kubernetes` | S-14 |
 | Kubernetes okuma adapter'ı: `k8s.profile.describe`, `resources.list/get/describe`, `events.list`, `pods.logs`; yalnız GET; kompakt projeksiyon + `select`; kapalı tür tablosu; namespace/ad DNS regex'i | **Enforced** (testli, sahte API'ye karşı gerçek TLS) — gerçek kümeye karşı (`kind`) denenmedi, I-01 WP6'da | `packages/adapters/kubernetes` | `adapters/kubernetes/test/adapter.test.ts` |
 | Kimlik pini: sunucu URL'si ve CA parmak izi kimlik gönderilmeden ÖNCE doğrulanır; yönlendirme izlenmez; yanıt boyutu sınırlı | **Enforced** | `packages/adapters/kubernetes` | S-04, S-12 |
 | `Secret` türü `as=Table` ile okunur: değerler sunucudan hiç çekilmez; ek olarak ConfigMap secret-benzeri anahtarları, `managedFields`, `last-applied-configuration` atılır; M1 `k8s` profili son hat | **Enforced** | `packages/adapters/kubernetes` | S-06 (adapter ayağı) |
@@ -54,5 +60,5 @@ Tümü **Planned**. Ayrıntı: [design/10-phases.md](design/10-phases.md).
 ## Bilinen eksikler ve belgelenmiş sınırlar
 
 - Gerçek Cursor SDK spike'ı (§6.4-11) geçerli bir Cursor API anahtarı ve hedef işletim sistemi gerektirir; otomatik testler sahte (mock) SDK ile koşar.
-- OS sandbox (bubblewrap/seatbelt) bu geliştirme ortamında kurulu değildir; sandbox sarmalayıcı komut kurucusu ve tespit mantığı test edilir, gerçek izolasyon testi sandbox'lı ortamda elle yapılmalıdır.
+- OS sandbox: Linux'ta bubblewrap ile GERÇEK izolasyon testleri koşar (bwrap yoksa testler uyarıyla atlanır; CI'da kurulur). macOS seatbelt bu ortamda çalıştırılamadı: profil kurucusu birim testli, gerçek davranış macOS'ta elle doğrulanmalıdır. Windows desteklenmez (Faz 3).
 - Lisans henüz seçilmedi (`UNLICENSED`); depo sahibi karar verecek.
