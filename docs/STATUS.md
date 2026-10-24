@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP6 tamamlandı (OS sandbox, exec kimlik eklentileri, profil doktoru).
+Son güncelleme: WP7a tamamlandı (orkestratör, skill'ler, defter, kanıt atfı, token ölçümü).
 
 ## Faz 0
 
@@ -50,7 +50,14 @@ Son güncelleme: WP6 tamamlandı (OS sandbox, exec kimlik eklentileri, profil do
 | Salt okunur RBAC manifest üreticisi (uygulamaz; Secret/exec/proxy/yazma yok; üretilen kurallar analizörden `read` geçer) | **Enforced** | `packages/adapters/kubernetes` | `rbac.test.ts` |
 | Conformance paketi v0 (yapı + davranış: sızıntı, kapsam reddi, pin, çıktı tavanı/projeksiyon) | **Enforced** (kubernetes için); genel davranış paketi diğer adapter'larla genişler | `packages/testkit`, `packages/adapters/kubernetes` | C-xx |
 | Sandbox sarmalayıcı, exec eklentisi şablonu, doktor | Planned | `packages/sandbox`, `packages/broker` | S-14, S-15 |
-| Orkestratör, `opsd`, `ops chat`, tembel skill, token ölçümü | Planned | `packages/core`, `packages/cli`, `packages/skills` | E-01, B-01, B-04 |
+| Orkestratör (`loopOwner=host`): PEP üzerinden araç çağrısı, kullanıcı girdisi M2/M3, egress denetimi (bağlam ↔ sağlayıcı bölgesi, fail-closed), write-ahead `model_call` denetimi, paralel okuma, model turu/bütçe sınırları, profil enjeksiyonu (tür başına tek bağlı profil) | **Enforced** | `packages/core` | `core/test/orchestrator.test.ts` |
+| Kanıt atıf doğrulayıcı: `[ev-N]` kimlikleri Evidence Store'da olmalı; geçersizse bir kez düzeltme isteği, sonra cevap işaretlenir. Yalnız SÖZDİZİMSEL; anlamsal ilgiyi insan değerlendirir | **Enforced** (sözdizimsel kısım) | `packages/core` | `orchestrator.test.ts`, `ledger.test.ts` |
+| Bağlam defteri: eşikte eski turlar deterministik özetle (hedef + kanıt satırları) değişir, eski araç gövdeleri referansa döner | **Enforced** | `packages/core` | `ledger.test.ts` |
+| Önek kararlılığı (B-05): sistem istemi sabit önek + değişken son ek; araç listesi etkinleşme sırasıyla yalnız sona büyür | **Enforced**; sağlayıcı istem önbelleği (cache_control) kullanımı WP8/Faz 1 | `packages/core` | B-05 |
+| Token ölçümü: model çağrısı başına `tokens`, araç sonucu tahmini; `usageFromAudit`/`formatUsage` (denetimden `ops usage`) | **Enforced** (CLI komutu WP7b) | `packages/core` | `ledger.test.ts` |
+| Tembel skill yükleyici: `SKILL.md` + `ops.skill.yaml` (katı), güven katmanı dizinden, linter (ad, açıklama, 500 satır / 5000 token), gerektirdiği adapter yoksa gizlenir, en çok 2 etkin gövde, `scripts/` ASLA çalışmaz, imported skill çıktısı untrusted | **Enforced** (B-02 çekirdeği; tam linter Faz 1) | `packages/skills` | `skills/test` |
+| Yerleşik skill'ler: `kubernetes`, `generic-diagnosis` (meta blok ≤ 250 token, sabit önek ≤ 3k token — B-01) | **Enforced** | `skills/` | B-01 |
+| `opsd` (UDS), `ops chat` CLI, bileşim kökü, E-01, B-04 | Planned (WP7b) | `packages/cli` | E-01, B-04 |
 | Sağlayıcılar (OpenAI-uyumlu, Cursor runtime) | Planned | `packages/providers`, `packages/runtimes` | S-10, S-13 |
 
 ## Faz 1 / 1b / 2 / 3

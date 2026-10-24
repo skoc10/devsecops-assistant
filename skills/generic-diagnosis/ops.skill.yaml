@@ -1,0 +1,5 @@
+requires:
+  adapters: []
+requests:
+  toolsets: []
+model_hint: large

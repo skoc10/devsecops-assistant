@@ -8,6 +8,15 @@ import {
 } from "@ops/contracts";
 import type { ContextLabel, Profile, ProfileKind, Sensitivity, TrustZone, Usage } from "@ops/contracts";
 
+export interface ActiveSkill {
+  readonly name: string;
+  readonly tier: "builtin" | "user" | "imported";
+  readonly body: string;
+  readonly tokens: number;
+  /** Skill'in talep ettiği araç setleri (PEP yine her çağrıyı ayrıca karara bağlar). */
+  readonly toolsets: readonly string[];
+}
+
 export interface SessionUsage {
   toolCalls: number;
   /** Model çağrılarının raporladığı toplam (girdi+çıktı) token. */
@@ -29,6 +38,9 @@ export class Session {
   context: ContextLabel = emptyContextLabel();
   readonly usage: SessionUsage = { toolCalls: 0, sessionTokens: 0, resultTokens: 0 };
   readonly activeToolsets = new Set<string>(["core"]);
+  /** Etkin skill gövdeleri (en çok `maxActiveSkills`; en eski çıkarılır). */
+  readonly activeSkills = new Map<string, ActiveSkill>();
+  static readonly BASE_TOOLSETS: readonly string[] = ["core"];
   private readonly bound = new Map<ProfileKind, Profile>();
 
   constructor(id: string = randomUUID()) {
@@ -56,6 +68,34 @@ export class Session {
   getBound(profileId: string): Profile | undefined {
     for (const p of this.bound.values()) if (p.id === profileId) return p;
     return undefined;
+  }
+
+  /** Tür başına en çok bir profil bağlı olduğundan belirsizlik yoktur. */
+  boundByKind(kind: ProfileKind): Profile | undefined {
+    return this.bound.get(kind);
+  }
+
+  /**
+   * Skill gövdesini etkinleştirir ve araç setlerini açar. Aynı anda en çok `max` gövde etkindir
+   * (token ekonomisi); fazlası en eskiden başlayarak çıkarılır. Çıkarılanların adlarını döndürür.
+   */
+  activateSkill(skill: ActiveSkill, max = 2): string[] {
+    this.activeSkills.delete(skill.name);
+    this.activeSkills.set(skill.name, skill);
+    const evicted: string[] = [];
+    while (this.activeSkills.size > max) {
+      const oldest = this.activeSkills.keys().next().value as string;
+      this.activeSkills.delete(oldest);
+      evicted.push(oldest);
+    }
+    this.recomputeToolsets();
+    return evicted;
+  }
+
+  private recomputeToolsets(): void {
+    this.activeToolsets.clear();
+    for (const t of Session.BASE_TOOLSETS) this.activeToolsets.add(t);
+    for (const s of this.activeSkills.values()) for (const t of s.toolsets) this.activeToolsets.add(t);
   }
 
   boundProfiles(): Profile[] {

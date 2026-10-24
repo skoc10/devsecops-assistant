@@ -1,0 +1,19 @@
+{
+  "name": "@ops/skills",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/contracts": "workspace:*",
+    "@ops/core": "workspace:*",
+    "yaml": "^2.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@ops/testkit": "workspace:*"
+  }
+}

@@ -81,9 +81,14 @@ describe("ToolRegistry", () => {
     const names = (sets: string[]): string[] => h.registry.specsFor(sets).map((s) => s.name);
     expect(names(["core"])).toEqual(["evidence.get", "evidence.search"]);
     const k8s = names(["core", "k8s-core"]);
-    expect(k8s).toEqual([...k8s].sort((x, y) => x.localeCompare(y)));
+    // araç setleri etkinleşme sırasıyla, her set içinde ada göre; yeni set yalnız SONA eklenir
+    expect(k8s.slice(0, 2)).toEqual(["evidence.get", "evidence.search"]);
+    const rest = k8s.slice(2);
+    expect(rest).toEqual([...rest].sort((x, y) => x.localeCompare(y)));
     expect(k8s).not.toContain("db.query.read");
-    expect(names(["k8s-core", "core"])).toEqual(k8s);
+    expect(names(["core", "k8s-core"])).toEqual(k8s);
+    expect(names(["core", "k8s-core", "db"]).slice(0, k8s.length)).toEqual(k8s);
+    expect(names(["k8s-core", "core"])).not.toEqual(k8s);
   });
 });
 

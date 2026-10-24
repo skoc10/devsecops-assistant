@@ -50,18 +50,27 @@ export class ToolRegistry {
   }
 
   /**
-   * Etkin araç setlerine ait araç şemaları. Sıra DETERMİNİSTİKTİR (ada göre): önek kararlılığı ve
-   * istem önbelleği için (B-05).
+   * Etkin araç setlerine ait araç şemaları. Sıra DETERMİNİSTİKTİR: araç setleri etkinleşme
+   * sırasıyla, her set içinde ada göre. Yeni bir set etkinleşince liste YALNIZ SONA eklenir:
+   * önek bayt-bayt aynı kalır ve istem önbelleği isabeti korunur (B-05).
    */
   specsFor(toolsets: Iterable<string>): ToolSpec[] {
-    const wanted = new Set(toolsets);
-    return this.all()
-      .filter((t) => wanted.has(t.def.descriptor.toolset))
-      .map((t) => ({
-        name: t.def.descriptor.name,
-        description: t.def.descriptor.description,
-        inputSchema: t.def.descriptor.inputSchema,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const out: ToolSpec[] = [];
+    const seen = new Set<string>();
+    for (const ts of toolsets) {
+      if (seen.has(ts)) continue;
+      seen.add(ts);
+      out.push(
+        ...this.all()
+          .filter((t) => t.def.descriptor.toolset === ts)
+          .map((t) => ({
+            name: t.def.descriptor.name,
+            description: t.def.descriptor.description,
+            inputSchema: t.def.descriptor.inputSchema,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      );
+    }
+    return out;
   }
 }

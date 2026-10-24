@@ -147,6 +147,25 @@ importers:
         specifier: workspace:*
         version: link:../testkit
 
+  packages/skills:
+    dependencies:
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@ops/core':
+        specifier: workspace:*
+        version: link:../core
+      yaml:
+        specifier: ^2.0.0
+        version: 2.9.1
+      zod:
+        specifier: ^4.0.0
+        version: 4.6.7
+    devDependencies:
+      '@ops/testkit':
+        specifier: workspace:*
+        version: link:../testkit
+
   packages/testkit:
     dependencies:
       '@ops/contracts':
