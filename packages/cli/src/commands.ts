@@ -7,7 +7,7 @@ import { FileAuditStorage, FileHeadAnchor, verifyAudit } from "@ops/audit";
 import { scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
 import { ENVIRONMENTS, OpsError, RISK_CLASSES } from "@ops/contracts";
 import type { Environment, ModelProvider, RiskClass, SecretStore } from "@ops/contracts";
-import { formatUsage, usageFromAudit } from "@ops/core";
+import { ChangeStore, formatUsage, usageFromAudit } from "@ops/core";
 import { McpBridgeAdapter, parseMcpManifest } from "@ops/mcp-bridge";
 import { stripControlChars } from "@ops/redaction";
 import { WORKSPACE_ENGINES, WorkspaceManager, WorkspaceRegistry } from "@ops/workspace";
@@ -73,6 +73,7 @@ const USAGE = [
   "  workspace list | rm ID | snapshots [ID]",
   "  workspace diff ID [--session S] [--path P]      ajanın değişiklikleri (anlık kopya ↔ özgün HEAD)",
   "  workspace export ID --out DOSYA [--session S]   değişiklikleri `git apply` ile uygulanabilir yama olarak yaz (depoya YAZMAZ)",
+  "  change list | show ID | export ID --out DOSYA   ajanın önerdiği değişiklikler (ChangeSet); uygulamak size aittir",
   "  mcp check [SUNUCU]                 OPS_HOME/mcp-servers.yaml sunucularını sandbox'ta başlatıp manifestle karşılaştır (araç çağırmaz)",
   "  daemon [--workspace ID]            opsd'yi başlat (UDS)",
   "  chat [--embedded] [--workspace ID] sohbet (opsd'ye bağlanır; --embedded süreç içi)",
@@ -261,6 +262,37 @@ async function workspaceCommand(c: CliEnv, sub: string | undefined, rest: string
   }
 }
 
+async function changeCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
+  const store = new ChangeStore(c.paths.changesDir);
+  if (sub === "list") {
+    const all = await store.list();
+    out(c, all.length === 0 ? "(değişiklik önerisi yok)" : all.map((x) => `${x.id}\t${x.kind}\t${x.createdAt}\t${stripControlChars(x.title).slice(0, 80)}`).join("\n"));
+    return 0;
+  }
+  if (sub === "show" || sub === "export") {
+    const { values, positionals } = parseArgs({ args: rest, options: { out: { type: "string" } }, allowPositionals: true, strict: true });
+    const id = positionals[0];
+    if (!id) throw new OpsError("usage", `kullanım: ops change ${sub} ID${sub === "export" ? " --out DOSYA" : ""}`);
+    const { changeSet: cs, content } = await store.get(id);
+    if (sub === "show") {
+      out(c, `# ${stripControlChars(cs.title)}  [${cs.kind}]  ${cs.id}  (${cs.createdAt}, oturum ${cs.sessionId})`);
+      out(c, stripControlChars(cs.summary));
+      for (const e of cs.evidence) out(c, `kanıt ${e.id} (${e.tool}): ${stripControlChars(e.summary).slice(0, 160)}`);
+      if (cs.rollback) out(c, `geri alma: ${stripControlChars(cs.rollback)}`);
+      out(c, `--- ${cs.file.name} (sha256 ${cs.file.sha256.slice(0, 12)}…, ${cs.file.bytes} bayt) ---`);
+      out(c, stripControlChars(content).trimEnd());
+      return 0;
+    }
+    if (!values.out) throw new OpsError("usage", "--out DOSYA gerekli");
+    await writeFile(values.out, content, { flag: "wx", mode: 0o600 }).catch((e: NodeJS.ErrnoException) => {
+      throw new OpsError("export_failed", e.code === "EEXIST" ? "hedef dosya zaten var (üzerine yazılmaz)" : `yazılamadı: ${e.code ?? "?"}`);
+    });
+    out(c, `${cs.file.name} (${cs.file.bytes} bayt) yazıldı: ${values.out}`);
+    return 0;
+  }
+  throw new OpsError("usage", "change alt komutu: list | show | export");
+}
+
 async function mcpCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
   if (sub !== "check") throw new OpsError("usage", "kullanım: ops mcp check [SUNUCU]");
   let text: string;
@@ -439,6 +471,9 @@ export async function runCli(c: CliEnv): Promise<number> {
 
       case "workspace":
         return await workspaceCommand(c, sub, rest);
+
+      case "change":
+        return await changeCommand(c, sub, rest);
 
       case "mcp":
         return await mcpCommand(c, sub, rest);

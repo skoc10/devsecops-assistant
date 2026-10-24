@@ -6,7 +6,7 @@ export { DEFAULT_LIMITS, createSnapshot, loadSnapshot } from "./snapshot.ts";
 export type { Snapshot, SnapshotLimits, SnapshotManifest } from "./snapshot.ts";
 export { DEFAULT_FS_LIMITS, WorktreeFs } from "./fs.ts";
 export type { FileChange, FsLimits } from "./fs.ts";
-export { diffFile } from "./diff.ts";
+export { diffFile } from "@ops/diff";
 export { WorkspaceManager } from "./manager.ts";
 export type { SnapshotInfo, WorkspaceManagerOptions } from "./manager.ts";
 export { WORKSPACE_TOOLS, WorkspaceAdapter } from "./tools.ts";

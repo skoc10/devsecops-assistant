@@ -79,9 +79,23 @@ describe("E-01: Faz 0 kabul senaryosu (scripted model + sahte küme)", () => {
     expect(fx.api.requests.some((q) => q.method !== "GET" && !q.path.includes("selfsubject"))).toBe(false);
     // log çıktısı taint'li: bağlam artık untrusted
     expect(fx.rt.session.context.tainted).toBe(true);
-    // denetimde ret kayıtları var
+    // denetimde ret kayıtları var (değişiklik araç seti etkin değil → yürütücü daha PEP'e girmeden reddeder)
     const recs = await readAuditRecords(fx.rt.paths.auditLog);
-    expect(recs.filter((r) => r.event === "result" && r.decision === "deny" && r.reasonCode === "unknown_tool").length).toBe(2);
+    expect(recs.filter((r) => r.decision === "deny" && r.reasonCode === "unknown_tool").length).toBe(2);
+  });
+
+  it("S-07b: değişiklik skill'i yüklenip araç seti AÇILSA bile read tavanlı profilde silme/ölçekleme PEP'te reddedilir; küme değişmez", async () => {
+    await fx.rt.bindProfile("payments-sbx");
+    const provider = new ScriptedProvider([
+      { message: { content: "", toolCalls: [{ id: "a", name: "skill.load", args: { name: "kubernetes-change" } }] }, usage: { inputTokens: 0, outputTokens: 5, cacheReadTokens: 0 }, stopReason: "tool_use" },
+      { message: { content: "", toolCalls: [{ id: "b", name: "k8s.pods.logs", args: { namespace: "payments", pod: "api-7d9c-a1", since: "30m" } }] }, usage: { inputTokens: 0, outputTokens: 5, cacheReadTokens: 0 }, stopReason: "tool_use" },
+      { message: { content: "", toolCalls: [{ id: "c", name: "k8s.resources.delete", args: { namespace: "payments", kind: "Deployment", name: "api", cited: ["ev-1"] } }, { id: "d", name: "k8s.scale", args: { namespace: "payments", kind: "Deployment", name: "api", replicas: 0, cited: ["ev-1"] } }, { id: "e", name: "k8s.apply", args: { manifest: "apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: api, namespace: payments }\nspec: { replicas: 0 }\n", cited: ["ev-1"] } }] }, usage: { inputTokens: 0, outputTokens: 5, cacheReadTokens: 0 }, stopReason: "tool_use" },
+      (req) => say(`reddedildi: ${(req.messages.at(-1) as { content: string }).content.slice(0, 80)}`),
+    ]);
+    const ev = await run(fx, provider, "logları incele ve düzelt");
+    const results = ev.filter((e) => e.type === "tool_result") as Extract<OrchestratorEvent, { type: "tool_result" }>[];
+    expect(results.slice(2).map((r) => [r.status, r.reasonCode])).toEqual([["denied", "ceiling_exceeded"], ["denied", "ceiling_exceeded"], ["denied", "ceiling_exceeded"]]);
+    expect(fx.api.requests.some((q) => q.method !== "GET" && !q.path.includes("selfsubject"))).toBe(false);
   });
 
   it("S-13: sağlayıcı bölgesi (local ↔ third-party-cloud) değişince politika kararları ve araç sonuçları aynı", async () => {

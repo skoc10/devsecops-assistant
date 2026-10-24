@@ -18,6 +18,22 @@ function fingerprint(v: unknown): string {
   return createHash("sha256").update(JSON.stringify(sort(v))).digest("hex");
 }
 
+/**
+ * Mutasyon+ araçların modele gösterilen şemasına eklenen ayrılmış alan: modelin, işlemi dayandırdığı kanıt
+ * kimlikleri. `ToolExecutor` bunu şemadan ÖNCE ayırır (araç şemaları `additionalProperties: false` kalır).
+ */
+export const CITED_PROPERTY = {
+  type: "array",
+  items: { type: "string", pattern: "^ev-\\d+$" },
+  maxItems: 10,
+  description: "Bu işlemi destekleyen kanıt kimlikleri (ev-N); hedef kaynağı içeren taze kanıt olmalı",
+} as const;
+
+function withCited(schema: Record<string, unknown>): Record<string, unknown> {
+  const props = (schema["properties"] ?? {}) as Record<string, unknown>;
+  return { ...schema, properties: { ...props, cited: CITED_PROPERTY } };
+}
+
 /** Araç kayıt defteri: manifest ve çalışma zamanı tanımları birebir uyumlu olmak zorundadır. */
 export class ToolRegistry {
   private readonly tools = new Map<string, RegisteredTool>();
@@ -66,7 +82,7 @@ export class ToolRegistry {
           .map((t) => ({
             name: t.def.descriptor.name,
             description: t.def.descriptor.description,
-            inputSchema: t.def.descriptor.inputSchema,
+            inputSchema: t.def.descriptor.class === "read" ? t.def.descriptor.inputSchema : withCited(t.def.descriptor.inputSchema),
           }))
           .sort((a, b) => a.name.localeCompare(b.name)),
       );

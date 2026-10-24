@@ -64,6 +64,8 @@ export interface FakeK8sOptions {
   readonly now?: () => Date;
   /** Kimliği doğrulanan kullanıcı adı (selfsubjectreviews yanıtı). */
   readonly username?: string;
+  /** Yazma fiilleri (PATCH/DELETE) 403 Forbidden döner (salt okunur RBAC simülasyonu). */
+  readonly readOnly?: boolean;
 }
 
 export interface FakeRule {
@@ -186,7 +188,9 @@ export class FakeK8sApi {
   add(obj: K8sObject): this {
     const res = RESOURCES.find((r) => r.kind === obj.kind);
     if (!res) throw new Error(`sahte API bu türü bilmiyor: ${obj.kind}`);
-    const full: K8sObject = { ...obj, apiVersion: obj.apiVersion ?? res.apiVersion };
+    // gerçek API sunucusu her nesneye uid ve resourceVersion verir (TOCTOU/ön koşul testleri bunlara dayanır)
+    const meta = { ...obj.metadata, uid: obj.metadata["uid"] ?? `uid-${obj.metadata.name}`, resourceVersion: obj.metadata["resourceVersion"] ?? "1" };
+    const full: K8sObject = { ...obj, apiVersion: obj.apiVersion ?? res.apiVersion, metadata: meta };
     this.store.set(this.key(obj.kind, obj.metadata.namespace, obj.metadata.name), full);
     return this;
   }
@@ -254,7 +258,13 @@ export class FakeK8sApi {
     }
 
     const method = req.method ?? "GET";
-    if (method === "POST") return this.handlePost(url.pathname, body, res);
+    if (method === "POST") return this.handlePost(url.pathname, body, res, query);
+    if (method === "PATCH" || method === "DELETE") {
+      if (this.opts.readOnly) return this.send(res, 403, statusBody(403, "Forbidden", `${method === "PATCH" ? "patch" : "delete"} is forbidden for this user`));
+      return method === "PATCH"
+        ? this.handlePatch(url.pathname, query, body, String(req.headers["content-type"] ?? ""), res)
+        : this.handleDelete(url.pathname, query, body, res);
+    }
     if (method !== "GET") return this.send(res, 405, statusBody(405, "MethodNotAllowed", "method not allowed"));
 
     if (url.pathname === "/version") return this.send(res, 200, JSON.stringify({ major: "1", minor: "31", gitVersion: "v1.31.0-fake" }));
@@ -311,6 +321,7 @@ export class FakeK8sApi {
     if (name) {
       const obj = this.store.get(this.key(resource.kind, resource.namespaced ? ns : undefined, name));
       if (!obj) return this.send(res, 404, statusBody(404, "NotFound", `${resource.plural} "${name}" not found`));
+      if (sub === "scale") return this.send(res, 200, JSON.stringify(this.scaleOf(obj)));
       if (asTable) return this.send(res, 200, JSON.stringify(this.table(resource, [obj])));
       return this.send(res, 200, JSON.stringify(obj));
     }
@@ -351,7 +362,191 @@ export class FakeK8sApi {
     return { kind: "Table", apiVersion: "meta.k8s.io/v1", columnDefinitions, rows };
   }
 
-  private handlePost(path: string, body: string, res: ServerResponse): void {
+  // ---- yazma (Faz 2b): iyimser eşzamanlılık (resourceVersion), dryRun, silme ön koşulları -------
+
+  private route(pathname: string): { res: Res; ns: string | undefined; name: string | undefined; sub: string | undefined } | null {
+    const segs = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    let rest: string[];
+    let apiVersion: string;
+    if (segs[0] === "api" && segs[1] === "v1") {
+      apiVersion = "v1";
+      rest = segs.slice(2);
+    } else if (segs[0] === "apis" && segs.length >= 3) {
+      apiVersion = `${segs[1]}/${segs[2]}`;
+      rest = segs.slice(3);
+    } else return null;
+    let ns: string | undefined;
+    if (rest[0] === "namespaces" && rest.length >= 3) {
+      ns = rest[1];
+      rest = rest.slice(2);
+    }
+    const res = RESOURCES.find((r) => r.plural === rest[0] && r.apiVersion === apiVersion);
+    return res ? { res, ns, name: rest[1], sub: rest[2] } : null;
+  }
+
+  private rvOf(o: K8sObject): number {
+    return Number(o.metadata["resourceVersion"] ?? 1);
+  }
+
+  private scaleOf(o: K8sObject): unknown {
+    const spec = (o["spec"] ?? {}) as Record<string, unknown>;
+    return {
+      kind: "Scale",
+      apiVersion: "autoscaling/v1",
+      metadata: { name: o.metadata.name, namespace: o.metadata.namespace, resourceVersion: String(this.rvOf(o)), uid: o.metadata["uid"] },
+      spec: { replicas: spec["replicas"] ?? 1 },
+      status: { replicas: spec["replicas"] ?? 1 },
+    };
+  }
+
+  private merge(a: unknown, b: unknown): unknown {
+    if (b === null) return undefined;
+    if (b === undefined) return a;
+    if (Array.isArray(b) || typeof b !== "object") return b;
+    const out: Record<string, unknown> = a && typeof a === "object" && !Array.isArray(a) ? { ...(a as Record<string, unknown>) } : {};
+    for (const [k, v] of Object.entries(b as Record<string, unknown>)) {
+      const m = this.merge(out[k], v);
+      if (m === undefined) delete out[k];
+      else out[k] = m;
+    }
+    return out;
+  }
+
+  private handlePatch(path: string, query: Record<string, string>, body: string, contentType: string, res: ServerResponse): void {
+    const r = this.route(path);
+    if (!r || !r.name) return this.send(res, 404, statusBody(404, "NotFound", "the server could not find the requested resource"));
+    if (contentType.startsWith("application/json-patch+json")) {
+      const cur0 = this.store.get(this.key(r.res.kind, r.res.namespaced ? r.ns : undefined, r.name));
+      if (!cur0) return this.send(res, 404, statusBody(404, "NotFound", `${r.res.plural} "${r.name}" not found`));
+      let ops: unknown;
+      try {
+        ops = JSON.parse(body);
+      } catch {
+        return this.send(res, 400, statusBody(400, "BadRequest", "invalid patch body"));
+      }
+      const out = this.applyJsonPatch(cur0, ops);
+      if (!out.ok) return this.send(res, out.code, statusBody(out.code, "Invalid", out.msg));
+      out.obj.metadata = { ...out.obj.metadata, resourceVersion: String(this.rvOf(cur0) + 1) };
+      if (query["dryRun"] !== "All") this.store.set(this.key(r.res.kind, r.res.namespaced ? r.ns : undefined, r.name), out.obj);
+      return this.send(res, 200, JSON.stringify(out.obj));
+    }
+    let patch: Record<string, unknown>;
+    try {
+      patch = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      return this.send(res, 400, statusBody(400, "BadRequest", "invalid patch body"));
+    }
+    const isApply = contentType.startsWith("application/apply-patch+yaml");
+    if (!isApply && !contentType.startsWith("application/merge-patch+json") && !contentType.startsWith("application/strategic-merge-patch+json")) {
+      return this.send(res, 415, statusBody(415, "UnsupportedMediaType", `unsupported patch type ${contentType.slice(0, 60)}`));
+    }
+    if (isApply && !query["fieldManager"]) return this.send(res, 400, statusBody(400, "BadRequest", "fieldManager is required for apply"));
+    const key = this.key(r.res.kind, r.res.namespaced ? r.ns : undefined, r.name);
+    const cur = this.store.get(key);
+    const dry = query["dryRun"] === "All";
+
+    const wantedRv = (patch["metadata"] as Record<string, unknown> | undefined)?.["resourceVersion"];
+    if (wantedRv !== undefined && cur && String(wantedRv) !== String(this.rvOf(cur))) {
+      return this.send(res, 409, statusBody(409, "Conflict", `Operation cannot be fulfilled on ${r.res.plural} "${r.name}": the object has been modified; please apply your changes to the latest version and try again`));
+    }
+    if (!cur && !isApply) return this.send(res, 404, statusBody(404, "NotFound", `${r.res.plural} "${r.name}" not found`));
+
+    let next: K8sObject;
+    if (r.sub === "scale") {
+      if (!cur) return this.send(res, 404, statusBody(404, "NotFound", `${r.res.plural} "${r.name}" not found`));
+      const replicas = (patch["spec"] as Record<string, unknown> | undefined)?.["replicas"];
+      if (typeof replicas !== "number") return this.send(res, 422, statusBody(422, "Invalid", "spec.replicas required"));
+      next = this.merge(cur, { spec: { replicas } }) as K8sObject;
+    } else if (r.sub !== undefined) {
+      return this.send(res, 404, statusBody(404, "NotFound", "unknown subresource"));
+    } else {
+      const { resourceVersion: _rv, ...metaRest } = (patch["metadata"] ?? {}) as Record<string, unknown>;
+      next = this.merge(cur ?? { kind: r.res.kind, apiVersion: r.res.apiVersion, metadata: { name: r.name, ...(r.res.namespaced ? { namespace: r.ns } : {}), uid: `uid-${r.name}` } }, { ...patch, metadata: metaRest }) as K8sObject;
+    }
+    next.metadata = { ...next.metadata, resourceVersion: String((cur ? this.rvOf(cur) : 0) + 1), uid: cur?.metadata["uid"] ?? next.metadata["uid"] ?? `uid-${r.name}` };
+    if (!dry) this.store.set(key, next);
+    return this.send(res, cur ? 200 : 201, JSON.stringify(r.sub === "scale" ? this.scaleOf(next) : next));
+  }
+
+  private handleDelete(path: string, query: Record<string, string>, body: string, res: ServerResponse): void {
+    const r = this.route(path);
+    if (!r || !r.name || r.sub) return this.send(res, 404, statusBody(404, "NotFound", "the server could not find the requested resource"));
+    const key = this.key(r.res.kind, r.res.namespaced ? r.ns : undefined, r.name);
+    const cur = this.store.get(key);
+    if (!cur) return this.send(res, 404, statusBody(404, "NotFound", `${r.res.plural} "${r.name}" not found`));
+    let opts: { preconditions?: { uid?: string; resourceVersion?: string } } = {};
+    if (body.trim() !== "") {
+      try {
+        opts = JSON.parse(body) as typeof opts;
+      } catch {
+        return this.send(res, 400, statusBody(400, "BadRequest", "invalid delete options"));
+      }
+    }
+    const pre = opts.preconditions;
+    if (pre?.uid !== undefined && pre.uid !== cur.metadata["uid"]) return this.send(res, 409, statusBody(409, "Conflict", "Precondition failed: UID in precondition does not match UID in record"));
+    if (pre?.resourceVersion !== undefined && pre.resourceVersion !== String(this.rvOf(cur))) return this.send(res, 409, statusBody(409, "Conflict", "Precondition failed: ResourceVersion in precondition does not match"));
+    if (query["dryRun"] !== "All") this.store.delete(key);
+    return this.send(res, 200, JSON.stringify({ kind: "Status", apiVersion: "v1", status: "Success", details: { name: r.name, kind: r.res.plural, uid: cur.metadata["uid"] } }));
+  }
+
+  /** Testler için: depodaki nesnenin anlık görüntüsü (yazma sonrası doğrulama). */
+  peek(kind: string, ns: string | undefined, name: string): K8sObject | undefined {
+    const o = this.store.get(this.key(kind, ns, name));
+    return o ? (JSON.parse(JSON.stringify(o)) as K8sObject) : undefined;
+  }
+
+  /** Testler için: nesneyi dışarıdan değiştirir (TOCTOU simülasyonu); resourceVersion artar. */
+  mutate(kind: string, ns: string | undefined, name: string, fn: (o: K8sObject) => void): void {
+    const o = this.store.get(this.key(kind, ns, name));
+    if (!o) throw new Error("nesne yok");
+    fn(o);
+    o.metadata["resourceVersion"] = String(this.rvOf(o) + 1);
+  }
+
+  private handleCreate(path: string, query: Record<string, string>, body: string, res: ServerResponse): void {
+    const r = this.route(path);
+    if (!r || r.name) return this.send(res, 404, statusBody(404, "NotFound", "the server could not find the requested resource"));
+    if (this.opts.readOnly) return this.send(res, 403, statusBody(403, "Forbidden", "create is forbidden for this user"));
+    let obj: K8sObject;
+    try {
+      obj = JSON.parse(body) as K8sObject;
+    } catch {
+      return this.send(res, 400, statusBody(400, "BadRequest", "invalid body"));
+    }
+    if (obj.kind !== r.res.kind || !obj.metadata?.name) return this.send(res, 400, statusBody(400, "BadRequest", "kind/name mismatch"));
+    const key = this.key(r.res.kind, r.res.namespaced ? r.ns : undefined, obj.metadata.name);
+    if (this.store.has(key)) return this.send(res, 409, statusBody(409, "AlreadyExists", `${r.res.plural} "${obj.metadata.name}" already exists`));
+    const created: K8sObject = { ...obj, metadata: { ...obj.metadata, ...(r.res.namespaced ? { namespace: r.ns } : {}), uid: `uid-${obj.metadata.name}`, resourceVersion: "1" } };
+    if (query["dryRun"] !== "All") this.store.set(key, created);
+    return this.send(res, 201, JSON.stringify(created));
+  }
+
+  private applyJsonPatch(target: K8sObject, ops: unknown): { ok: true; obj: K8sObject } | { ok: false; code: number; msg: string } {
+    if (!Array.isArray(ops)) return { ok: false, code: 400, msg: "json-patch must be an array" };
+    const obj = JSON.parse(JSON.stringify(target)) as K8sObject;
+    for (const raw of ops) {
+      const op = raw as { op?: string; path?: string; value?: unknown };
+      const segs = (op.path ?? "").split("/").slice(1).map((x) => x.replace(/~1/g, "/").replace(/~0/g, "~"));
+      let parent: Record<string, unknown> = obj as Record<string, unknown>;
+      for (const sg of segs.slice(0, -1)) {
+        const nx = parent[sg];
+        if (nx === null || typeof nx !== "object") return { ok: false, code: 422, msg: `path not found: ${op.path}` };
+        parent = nx as Record<string, unknown>;
+      }
+      const last = segs[segs.length - 1] ?? "";
+      if (op.op === "test") {
+        if (JSON.stringify(parent[last]) !== JSON.stringify(op.value)) return { ok: false, code: 422, msg: `test failed: ${op.path}` };
+      } else if (op.op === "replace" || op.op === "add") {
+        parent[last] = op.value;
+      } else if (op.op === "remove") {
+        delete parent[last];
+      } else return { ok: false, code: 400, msg: `unsupported op ${String(op.op)}` };
+    }
+    return { ok: true, obj };
+  }
+
+  private handlePost(path: string, body: string, res: ServerResponse, query: Record<string, string> = {}): void {
+    if (!path.startsWith("/apis/authentication.k8s.io") && !path.startsWith("/apis/authorization.k8s.io") && this.route(path)) return this.handleCreate(path, query, body, res);
     if (path === "/apis/authentication.k8s.io/v1/selfsubjectreviews") {
       return this.send(
         res,

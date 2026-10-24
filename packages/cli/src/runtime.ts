@@ -20,7 +20,7 @@ import {
 } from "@ops/broker";
 import type { ProfileRegistryOptions } from "@ops/broker";
 import type { AgentRuntime, ApprovalGate, DoctorReport, ModelProvider, Profile, SecretStore } from "@ops/contracts";
-import { EvidenceStore, Orchestrator, RuntimeOrchestrator, Session, ToolGateway, ToolRegistry, createLocalAdapter } from "@ops/core";
+import { ChangeStore, EvidenceStore, Orchestrator, RuntimeOrchestrator, Session, ToolGateway, ToolRegistry, createChangeAdapter, createLocalAdapter } from "@ops/core";
 import { DEFAULT_POLICY, PolicyEngine, loadPolicyFile } from "@ops/policy";
 import type { PolicyDocument } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
@@ -136,6 +136,10 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const toolRegistry = new ToolRegistry();
   const local = createLocalAdapter(evidence);
   toolRegistry.register(local.adapter, local.definitions);
+
+  // ChangeSet: önerilen değişikliği kanıtlara bağlı yerel dosya olarak kaydeder (toolset 'change'; uygulamaz)
+  const change = createChangeAdapter({ store: new ChangeStore(o.paths.changesDir), evidence, sessionId: () => session.id, ...(o.now ? { now: o.now } : {}) });
+  toolRegistry.register(change.adapter, change.definitions);
 
   const adapter = new KubernetesAdapter(broker.resolver);
   toolRegistry.register(adapter, adapter.definitions);

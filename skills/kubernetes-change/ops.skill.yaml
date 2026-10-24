@@ -1,0 +1,5 @@
+requires:
+  adapters: [kubernetes]
+requests:
+  toolsets: [k8s, k8s-change, change]
+model_hint: large

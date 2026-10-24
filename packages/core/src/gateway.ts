@@ -315,6 +315,7 @@ export class ToolGateway {
         decision: decision.effect,
         reasonCode: decision.reasonCode,
         ...(approvalId ? { approvalId } : {}),
+        ...(req.citedEvidence?.length ? { message: `atıf: ${req.citedEvidence.slice(0, 10).join(",")}` } : {}),
         actionHash,
         argsRedacted,
         policyVersionHash: policy.versionHash,

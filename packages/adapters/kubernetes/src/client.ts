@@ -17,7 +17,11 @@ export interface ClientOptions {
   readonly maxBytes: number;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
+  /** PATCH/POST(oluşturma)/DELETE fiillerine izin (savunma derinliği): YALNIZ yazma araçları için `true`. */
+  readonly allowWrite?: boolean;
 }
+
+export type PatchType = "application/merge-patch+json" | "application/json-patch+json" | "application/apply-patch+yaml";
 
 export interface ApiResponse {
   readonly status: number;
@@ -51,7 +55,8 @@ export function assertPinned(cred: KubeCredential, pin: TargetPin): void {
 
 /**
  * Asgari Kubernetes API istemcisi. Bilerek dar:
- *  - yalnız GET (+ izinli inceleme uç noktalarına POST): mutasyon fiili YAPISAL olarak yok;
+ *  - varsayılan yalnız GET (+ izinli inceleme uç noktalarına POST); PATCH/POST(oluşturma)/DELETE yalnız
+ *    `allowWrite: true` ile kurulan istemcide (adapter bunu yalnız yazma araçları için verir);
  *  - yalnız https, TLS doğrulaması kapatılamaz; yalnız kimlikteki CA güvenilir sayılır;
  *  - yönlendirme izlenmez (kimlik başka hosta gitmesin); ortam proxy'si kullanılmaz;
  *  - yanıt boyutu ve süre sınırlı; iptal sinyali bağlanır.
@@ -80,17 +85,40 @@ export class K8sClient {
     return this.exec("GET", path, query, accept);
   }
 
+  private requireWrite(): void {
+    if (this.opts.allowWrite !== true) throw new OpsError("write_not_allowed", "bu istemci salt okunur (yazma araçları dışında PATCH/POST/DELETE yapılamaz)");
+  }
+
+  /** Adlandırılmış nesneye yama (merge-patch / json-patch / server-side apply). */
+  patch(path: string, body: unknown, type: PatchType, query: Record<string, string | number | boolean | undefined> = {}): Promise<ApiResponse> {
+    this.requireWrite();
+    return this.exec("PATCH", path, query, "application/json", JSON.stringify(body), type);
+  }
+
+  /** Koleksiyon yoluna nesne oluşturma. */
+  create(path: string, body: unknown, query: Record<string, string | number | boolean | undefined> = {}): Promise<ApiResponse> {
+    this.requireWrite();
+    return this.exec("POST", path, query, "application/json", JSON.stringify(body));
+  }
+
+  /** Adlandırılmış nesneyi sil (ön koşullar `body.preconditions` içinde). */
+  remove(path: string, body: unknown, query: Record<string, string | number | boolean | undefined> = {}): Promise<ApiResponse> {
+    this.requireWrite();
+    return this.exec("DELETE", path, query, "application/json", JSON.stringify(body));
+  }
+
   /** İzinli inceleme uç noktalarına POST (SelfSubject*Review). Başka yola POST yoktur. */
   review(kind: ReviewKind, body: unknown): Promise<ApiResponse> {
     return this.exec("POST", REVIEW_PATHS[kind], {}, "application/json", JSON.stringify(body));
   }
 
   private exec(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH" | "DELETE",
     path: string,
     query: Record<string, string | number | boolean | undefined>,
     accept: string,
     body?: string,
+    contentType = "application/json",
   ): Promise<ApiResponse> {
     if (!path.startsWith("/api") && !path.startsWith("/version")) {
       return Promise.reject(new OpsError("path_refused", "yalnız /api, /apis ve /version yolları"));
@@ -99,7 +127,7 @@ export class K8sClient {
     for (const [k, v] of Object.entries(query)) if (v !== undefined) qs.set(k, String(v));
     const fullPath = qs.size > 0 ? `${path}?${qs.toString()}` : path;
     const host = this.url.hostname.replace(/^\[|\]$/g, "");
-    const headers: Record<string, string> = { accept, "user-agent": "ops-assistant", ...(body !== undefined ? { "content-type": "application/json" } : {}) };
+    const headers: Record<string, string> = { accept, "user-agent": "ops-assistant", ...(body !== undefined ? { "content-type": contentType, "content-length": String(Buffer.byteLength(body)) } : {}) };
     if (this.cred.token) headers["authorization"] = `Bearer ${this.cred.token}`;
 
     return new Promise<ApiResponse>((resolve, reject) => {

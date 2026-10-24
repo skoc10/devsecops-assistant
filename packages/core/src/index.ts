@@ -26,3 +26,6 @@ export type { RuntimeOrchestratorDeps } from "./runtime-orchestrator.ts";
 
 export { buildTimeline } from "./timeline.ts";
 export type { Timeline, TimelineEvent, TimelineLink, TimelineOptions, TimelineSource } from "./timeline.ts";
+
+export { ChangeStore, createChangeAdapter, CHANGE_KINDS } from "./changeset.ts";
+export type { ChangeAdapterOptions, ChangeKind, ChangeSet } from "./changeset.ts";

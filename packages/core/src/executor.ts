@@ -48,8 +48,19 @@ export class ToolExecutor {
     const { gateway, registry, session, audit } = this.d;
     const reg = registry.get(call.name);
     let profileId: string | undefined;
+    let args = call.args;
+    let cited: string[] | undefined;
     if (reg) {
       const desc = reg.def.descriptor;
+      // mutasyon+ araçlarda ayrılmış `cited` alanı şemadan ÖNCE ayrılır (model kanıt kimliklerini böyle bildirir)
+      if (desc.class !== "read" && args !== null && typeof args === "object" && !Array.isArray(args) && "cited" in args) {
+        const { cited: c, ...rest } = args as Record<string, unknown>;
+        if (!Array.isArray(c) || c.length > 10 || !c.every((x) => typeof x === "string" && /^ev-\d+$/.test(x))) {
+          return synthDenied(call.name, "schema_invalid", "cited: en çok 10 kanıt kimliği (ev-N) dizisi olmalı");
+        }
+        cited = c as string[];
+        args = rest;
+      }
       if (!session.activeToolsets.has(desc.toolset)) {
         await audit
           .append({ event: "intent", sessionId: session.id, callId: call.id, tool: call.name, decision: "deny", reasonCode: "unknown_tool", message: "araç seti etkin değil" })
@@ -69,7 +80,8 @@ export class ToolExecutor {
     }
     return gateway.invoke({
       tool: call.name,
-      args: call.args,
+      args,
+      ...(cited ? { citedEvidence: cited } : {}),
       ...(profileId ? { profile: profileId } : {}),
       providerZone: this.d.zone,
       provider: this.d.provider,

@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node
 import { dirname, join } from "node:path";
 import { OpsError } from "@ops/contracts";
 import { Counter, KnownSecrets, scrubText } from "@ops/redaction";
-import { diffFile } from "./diff.ts";
+import { diffFile } from "@ops/diff";
 import { normalizeRel, readCheck, writeCheck } from "./paths.ts";
 import type { PathPolicy } from "./paths.ts";
 import type { Snapshot } from "./snapshot.ts";

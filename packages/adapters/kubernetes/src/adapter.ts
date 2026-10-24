@@ -1,6 +1,7 @@
 import { X509Certificate } from "node:crypto";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError } from "@ops/contracts";
 import type {
+  ActionPreview,
   Adapter,
   AdapterCall,
   AdapterManifest,
@@ -22,7 +23,11 @@ import { diagnose } from "./doctor.ts";
 import { analyzeRules, ruleAllows } from "./rbac.ts";
 import type { RbacRule } from "./rbac.ts";
 import { summarizeHpa, summarizeNode, summarizePdb, summarizePods, summarizeWorkload } from "./health.ts";
-import { K8S_READ_TOOLS } from "./tools.ts";
+import { K8S_READ_TOOLS, K8S_WRITE_TOOLS } from "./tools.ts";
+import { applyDiff, doApply, doDelete, doRestart, doScale, doUndo, parseManifest, previewApply, previewDelete, previewRestart, previewScale, previewUndo } from "./change.ts";
+
+const ALL_TOOLS = [...K8S_READ_TOOLS, ...K8S_WRITE_TOOLS] as const;
+const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(K8S_WRITE_TOOLS.map((t) => t.descriptor.name));
 
 type Args = Record<string, unknown>;
 const str = (a: Args, k: string): string | undefined => (typeof a[k] === "string" ? (a[k] as string) : undefined);
@@ -88,12 +93,12 @@ export class KubernetesAdapter implements Adapter {
       profileKinds: ["k8s"],
       credentialKinds: ["static", "exec"],
       capabilities: ["pagination", "table-secrets"],
-      tools: K8S_READ_TOOLS.map((t) => t.descriptor),
+      tools: ALL_TOOLS.map((t) => t.descriptor),
     });
   }
 
-  get definitions(): readonly (typeof K8S_READ_TOOLS)[number][] {
-    return K8S_READ_TOOLS;
+  get definitions(): readonly (typeof ALL_TOOLS)[number][] {
+    return ALL_TOOLS;
   }
 
   validateProfile(profile: Profile): string[] {
@@ -157,6 +162,22 @@ export class KubernetesAdapter implements Adapter {
         const namespace = str(a, "namespace") as string;
         return t([namespace], [`${str(a, "kind")}/${namespace}/${str(a, "name")}`]);
       }
+      case "k8s.apply.diff":
+      case "k8s.apply": {
+        const m = parseManifest(str(a, "manifest") ?? "");
+        return t([m.namespace as string], [m.ref]);
+      }
+      case "k8s.scale":
+      case "k8s.rollout.restart":
+      case "k8s.resources.delete": {
+        const k = resolveKind(str(a, "kind") ?? "");
+        const namespace = str(a, "namespace") as string;
+        return t([namespace], [refOf(k, namespace, str(a, "name") as string)]);
+      }
+      case "k8s.rollout.undo": {
+        const namespace = str(a, "namespace") as string;
+        return t([namespace], [`Deployment/${namespace}/${str(a, "name")}`]);
+      }
       default:
         throw new OpsError("unknown_tool", `bilinmeyen araç: ${tool}`);
     }
@@ -164,10 +185,39 @@ export class KubernetesAdapter implements Adapter {
 
   // ---- bağlantı ----------------------------------------------------------------------------
 
-  private client(handle: CredentialHandle | null, profile: Profile, call: { maxBytes: number; timeoutMs: number; signal?: AbortSignal }): K8sClient {
+  private client(handle: CredentialHandle | null, profile: Profile, call: { maxBytes: number; timeoutMs: number; signal?: AbortSignal; allowWrite?: boolean }): K8sClient {
     if (!handle) throw new OpsError("lease_inactive", "kimlik tutamacı yok");
     const cred = this.resolver.k8s(handle);
-    return new K8sClient(cred, profile.targetPin, { maxBytes: call.maxBytes, timeoutMs: call.timeoutMs, ...(call.signal ? { signal: call.signal } : {}) });
+    return new K8sClient(cred, profile.targetPin, {
+      maxBytes: call.maxBytes,
+      timeoutMs: call.timeoutMs,
+      ...(call.signal ? { signal: call.signal } : {}),
+      ...(call.allowWrite ? { allowWrite: true } : {}),
+    });
+  }
+
+  /** Mutasyon önizlemesi (diff/etki/geri alma/hedef sürümü): salt OKUMA, istemci yazma yetkisiz. */
+  async preview(call: AdapterCall): Promise<ActionPreview> {
+    const a = (call.args ?? {}) as Args;
+    const client = this.client(call.handle, call.profile, { maxBytes: 2_000_000, timeoutMs: Math.min(call.limits.timeoutMs, 20_000), signal: call.signal });
+    try {
+      switch (call.tool) {
+        case "k8s.apply":
+          return await previewApply(client, str(a, "manifest") ?? "");
+        case "k8s.scale":
+          return await previewScale(client, a as { kind: string; namespace: string; name: string; replicas: number });
+        case "k8s.rollout.restart":
+          return await previewRestart(client, a as { kind: string; namespace: string; name: string });
+        case "k8s.rollout.undo":
+          return await previewUndo(client, a as { namespace: string; name: string; toRevision?: number });
+        case "k8s.resources.delete":
+          return await previewDelete(client, a as { kind: string; namespace: string; name: string });
+        default:
+          throw new OpsError("no_preview", `araç önizleme desteklemiyor: ${call.tool}`);
+      }
+    } finally {
+      client.close();
+    }
   }
 
   /** Sunucuya erişip kimliği doğrular (`whoami`) ve CA parmak izini döner. Kimlik yalnız pin doğrulanınca gönderilir. */
@@ -231,9 +281,22 @@ export class KubernetesAdapter implements Adapter {
       maxBytes: Math.min(call.limits.maxBytes * 4, 4_000_000),
       timeoutMs: call.limits.timeoutMs,
       signal: call.signal,
+      allowWrite: WRITE_TOOL_NAMES.has(call.tool),
     });
     try {
       switch (call.tool) {
+        case "k8s.apply.diff":
+          return await applyDiff(client, str(a, "manifest") ?? "");
+        case "k8s.apply":
+          return await doApply(client, str(a, "manifest") ?? "", call.approvedVersion);
+        case "k8s.scale":
+          return await doScale(client, a as { kind: string; namespace: string; name: string; replicas: number }, call.approvedVersion);
+        case "k8s.rollout.restart":
+          return await doRestart(client, a as { kind: string; namespace: string; name: string }, call.approvedVersion, this.now());
+        case "k8s.rollout.undo":
+          return await doUndo(client, a as { namespace: string; name: string; toRevision?: number }, call.approvedVersion);
+        case "k8s.resources.delete":
+          return await doDelete(client, a as { kind: string; namespace: string; name: string }, call.approvedVersion);
         case "k8s.resources.list":
           return await this.list(client, a, call);
         case "k8s.resources.get":

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { defineTool } from "@ops/contracts";
 import type { ToolDefinition, ToolDescriptorMeta } from "@ops/contracts";
+import { DELETE_KINDS, RESTART_KINDS, SCALE_KINDS } from "./change.ts";
 import { DNS_LABEL, DNS_SUBDOMAIN, SELECTOR } from "./kinds.ts";
 
 const base = {
@@ -219,3 +220,80 @@ export const K8S_READ_TOOLS: readonly ToolDefinition[] = [
   authCanI,
   workloadHealth,
 ];
+
+// ---- değişiklik araçları (Faz 2b): ayrı toolset, ayrı sınıflar, hepsi önizleme + onay + TOCTOU -----------
+
+const writeBase = {
+  ...base,
+  toolset: "k8s-change",
+  idempotent: false,
+  untrustedOutput: false,
+  limits: { timeoutMs: 30_000, maxBytes: 200_000, maxItems: 100, maxOutputTokens: 1_200 },
+  typicalOutputTokens: 300,
+} as const satisfies Partial<ToolDescriptorMeta>;
+
+const manifest = z.string().min(10).max(60_000);
+
+export const applyDiff = defineTool(
+  {
+    ...writeBase,
+    name: "k8s.apply.diff",
+    description: "Manifest tek nesneyi canlıyla karşılaştırır (yalnız okuma): birleşik diff, etki ve risk işaretleri. Uygulamadan önce HER ZAMAN çağırın.",
+    class: "read",
+    idempotent: true,
+    typicalOutputTokens: 600,
+  },
+  z.strictObject({ manifest }),
+);
+
+export const apply = defineTool(
+  {
+    ...writeBase,
+    name: "k8s.apply",
+    description: "Manifesti uygular (server-side apply; yoksa oluşturur). Onay ekranı diff'i gösterir; hedef onaydan sonra değişirse uygulanmaz. Secret/Pod/RBAC/küme kapsamlı tür yok.",
+    class: "deploy",
+  },
+  z.strictObject({ manifest }),
+);
+
+export const scale = defineTool(
+  {
+    ...writeBase,
+    name: "k8s.scale",
+    description: "Deployment/StatefulSet/ReplicaSet replika sayısını değiştirir (tek iş yükü).",
+    class: "mutate",
+  },
+  z.strictObject({ kind: z.enum(SCALE_KINDS), namespace: ns, name: objName, replicas: z.number().int().min(0).max(1_000) }),
+);
+
+export const rolloutRestart = defineTool(
+  {
+    ...writeBase,
+    name: "k8s.rollout.restart",
+    description: "Deployment/StatefulSet/DaemonSet pod'larını kademeli yeniden başlatır (şablon ek açıklamasını günceller).",
+    class: "mutate",
+  },
+  z.strictObject({ kind: z.enum(RESTART_KINDS), namespace: ns, name: objName }),
+);
+
+export const rolloutUndo = defineTool(
+  {
+    ...writeBase,
+    name: "k8s.rollout.undo",
+    description: "Deployment'ı önceki (veya toRevision) revizyonun pod şablonuna döndürür.",
+    class: "deploy",
+  },
+  z.strictObject({ namespace: ns, name: objName, toRevision: z.number().int().min(1).optional() }),
+);
+
+export const resourcesDelete = defineTool(
+  {
+    ...writeBase,
+    name: "k8s.resources.delete",
+    description: "Tek nesneyi KALICI siler (uid + resourceVersion ön koşullu). Varsayılan kapalı: profil tavanı 'destroy' ve ortam/kaynak adı yazdırma gerekir.",
+    class: "destroy",
+  },
+  z.strictObject({ kind: z.enum(DELETE_KINDS as [string, ...string[]]), namespace: ns, name: objName }),
+);
+
+export const K8S_WRITE_TOOLS: readonly ToolDefinition[] = [applyDiff, apply, scale, rolloutRestart, rolloutUndo, resourcesDelete];

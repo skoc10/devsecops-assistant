@@ -1,6 +1,7 @@
 export { KubernetesAdapter } from "./adapter.ts";
 export type { KubernetesAdapterOptions } from "./adapter.ts";
-export { K8S_READ_TOOLS } from "./tools.ts";
+export { K8S_READ_TOOLS, K8S_WRITE_TOOLS } from "./tools.ts";
+export { APPLY_KINDS, DELETE_KINDS, lintManifest, parseManifest } from "./change.ts";
 export { K8sClient, assertPinned, apiErrorMessage } from "./client.ts";
 export { KINDS, resolveKind, CLUSTER_SCOPE } from "./kinds.ts";
 export { sanitizeObject, registerK8sRedactionProfile, CONFIGMAP_PLACEHOLDER } from "./sanitize.ts";

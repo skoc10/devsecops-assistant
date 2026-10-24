@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@ops/contracts": "workspace:*",
+    "@ops/diff": "workspace:*",
     "@ops/redaction": "workspace:*",
     "@ops/sandbox": "workspace:*",
     "zod": "^4.0.0"

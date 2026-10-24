@@ -21,6 +21,8 @@ export interface OpsPaths {
   readonly workspacesFile: string;
   /** Oturum başına kalıcı anlık kopyalar (`<oturum>--<alan>/{work,base}`). */
   readonly worktreesDir: string;
+  /** Önerilen değişiklikler (ChangeSet): `<id>/{changeset.json, dosya}`. */
+  readonly changesDir: string;
   /** Dış MCP sunucuları için kullanıcı manifesti (`mcp-servers.yaml`); yoksa köprü kapalı. */
   readonly mcpManifestFile: string;
 }
@@ -41,6 +43,7 @@ export function resolvePaths(home: string = process.env["OPS_HOME"] ?? join(home
     maskingFile: join(home, "masking.yaml"),
     workspacesFile: join(home, "workspaces.json"),
     worktreesDir: join(home, "worktrees"),
+    changesDir: join(home, "changes"),
     mcpManifestFile: join(home, "mcp-servers.yaml"),
   };
 }

@@ -10,12 +10,15 @@ import type { K8sHarness } from "./harness.ts";
 adapterConformance("kubernetes", () => new KubernetesAdapter(new LocalBroker({ store: new MemorySecretStore() }).resolver));
 
 describe("KubernetesAdapter yapısı", () => {
-  it("araç adları, toolset'ler ve sınıflar beklenen gibi; hepsi read", () => {
+  it("araç adları, toolset'ler ve sınıflar beklenen gibi; okuma araçları read, değişiklik araçları ayrı toolset'te", () => {
     const a = new KubernetesAdapter(new LocalBroker({ store: new MemorySecretStore() }).resolver);
     expect(checkAdapterStructure(a)).toEqual([]);
-    const names = a.manifest.tools.map((t) => t.name).sort();
+    const reads = a.manifest.tools.filter((t) => t.toolset !== "k8s-change");
+    const names = reads.map((t) => t.name).sort();
     expect(names).toEqual(["k8s.auth.can_i", "k8s.events.list", "k8s.pods.logs", "k8s.profile.describe", "k8s.resources.describe", "k8s.resources.get", "k8s.resources.list", "k8s.workload.health"]);
-    expect(a.manifest.tools.every((t) => t.class === "read")).toBe(true);
+    expect(reads.every((t) => t.class === "read")).toBe(true);
+    const writes = Object.fromEntries(a.manifest.tools.filter((t) => t.toolset === "k8s-change").map((t) => [t.name, t.class]));
+    expect(writes).toEqual({ "k8s.apply.diff": "read", "k8s.apply": "deploy", "k8s.scale": "mutate", "k8s.rollout.restart": "mutate", "k8s.rollout.undo": "deploy", "k8s.resources.delete": "destroy" });
     expect(a.manifest.tools.filter((t) => t.toolset === "core").map((t) => t.name)).toEqual(["k8s.profile.describe"]);
     // log/olay/describe çıktıları untrusted
     for (const n of ["k8s.pods.logs", "k8s.events.list", "k8s.resources.describe"]) {
@@ -26,8 +29,10 @@ describe("KubernetesAdapter yapısı", () => {
   it("araç şemaları katı ve küçük: tüm şemalar toplamı ≤ 2.5k token tahmini", async () => {
     const { estimateTokens } = await import("@ops/contracts");
     const a = new KubernetesAdapter(new LocalBroker({ store: new MemorySecretStore() }).resolver);
-    const specs = JSON.stringify(a.manifest.tools.map((t) => ({ n: t.name, d: t.description, s: t.inputSchema })));
-    expect(estimateTokens(specs)).toBeLessThanOrEqual(2_500);
+    const specOf = (tools: typeof a.manifest.tools) => JSON.stringify(tools.map((t) => ({ n: t.name, d: t.description, s: t.inputSchema })));
+    expect(estimateTokens(specOf(a.manifest.tools.filter((t) => t.toolset !== "k8s-change")))).toBeLessThanOrEqual(2_500);
+    // değişiklik araçları yalnız ilgili skill yüklenince bağlama girer
+    expect(estimateTokens(specOf(a.manifest.tools.filter((t) => t.toolset === "k8s-change")))).toBeLessThanOrEqual(1_800);
   });
 
   it("sabit olmayan girdiler: kapsamsız namespace, bilinmeyen tür, kötü since çözümlemede reddedilir", async () => {

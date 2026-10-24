@@ -15,7 +15,7 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
   it("yüklenir, hata yok, gövde sınırları içinde; tier dizinden gelir", async () => {
     const reg = await SkillRegistry.load({ builtinDir });
     expect(reg.issues).toEqual([]);
-    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "database", "generic-diagnosis", "kubernetes", "local-shell", "pipelines", "terraform"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "database", "generic-diagnosis", "kubernetes", "kubernetes-change", "local-shell", "pipelines", "terraform"]);
     for (const s of reg.all()) {
       expect(s.tier).toBe("builtin");
       expect(s.tokens).toBeLessThanOrEqual(LIMITS.bodyTokens);
@@ -33,7 +33,9 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     expect(reg.get("local-shell")!.tokens).toBeLessThanOrEqual(650);
     expect(reg.get("terraform")!.tokens).toBeLessThanOrEqual(850);
     expect(reg.get("ansible")!.tokens).toBeLessThanOrEqual(850);
-    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(300);
+    // tüm yerleşik skill'ler AYNI ANDA görünürse üst sınır; gerçek oturumlarda yalnız uygun olanlar ilan edilir
+    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(340);
+    expect(reg.get("kubernetes-change")!.tokens).toBeLessThanOrEqual(700);
   });
 
   it("gerektirdiği adapter kayıtlı değilse skill ilan edilmez", async () => {
@@ -41,9 +43,9 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     reg.setAvailableAdapters([]);
     expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis"]);
     reg.setAvailableAdapters(["kubernetes"]);
-    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes", "kubernetes-change"]);
     reg.setAvailableAdapters(["kubernetes", "terminal"]);
-    expect(reg.all().length).toBe(3);
+    expect(reg.all().length).toBe(4);
   });
 
   it("IaC skill'leri yalnız etkin çalışma alanının motoruna göre ilan edilir (terraform ↔ ansible)", async () => {

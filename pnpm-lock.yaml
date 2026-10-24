@@ -94,6 +94,9 @@ importers:
       '@ops/contracts':
         specifier: workspace:*
         version: link:../../contracts
+      '@ops/diff':
+        specifier: workspace:*
+        version: link:../../diff
       '@ops/redaction':
         specifier: workspace:*
         version: link:../../redaction
@@ -308,6 +311,12 @@ importers:
         specifier: workspace:*
         version: link:../testkit
 
+  packages/diff:
+    devDependencies:
+      fast-check:
+        specifier: ^4.10.2
+        version: 4.10.2
+
   packages/mcp-bridge:
     dependencies:
       '@ops/contracts':
@@ -462,6 +471,9 @@ importers:
       '@ops/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@ops/diff':
+        specifier: workspace:*
+        version: link:../diff
       '@ops/redaction':
         specifier: workspace:*
         version: link:../redaction
