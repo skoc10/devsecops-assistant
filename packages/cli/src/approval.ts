@@ -56,6 +56,7 @@ export function renderSummary(s: CanonicalActionSummary, extra: { index: number;
   ];
   if (s.taintedContext) lines.push("⚠ Bağlamda UNTRUSTED içerik var (log/olay/dosya). Bu çağrı o içeriğin etkisiyle önerilmiş olabilir.");
   for (const e of s.citedEvidence) lines.push(`Kanıt:     ${safe(e.id, 20)} — ${safe(e.summary, 200)}`);
+  if (s.note) lines.push(`Kapsam:    ${safe(s.note, 300)}`);
   lines.push(`Süre: ${extra.expiresInSec} sn   (bu oturumda ${extra.index}. onay)`);
   return lines.join("\n");
 }

@@ -40,6 +40,12 @@ export class Session {
   readonly activeToolsets = new Set<string>(["core"]);
   /** Etkin skill gövdeleri (en çok `maxActiveSkills`; en eski çıkarılır). */
   readonly activeSkills = new Map<string, ActiveSkill>();
+  /**
+   * Yerel-yazma araçları (`scope: local`, `localWrite`) için oturum izni: kullanıcı İLK çağrıyı
+   * onayladığında aynı araç, bağlam taint'li OLMADIKÇA oturum boyunca yeniden sorulmaz. Dar kapsam:
+   * araç adı + bu oturum; hedef sistem araçlarına ve deploy/destroy'a UYGULANMAZ.
+   */
+  readonly writeGrants = new Set<string>();
   static readonly BASE_TOOLSETS: readonly string[] = ["core"];
   private readonly bound = new Map<ProfileKind, Profile>();
 

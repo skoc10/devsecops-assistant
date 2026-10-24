@@ -15,6 +15,8 @@ export interface CanonicalActionSummary {
   readonly taintedContext: boolean;
   /** Neden soruluyor: `class`, `taint_escalation`, `policy_ask`, ... */
   readonly why: string;
+  /** Onayın kapsamı hakkında PEP'in kendi notu (ör. oturum boyunca çalışma alanı yazımları). */
+  readonly note?: string;
 }
 
 export interface ApprovalRequest {

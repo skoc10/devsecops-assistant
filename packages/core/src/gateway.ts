@@ -213,7 +213,29 @@ export class ToolGateway {
       canonicalJson({ tool: desc.name, args, profile: profile?.id ?? null, target, class: st.cls, policy: policy.versionHash }),
     );
     let approvalId: string | undefined;
-    if (decision.effect === "ask") {
+    const isLocalWrite = desc.scope === "local" && desc.localWrite;
+    const grantedBySession =
+      decision.effect === "ask" &&
+      decision.reasonCode === "approval_required" &&
+      isLocalWrite &&
+      st.cls === "read" &&
+      !session.context.tainted &&
+      session.writeGrants.has(desc.name);
+    if (grantedBySession) {
+      try {
+        await audit.append({
+          event: "approval",
+          sessionId: session.id,
+          callId: st.callId,
+          tool: desc.name,
+          actionHash,
+          decision: "allow",
+          message: "oturum yazma izni (aynı araç için ilk onaydan; bağlam taint'siz)",
+        });
+      } catch {
+        return this.deny(st, "audit_unavailable", "onay kaydı yazılamadı; çağrı çalıştırılmadı", { skipAudit: true });
+      }
+    } else if (decision.effect === "ask") {
       const gate = this.d.approval;
       if (!gate) return this.deny(st, "approval_unavailable", `onay gerekli (${decision.reasonCode}) ama onay kapısı yok`);
       const summary: CanonicalActionSummary = {
@@ -230,6 +252,9 @@ export class ToolGateway {
         }),
         taintedContext: session.context.tainted,
         why: decision.reasonCode,
+        ...(isLocalWrite && decision.reasonCode === "approval_required" && st.cls === "read"
+          ? { note: "Bu onay, bu oturumda AYNI aracın çalışma alanı (anlık kopya) yazımlarını kapsar; bağlamda untrusted içerik belirirse yeniden sorulur." }
+          : {}),
       };
       const outcome = await gate.request({ actionHash, summary, expiresInSec: 300 });
       const hashOk = outcome.approved && outcome.actionHash === actionHash;
@@ -252,6 +277,7 @@ export class ToolGateway {
       if (!outcome.approved) return this.deny(st, "approval_denied", outcome.reason);
       if (!hashOk) return this.deny(st, "approval_denied", "onay başka bir eyleme ait (eylem hash'i uyuşmuyor)");
       approvalId = outcome.approvalId;
+      if (isLocalWrite && decision.reasonCode === "approval_required" && st.cls === "read" && !session.context.tainted) session.writeGrants.add(desc.name);
     }
 
     // 8. Denetim: intent (write-ahead). Yazılamazsa ÇALIŞTIRMA.

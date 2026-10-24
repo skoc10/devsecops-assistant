@@ -1,0 +1,12 @@
+export { WorkspaceRegistry, WorkspaceSchema, WORKSPACE_ENGINES } from "./registry.ts";
+export type { Workspace, WorkspaceEngine } from "./registry.ts";
+export { normalizeRel, pathGlob, readCheck, writeCheck } from "./paths.ts";
+export type { PathCheck, PathPolicy } from "./paths.ts";
+export { DEFAULT_LIMITS, createSnapshot } from "./snapshot.ts";
+export type { Snapshot, SnapshotLimits, SnapshotManifest } from "./snapshot.ts";
+export { DEFAULT_FS_LIMITS, WorktreeFs } from "./fs.ts";
+export type { FileChange, FsLimits } from "./fs.ts";
+export { diffFile } from "./diff.ts";
+export { WorkspaceManager } from "./manager.ts";
+export type { WorkspaceManagerOptions } from "./manager.ts";
+export { WORKSPACE_TOOLS, WorkspaceAdapter } from "./tools.ts";
