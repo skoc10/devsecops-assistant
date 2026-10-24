@@ -1,0 +1,208 @@
+import { access } from "node:fs/promises";
+import { KubernetesAdapter } from "@ops/adapter-kubernetes";
+import { AuditLog, FileAuditStorage, FileHeadAnchor } from "@ops/audit";
+import {
+  EncryptedFileStore,
+  ExecCredentialRunner,
+  LocalBroker,
+  ProfileRegistry,
+  ProfileService,
+  ensureAuditKey,
+} from "@ops/broker";
+import type { ProfileRegistryOptions } from "@ops/broker";
+import type { ApprovalGate, DoctorReport, ModelProvider, Profile, SecretStore } from "@ops/contracts";
+import { EvidenceStore, Orchestrator, Session, ToolGateway, ToolRegistry, createLocalAdapter } from "@ops/core";
+import { DEFAULT_POLICY, PolicyEngine, loadPolicyFile } from "@ops/policy";
+import type { PolicyDocument } from "@ops/policy";
+import { KnownSecrets, scrubText } from "@ops/redaction";
+import { detectSandbox } from "@ops/sandbox";
+import type { Sandbox } from "@ops/sandbox";
+import { SkillRegistry, createSkillAdapter } from "@ops/skills";
+import { BUILTIN_POLICY_FILE, BUILTIN_SKILLS_DIR, ensureHome } from "./paths.ts";
+import type { OpsPaths } from "./paths.ts";
+
+export interface RuntimeOptions {
+  readonly paths: OpsPaths;
+  /** Şifreli dosya kasası için parola; `store` verilmediyse zorunlu. */
+  readonly passphrase?: () => Promise<Uint8Array>;
+  readonly scryptParams?: { N: number; r: number; p: number };
+  /** Hazır kasa (test / OS anahtar zinciri). */
+  readonly store?: SecretStore;
+  /** `"detect"` (varsayılan): bubblewrap/seatbelt yoklanır. `null`: sandbox yok. */
+  readonly sandbox?: Sandbox | null | "detect";
+  readonly policy?: PolicyDocument;
+  readonly builtinSkillsDir?: string;
+  readonly approval?: ApprovalGate;
+  readonly registryOptions?: Partial<ProfileRegistryOptions>;
+  readonly now?: () => Date;
+}
+
+export interface Runtime {
+  readonly paths: OpsPaths;
+  readonly store: SecretStore;
+  readonly known: KnownSecrets;
+  readonly audit: AuditLog;
+  readonly profiles: ProfileService;
+  readonly registry: ProfileRegistry;
+  readonly broker: LocalBroker;
+  readonly session: Session;
+  readonly evidence: EvidenceStore;
+  readonly toolRegistry: ToolRegistry;
+  readonly gateway: ToolGateway;
+  readonly policy: PolicyEngine;
+  readonly skills: SkillRegistry;
+  readonly adapter: KubernetesAdapter;
+  readonly sandbox: Sandbox | null;
+  /** Profili doktordan geçirir (bağlamaz). */
+  diagnose(id: string): Promise<DoctorReport>;
+  /** Profili doktordan geçirip oturuma bağlar; `bindable=false` ise BAĞLAMAZ. */
+  bindProfile(id: string): Promise<DoctorReport>;
+  createOrchestrator(provider: ModelProvider, options?: ConstructorParameters<typeof Orchestrator>[0]["options"]): Orchestrator;
+  close(): Promise<void>;
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bileşim kökü (composition root): kasa → denetim anahtarı → denetim günlüğü → broker (+sandbox'lı
+ * exec) → araç kaydı (yerel, skill, kubernetes) → politika → PEP. Tek kullanıcı, tek süreç.
+ */
+export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
+  await ensureHome(o.paths);
+
+  let store: SecretStore;
+  if (o.store) store = o.store;
+  else {
+    if (!o.passphrase) throw new Error("kasa parolası sağlanmadı");
+    store = await EncryptedFileStore.open(o.paths.vaultFile, o.passphrase, o.scryptParams ? { kdf: o.scryptParams } : {});
+  }
+
+  const known = new KnownSecrets();
+  const auditKey = await ensureAuditKey(store);
+  const audit = await AuditLog.open({
+    storage: new FileAuditStorage(o.paths.auditLog),
+    key: auditKey,
+    anchor: new FileHeadAnchor(o.paths.auditAnchor),
+    scrub: (s) => scrubText(s, known),
+  });
+
+  const sandbox = o.sandbox === "detect" || o.sandbox === undefined ? await detectSandbox() : o.sandbox;
+  const broker = new LocalBroker({ store, exec: new ExecCredentialRunner({ sandbox, ...(o.now ? { now: o.now } : {}) }), ...(o.now ? { now: o.now } : {}) });
+  const registry = await ProfileRegistry.open({ path: o.paths.profilesFile, testMode: false, ...(o.registryOptions ?? {}) });
+  const profiles = new ProfileService({ store, registry });
+
+  let policyDoc: PolicyDocument;
+  if (o.policy) policyDoc = o.policy;
+  else if (await exists(o.paths.policyFile)) policyDoc = await loadPolicyFile(o.paths.policyFile);
+  else if (await exists(BUILTIN_POLICY_FILE)) policyDoc = await loadPolicyFile(BUILTIN_POLICY_FILE);
+  else policyDoc = DEFAULT_POLICY;
+  const policy = new PolicyEngine(policyDoc);
+
+  const session = new Session();
+  const evidence = new EvidenceStore();
+  const toolRegistry = new ToolRegistry();
+  const local = createLocalAdapter(evidence);
+  toolRegistry.register(local.adapter, local.definitions);
+
+  const adapter = new KubernetesAdapter(broker.resolver);
+  toolRegistry.register(adapter, adapter.definitions);
+
+  const skills = await SkillRegistry.load({ builtinDir: o.builtinSkillsDir ?? BUILTIN_SKILLS_DIR, userDir: o.paths.userSkillsDir });
+  skills.setAvailableAdapters(["kubernetes"]);
+  const skillAdapter = createSkillAdapter(skills, session, () => toolRegistry);
+  toolRegistry.register(skillAdapter.adapter, skillAdapter.definitions);
+
+  const gateway = new ToolGateway({
+    registry: toolRegistry,
+    session,
+    policy,
+    audit,
+    broker,
+    evidence,
+    known,
+    ...(o.approval ? { approval: o.approval } : {}),
+    ...(o.now ? { now: o.now } : {}),
+  });
+
+  await audit.append({
+    event: "session_start",
+    sessionId: session.id,
+    policyVersionHash: policy.versionHash,
+    message: `sandbox=${sandbox?.kind ?? "yok"} skills=${skills.all().map((s) => s.name).join(",")}`,
+  });
+
+  const diagnoseProfile = async (id: string): Promise<{ report: DoctorReport; profile: Profile }> => {
+    const profile: Profile | undefined = registry.get(id);
+    if (!profile) throw new Error(`profil bulunamadı: ${id}`);
+    if (profile.kind !== "k8s") throw new Error(`bu sürümde yalnız 'k8s' profilleri bağlanabilir: ${profile.kind}`);
+    await broker.prime?.(profile, known);
+    const lease = await broker.acquire({ profile, purpose: "doctor", callId: `doctor-${profile.id}`, ttlSec: 60 }, known);
+    let report: DoctorReport;
+    try {
+      report = await adapter.doctor!(lease.handle, profile);
+    } finally {
+      await lease.release();
+    }
+    await audit.append({
+      event: "lease",
+      sessionId: session.id,
+      profile: profile.id,
+      environment: profile.environment,
+      message: `doctor bindable=${report.bindable} effective=${report.effectiveClass ?? "?"} findings=${report.findings.map((f) => `${f.severity}:${f.code}`).join(",")}`,
+    });
+    return { report, profile };
+  };
+
+  const rt: Runtime = {
+    paths: o.paths,
+    store,
+    known,
+    audit,
+    profiles,
+    registry,
+    broker,
+    session,
+    evidence,
+    toolRegistry,
+    gateway,
+    policy,
+    skills,
+    adapter,
+    sandbox,
+    async diagnose(id: string): Promise<DoctorReport> {
+      return (await diagnoseProfile(id)).report;
+    },
+    async bindProfile(id: string): Promise<DoctorReport> {
+      const { report, profile } = await diagnoseProfile(id);
+      if (report.bindable) session.bind(profile, { replace: true });
+      return report;
+    },
+    createOrchestrator(provider, options) {
+      return new Orchestrator({
+        provider,
+        gateway,
+        registry: toolRegistry,
+        session,
+        evidence,
+        policy,
+        audit,
+        known,
+        skills,
+        ...(options ? { options } : {}),
+      });
+    },
+    async close() {
+      await audit.append({ event: "session_end", sessionId: session.id, message: `toolCalls=${session.usage.toolCalls}` }).catch(() => undefined);
+      broker.clearExecCache();
+      if ("close" in store && typeof (store as { close?: unknown }).close === "function") (store as { close(): void }).close();
+    },
+  };
+  return rt;
+}

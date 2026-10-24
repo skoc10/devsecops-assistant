@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP7a tamamlandı (orkestratör, skill'ler, defter, kanıt atfı, token ölçümü).
+Son güncelleme: WP7 tamamlandı (bileşim kökü, opsd, CLI, E-01, B-04).
 
 ## Faz 0
 
@@ -57,7 +57,13 @@ Son güncelleme: WP7a tamamlandı (orkestratör, skill'ler, defter, kanıt atfı
 | Token ölçümü: model çağrısı başına `tokens`, araç sonucu tahmini; `usageFromAudit`/`formatUsage` (denetimden `ops usage`) | **Enforced** (CLI komutu WP7b) | `packages/core` | `ledger.test.ts` |
 | Tembel skill yükleyici: `SKILL.md` + `ops.skill.yaml` (katı), güven katmanı dizinden, linter (ad, açıklama, 500 satır / 5000 token), gerektirdiği adapter yoksa gizlenir, en çok 2 etkin gövde, `scripts/` ASLA çalışmaz, imported skill çıktısı untrusted | **Enforced** (B-02 çekirdeği; tam linter Faz 1) | `packages/skills` | `skills/test` |
 | Yerleşik skill'ler: `kubernetes`, `generic-diagnosis` (meta blok ≤ 250 token, sabit önek ≤ 3k token — B-01) | **Enforced** | `skills/` | B-01 |
-| `opsd` (UDS), `ops chat` CLI, bileşim kökü, E-01, B-04 | Planned (WP7b) | `packages/cli` | E-01, B-04 |
+| Bileşim kökü `createRuntime`: kasa → denetim anahtarı (kasada) → HMAC'li günlük + çapa → broker (+sandbox'lı exec) → araç kaydı → politika → PEP; profil `diagnose`/`bindProfile` (doktor `bindable=false` ise bağlamaz) | **Enforced** | `packages/cli` | `cli/test/e2e.test.ts` |
+| `opsd`: UDS 0600 (dizin 0700), NDJSON, yalnız `ping/profile.list/profile.bind/chat.send/usage.get/shutdown`; araç çağırma ve onay yöntemleri bu soketten SUNULMAZ; tek eşzamanlı sohbet; geçersiz istekte kimlik yansıtılır. Peer-uid doğrulaması YOK (Node'da SO_PEERCRED yok): koruma dosya izinleridir | **Enforced** (izin tabanlı); aynı UID'li saldırgan kapsam dışı | `packages/cli` | `opsd.test.ts` |
+| `ops` CLI: `init`, `profile add/list/rm/doctor/rbac`, `doctor`, `audit verify`, `usage`, `daemon`, `chat [--embedded]`; parola yalnız 0600 dosyadan veya yankısız TTY isteminden (ortam değişkeninden DEĞİL) | **Enforced** | `packages/cli` | `cli.test.ts` |
+| Sohbet arayüzü: model/araç kaynaklı tüm metin ANSI/OSC/bidi/kontrol karakterlerinden arındırılarak basılır | **Enforced** | `packages/cli` | `e2e.test.ts` |
+| E-01 (Faz 0 kabul, scripted model + sahte küme): doktor → skill.load → health → events+logs (paralel) → atıflı kök neden; silme/ölçekleme reddi (S-07); canary 4 kanalda temiz (S-06); `audit verify` + bozulma tespiti (S-08); sağlayıcı bölgesi değişimi (S-13) | **Enforced** (scripted modelle). Gerçek sağlayıcıyla ELLE kabul WP8 sonrası | `packages/cli` | E-01 |
+| B-01 (sabit önek ≤ 3k), B-03 (sonuç ≤ 1,5k veya referans), B-04 (`test/e2e/baseline.json`; +%10 eşiği; sonuç toplamı ≤ 8k) | **Enforced** | `packages/cli`, `test/e2e` | B-01/03/04 |
+| Model sağlayıcıları (`OPS_PROVIDER` kaydı hazır, sağlayıcı yok) | Planned (WP8) | `packages/providers` | S-13 |
 | Sağlayıcılar (OpenAI-uyumlu, Cursor runtime) | Planned | `packages/providers`, `packages/runtimes` | S-10, S-13 |
 
 ## Faz 1 / 1b / 2 / 3

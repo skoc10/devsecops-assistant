@@ -32,6 +32,21 @@ policies/      varsayılan politika, maskeleme ve komut kataloğu dosyaları
 test/          uçtan uca senaryolar
 ```
 
+## Hızlı başlangıç (kaynak ağacından)
+
+```sh
+pnpm install
+export OPS_PASSPHRASE_FILE=~/.ops-assistant-passphrase   # 0600 izinli dosya; ortam değişkeninde parola tutulmaz
+node packages/cli/src/bin.ts init
+node packages/cli/src/bin.ts profile add k8s --id dev --kubeconfig ~/kube.yaml --env dev --scope default
+node packages/cli/src/bin.ts profile doctor dev        # fiili RBAC ↔ beyan edilen tavan
+node packages/cli/src/bin.ts profile rbac --sa-namespace ops --namespace default   # salt okunur RBAC manifesti ÜRETİR (uygulamaz)
+node packages/cli/src/bin.ts doctor                    # sandbox + ortam kimlikleri (içerik okunmaz)
+node packages/cli/src/bin.ts audit verify
+```
+
+`ops chat` için bir model sağlayıcısı gerekir (`OPS_PROVIDER`); sağlayıcılar [docs/STATUS.md](docs/STATUS.md)'da "Planned"dir (WP8). Bu aşamada sohbet döngüsü scripted sağlayıcıyla uçtan uca test edilir (E-01).
+
 ## Geliştirme
 
 Gereksinimler: Node ≥ 22.13, pnpm ≥ 10.
