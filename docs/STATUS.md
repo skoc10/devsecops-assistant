@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP3 tamamlandı (politika v0 + PEP).
+Son güncelleme: WP4 tamamlandı (kasa + broker + kubeconfig içe aktarma).
 
 ## Faz 0
 
@@ -26,7 +26,15 @@ Son güncelleme: WP3 tamamlandı (politika v0 + PEP).
 | Egress: bağlam `zoneCap` ↔ sağlayıcı bölgesi (ön ve son denetim); uygun sağlayıcı yoksa fail-closed | **Enforced** (gateway tarafı); sağlayıcı yönlendirmesi orkestratörde **Planned** | `packages/core` | T14 testleri |
 | Bütçeler: oturum çağrı sayısı, sonuç token tavanı, oturum token eşikleri (`policy.yaml` `budgets`) | **Enforced** (sayaçlar); model `usage` beslemesi orkestratörde **Planned** | `packages/policy`, `packages/core` | bütçe testleri |
 | Broker `prime`: profil secret'ları ilk çağrıdan ÖNCE M3'e kaydedilir | **Enforced** (gateway tarafı; gerçek broker WP4) | `packages/core` | S-06 |
-| Kasa + broker + kubeconfig içe aktarma | Planned | `packages/broker` | S-06, S-04 |
+| Kasa: `EncryptedFileStore` (AES-256-GCM, scrypt, girdi adı AAD'ye bağlı, 0600/0700, `close()` sıfırlar) | **Enforced** — KDF scrypt'tir (Argon2id Node çekirdeğinde yok); parola tamponu sıfırlanır, JS string kopyaları için en iyi çaba | `packages/broker` | `broker/test/vault.test.ts` |
+| Kasa: OS anahtar zinciri (Linux `secret-tool` stdin ile, macOS `security`) | **Library-only** — komut kurucusu sahte `Exec` ile test edilir; gerçek anahtar zincirine karşı denenmedi. macOS `security add-generic-password` değeri argv'de taşır (belgelenmiş sınır; `ps` ile görünür) | `packages/broker` | `broker/test/vault.test.ts` |
+| Kubeconfig içe aktarma: tek bağlam, dosya başvuruları satır içi, CA parmak izi pini; `insecure-skip-tls-verify`, `proxy-url`, `exec`, `auth-provider`, basic auth, düz http **reddedilir**; hata/uyarı metinleri secret içermez | **Enforced** | `packages/broker` | `broker/test/kubeconfig.test.ts` |
+| Profil kayıt defteri (secret taşımayan, strict şema, 0600); test kipi `admit` (imzalı sahte profil) ister ve prod'u reddeder | **Enforced** | `packages/broker` | `broker/test/registry.test.ts` |
+| `LocalBroker`: çağrı başına lease, TTL, eşzamanlı sınır, opak tutamaç, `prime`/`acquire` M3'e kaydeder; `CredentialResolver` yalnız lease etkinken malzeme verir | **Enforced**; birinci taraf adapter aynı heap'te çalışır, silme **Best-effort** (§3.5 sınırı) | `packages/broker` | `broker/test/broker.test.ts` |
+| `ProfileService` (`add`/`list`/`rm`): kimlik yalnız kasaya, hata olursa geri alma | **Enforced** (CLI bağlantısı WP7) | `packages/broker` | `broker/test/service.test.ts` |
+| Ortam kimliği taraması (yalnız varlık + izin bitleri; içerik okunmaz) | **Enforced** | `packages/broker` | `broker/test/service.test.ts` |
+| Denetim HMAC anahtarı kasada (`audit/hmac-key`) | **Enforced** | `packages/broker` | `broker/test/service.test.ts` |
+| Exec kimlik eklentisi (argv şablonu + sandbox), `connectCheck`, profil doktoru | Planned (WP6) | `packages/broker`, `packages/sandbox` | S-14, S-15 |
 | Kubernetes okuma adapter'ı | Planned | `packages/adapters/kubernetes` | C-xx |
 | Sandbox sarmalayıcı, exec eklentisi şablonu, doktor | Planned | `packages/sandbox`, `packages/broker` | S-14, S-15 |
 | Orkestratör, `opsd`, `ops chat`, tembel skill, token ölçümü | Planned | `packages/core`, `packages/cli`, `packages/skills` | E-01, B-01, B-04 |
