@@ -9,6 +9,8 @@ import {
   zoneAllows,
 } from "@ops/contracts";
 import type {
+  ActionPreview,
+  Adapter,
   ApprovalGate,
   AuditSink,
   CanonicalActionSummary,
@@ -208,9 +210,18 @@ export class ToolGateway {
       if (!ok.ok) return this.deny(st, "citation_missing", ok.why);
     }
 
-    // 7. Onay
+    // 6.5 Önizleme (yalnız mutasyon+ ve adapter destekliyorsa): neyi onayladığınızı gösterir + TOCTOU sürümü
+    let preview: ActionPreview | undefined;
+    if (st.cls !== "read" && profile && reg.adapter.preview) {
+      const pv = await this.runPreview(st, reg.adapter, desc, args, profile, "onizleme");
+      if (pv.denied) return pv.denied;
+      preview = pv.preview;
+    }
+    const previewDigest = preview ? sha256(canonicalJson({ v: preview.targetVersion ?? null, d: preview.diff ?? null })) : null;
+
+    // 7. Onay: eylem hash'i, gösterilen önizlemenin özetini de kapsar (onay = bu diff + bu sürüm)
     const actionHash = sha256(
-      canonicalJson({ tool: desc.name, args, profile: profile?.id ?? null, target, class: st.cls, policy: policy.versionHash }),
+      canonicalJson({ tool: desc.name, args, profile: profile?.id ?? null, target, class: st.cls, policy: policy.versionHash, preview: previewDigest }),
     );
     let approvalId: string | undefined;
     const isLocalWrite = desc.scope === "local" && desc.localWrite;
@@ -252,6 +263,16 @@ export class ToolGateway {
         }),
         taintedContext: session.context.tainted,
         why: decision.reasonCode,
+        ...(preview
+          ? {
+              preview: {
+                ...(preview.targetVersion !== undefined ? { targetVersion: scrubText(preview.targetVersion, known) } : {}),
+                ...(preview.diff !== undefined ? { diff: scrubText(preview.diff, known) } : {}),
+                ...(preview.impact ? { impact: preview.impact.map((x) => scrubText(x, known)) } : {}),
+                ...(preview.rollback !== undefined ? { rollback: scrubText(preview.rollback, known) } : {}),
+              },
+            }
+          : {}),
         ...(isLocalWrite && decision.reasonCode === "approval_required" && st.cls === "read"
           ? { note: "Bu onay, bu oturumda AYNI aracın çalışma alanı (anlık kopya) yazımlarını kapsar; bağlamda untrusted içerik belirirse yeniden sorulur." }
           : {}),
@@ -321,6 +342,18 @@ export class ToolGateway {
       }
     }
 
+    // 9.5 TOCTOU: onaydan sonra hedef değişti mi? (önizleme yeniden hesaplanır; sürüm/diff özeti eşleşmezse ÇALIŞMAZ)
+    if (preview && profile && lease) {
+      const again = await this.previewOnce(st, reg.adapter, desc, args, profile, lease, req.signal);
+      const digest2 = again.preview ? sha256(canonicalJson({ v: again.preview.targetVersion ?? null, d: again.preview.diff ?? null })) : null;
+      if (again.error !== undefined || digest2 !== previewDigest) {
+        await this.releaseLease(st, lease);
+        return again.error !== undefined
+          ? this.deny(st, "preview_failed", `çalıştırma öncesi yeniden doğrulama başarısız: ${scrubText(again.error, known)}`)
+          : this.deny(st, "target_changed", "onaydan sonra hedefin sürümü/içeriği değişti; hiçbir şey uygulanmadı");
+      }
+    }
+
     // 10. Adapter (zaman aşımı + iptal)
     let raw: RawToolOutput;
     const ac = new AbortController();
@@ -329,7 +362,7 @@ export class ToolGateway {
     const timer = setTimeout(() => ac.abort(), desc.limits.timeoutMs);
     try {
       raw = await Promise.race([
-        reg.adapter.invoke({ tool: desc.name, args, profile: profile ?? (undefined as never), handle: lease?.handle ?? null, callId: st.callId, signal: ac.signal, limits: desc.limits }),
+        reg.adapter.invoke({ tool: desc.name, args, profile: profile ?? (undefined as never), handle: lease?.handle ?? null, callId: st.callId, signal: ac.signal, limits: desc.limits, ...(preview?.targetVersion !== undefined ? { approvedVersion: preview.targetVersion } : {}) }),
         new Promise<never>((_, reject) => {
           ac.signal.addEventListener("abort", () => reject(new OpsError("timeout", "araç zaman aşımına uğradı veya iptal edildi")), { once: true });
         }),
@@ -435,6 +468,62 @@ export class ToolGateway {
       subjects,
       tokens: { estimate: processed.byReference ? processed.fullTokens : processed.tokens },
     };
+  }
+
+  /** Tek önizleme çağrısı (zaman aşımı + iptal). Hata mesajı döner, atmaz. */
+  private async previewOnce(
+    st: CallState,
+    adapter: Adapter,
+    desc: ToolDescriptor,
+    args: unknown,
+    profile: Profile,
+    lease: Lease,
+    signal?: AbortSignal,
+  ): Promise<{ preview?: ActionPreview; error?: string }> {
+    const ac = new AbortController();
+    const onAbort = (): void => ac.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => ac.abort(), Math.min(desc.limits.timeoutMs, 30_000));
+    try {
+      const preview = await Promise.race([
+        adapter.preview!({ tool: desc.name, args, profile, handle: lease.handle, callId: st.callId, signal: ac.signal, limits: desc.limits }),
+        new Promise<never>((_, reject) => ac.signal.addEventListener("abort", () => reject(new OpsError("timeout", "önizleme zaman aşımına uğradı")), { once: true })),
+      ]);
+      return { preview };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Onay öncesi önizleme: kendi (kısa) lease'iyle, salt okuma. Başarısızlık = ret (fail-closed). */
+  private async runPreview(
+    st: CallState,
+    adapter: Adapter,
+    desc: ToolDescriptor,
+    args: unknown,
+    profile: Profile,
+    _label: string,
+  ): Promise<{ preview: ActionPreview; denied?: undefined } | { denied: ToolResult; preview?: undefined }> {
+    const { audit, session, known } = this.d;
+    let lease: Lease;
+    try {
+      lease = await this.d.broker.acquire({ profile, purpose: `${desc.name}:preview`, callId: st.callId, ttlSec: Math.min(profile.maxLeaseTtlSec, 60) }, known);
+    } catch (e) {
+      return { denied: await this.deny(st, "preview_failed", `önizleme için kimlik bağlanamadı: ${scrubText(e instanceof Error ? e.message : String(e), known)}`) };
+    }
+    try {
+      await audit.append({ event: "lease", sessionId: session.id, callId: st.callId, profile: profile.id, message: "acquired (önizleme)" });
+    } catch {
+      await lease.release().catch(() => undefined);
+      return { denied: await this.deny(st, "audit_unavailable", "lease denetimi yazılamadı; çağrı çalıştırılmadı", { skipAudit: true }) };
+    }
+    const r = await this.previewOnce(st, adapter, desc, args, profile, lease, st.req.signal);
+    await this.releaseLease(st, lease);
+    if (r.error !== undefined || !r.preview) return { denied: await this.deny(st, "preview_failed", `önizleme üretilemedi: ${scrubText(r.error ?? "?", known)}`) };
+    return { preview: r.preview };
   }
 
   private zoneCapFor(sensitivity: Sensitivity, profile: Profile | null): TrustZone {

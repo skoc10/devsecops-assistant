@@ -47,6 +47,21 @@ export interface CredentialHandle {
   readonly leaseId: string;
 }
 
+/**
+ * Mutasyon öncesi önizleme: onay ekranında gösterilir, `targetVersion` eylem hash'ine dahil edilir ve
+ * çalıştırmadan HEMEN önce yeniden hesaplanıp karşılaştırılır (TOCTOU). Çıktı PEP'te redakte edilir.
+ */
+export interface ActionPreview {
+  /** Hedefin şu anki sürümü/özeti (ör. k8s `resourceVersion`, imaj digest'i). Değişirse eylem ÇALIŞMAZ. */
+  readonly targetVersion?: string;
+  /** Birleşik diff (canlı ↔ önerilen). */
+  readonly diff?: string;
+  /** Kısa etki satırları (ör. "2 replika → 5"). */
+  readonly impact?: readonly string[];
+  /** Geri alma planı (tek cümle/komut). */
+  readonly rollback?: string;
+}
+
 export interface AdapterCall {
   readonly tool: string;
   readonly args: unknown;
@@ -56,6 +71,8 @@ export interface AdapterCall {
   readonly callId: string;
   readonly signal: AbortSignal;
   readonly limits: ToolLimits;
+  /** Onaylanan hedef sürümü: adapter bunu yazma ön koşulu yapar (ör. `resourceVersion`); uyuşmazsa yazmaz. */
+  readonly approvedVersion?: string;
 }
 
 /** Adapter'ın ham çıktısı; redaksiyon/kompaktlaştırma PEP çıktı hattında yapılır. */
@@ -91,6 +108,11 @@ export interface Adapter {
   ): Promise<{ identity: string; targetFingerprint: string }>;
   /** Beyan edilen tavan ↔ fiili yetki denetimi; oturum başında ve `profile add`'de çalışır. */
   doctor?(handle: CredentialHandle, profile: Profile): Promise<DoctorReport>;
+  /**
+   * Yalnız `read` üstü araçlarda çağrılır (lease ile, salt okuma): onay ekranı için diff/etki/geri alma ve
+   * TOCTOU sürümü. Hata verirse çağrı REDDEDİLİR (`preview_failed`).
+   */
+  preview?(call: AdapterCall): Promise<ActionPreview>;
   invoke(call: AdapterCall): Promise<RawToolOutput>;
   dispose?(): Promise<void>;
 }

@@ -33,6 +33,7 @@ const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n -
 const safe = (s: string, n = 300): string => clip(stripControlChars(s), n);
 
 export const CONFIRM_PHRASE = "ONAYLIYORUM";
+const DIFF_LINES = 60;
 
 /** Sınıfa göre artan sürtünme: kullanıcının yazması gereken metin. */
 export function requiredAnswer(s: CanonicalActionSummary): string {
@@ -57,6 +58,19 @@ export function renderSummary(s: CanonicalActionSummary, extra: { index: number;
   if (s.taintedContext) lines.push("⚠ Bağlamda UNTRUSTED içerik var (log/olay/dosya). Bu çağrı o içeriğin etkisiyle önerilmiş olabilir.");
   for (const e of s.citedEvidence) lines.push(`Kanıt:     ${safe(e.id, 20)} — ${safe(e.summary, 200)}`);
   if (s.note) lines.push(`Kapsam:    ${safe(s.note, 300)}`);
+  const pv = s.preview;
+  if (pv) {
+    if (pv.targetVersion) lines.push(`Hedef sürüm: ${safe(pv.targetVersion, 80)}   (onay bu sürüme bağlıdır; çalıştırmadan önce yeniden doğrulanır)`);
+    for (const i of (pv.impact ?? []).slice(0, 8)) lines.push(`Etki:      ${safe(i, 200)}`);
+    if (pv.diff) {
+      const all = pv.diff.split("\n");
+      const shown = all.slice(0, DIFF_LINES);
+      lines.push("Diff:");
+      for (const l of shown) lines.push(`  ${safe(l, 160)}`);
+      if (all.length > shown.length) lines.push(`  … (${all.length - shown.length} satır daha; eylem hash'i diff'in TAMAMINI kapsar)`);
+    }
+    if (pv.rollback) lines.push(`Geri alma: ${safe(pv.rollback, 240)}`);
+  }
   lines.push(`Süre: ${extra.expiresInSec} sn   (bu oturumda ${extra.index}. onay)`);
   return lines.join("\n");
 }

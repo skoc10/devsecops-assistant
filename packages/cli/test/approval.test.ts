@@ -131,6 +131,19 @@ describe("TtyApprovalGate (v0)", () => {
     expect(text).toContain("UNTRUSTED");
   });
 
+  it("Faz 2a: özet diff/etki/geri alma/sürüm gösterir; diff kısaltılır ama kısaltma ve hash notu belirtilir; kontrol karakterleri temizlenir", () => {
+    const diff = Array.from({ length: 90 }, (_, i) => `${i % 2 ? "+" : "-"} satır ${i}`).join("\n") + "\n+ \u001b[31mkırmızı\u001b[0m";
+    const text = renderSummary(summary({ preview: { targetVersion: "rv-42", diff, impact: ["2 replika → 5"], rollback: "kubectl scale deploy/api --replicas=2" } }), { index: 1, expiresInSec: 300 });
+    expect(text).toContain("Hedef sürüm: rv-42");
+    expect(text).toContain("Etki:      2 replika → 5");
+    expect(text).toContain("Geri alma: kubectl scale deploy/api --replicas=2");
+    expect(text).toContain("Diff:");
+    expect(text).toContain("  - satır 0");
+    expect(text).not.toContain("satır 70"); // ilk 60 satır
+    expect(text).toMatch(/… \(\d+ satır daha; eylem hash'i diff'in TAMAMINI kapsar\)/);
+    expect(text).not.toContain("\u001b");
+  });
+
   it("start/end olayları yayılır (sohbet girdisini duraklatmak için)", async () => {
     const tty = fakeTty(["evet"]);
     const g = gateWith(tty);

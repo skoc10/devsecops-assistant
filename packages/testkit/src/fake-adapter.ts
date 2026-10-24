@@ -1,5 +1,6 @@
 import { ADAPTER_CONTRACT, AdapterManifestSchema } from "@ops/contracts";
 import type {
+  ActionPreview,
   Adapter,
   AdapterCall,
   AdapterKind,
@@ -27,6 +28,8 @@ export class FakeAdapter implements Adapter {
   readonly calls: AdapterCall[] = [];
   /** Hedef çözümünü bozmak için: pin uyuşmazlığı testleri. */
   endpointOverride: string | null = null;
+  /** Mutasyon önizlemesi (testler atar). Atanmazsa adapter önizleme DESTEKLEMEZ. */
+  preview?: (call: AdapterCall) => Promise<ActionPreview>;
   private readonly specs: Map<string, FakeToolSpec>;
 
   constructor(id: string, kind: AdapterKind, profileKind: ProfileKind, tools: readonly FakeToolSpec[]) {

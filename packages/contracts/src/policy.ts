@@ -35,6 +35,8 @@ export const REASON_CODES = [
   "call_budget_exceeded",
   "adapter_error",
   "timeout",
+  "target_changed",
+  "preview_failed",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
 

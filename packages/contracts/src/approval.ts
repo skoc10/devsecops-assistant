@@ -15,6 +15,13 @@ export interface CanonicalActionSummary {
   readonly taintedContext: boolean;
   /** Neden soruluyor: `class`, `taint_escalation`, `policy_ask`, ... */
   readonly why: string;
+  /** Adapter önizlemesi (PEP'te redakte edilmiş): diff, etki, geri alma, hedef sürümü. */
+  readonly preview?: {
+    readonly targetVersion?: string;
+    readonly diff?: string;
+    readonly impact?: readonly string[];
+    readonly rollback?: string;
+  };
   /** Onayın kapsamı hakkında PEP'in kendi notu (ör. oturum boyunca çalışma alanı yazımları). */
   readonly note?: string;
 }
