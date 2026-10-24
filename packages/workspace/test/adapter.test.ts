@@ -13,8 +13,8 @@ import { KnownSecrets, scrubText } from "@ops/redaction";
 import { detectSandbox } from "@ops/sandbox";
 import { FakeBroker, checkAdapterStructure } from "@ops/testkit";
 import { WorkspaceAdapter, WorkspaceManager, WorkspaceRegistry } from "../src/index.ts";
-import { makeRepo } from "./repo.ts";
-import type { TestRepo } from "./repo.ts";
+import { makeRepo } from "@ops/testkit/git-repo";
+import type { TestRepo } from "@ops/testkit/git-repo";
 
 const sandbox = await detectSandbox();
 

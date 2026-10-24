@@ -7,7 +7,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./conformance": "./src/conformance.ts",
-    "./postgres": "./src/postgres.ts"
+    "./postgres": "./src/postgres.ts",
+    "./git-repo": "./src/git-repo.ts"
   },
   "dependencies": {
     "@ops/contracts": "workspace:*",

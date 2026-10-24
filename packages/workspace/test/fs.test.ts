@@ -7,8 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { detectSandbox } from "@ops/sandbox";
 import { makeCanary } from "@ops/testkit";
 import { WorktreeFs, createSnapshot } from "../src/index.ts";
-import { makeRepo } from "./repo.ts";
-import type { TestRepo } from "./repo.ts";
+import { makeRepo } from "@ops/testkit/git-repo";
+import type { TestRepo } from "@ops/testkit/git-repo";
 
 const run = promisify(execFile);
 const sandbox = await detectSandbox();

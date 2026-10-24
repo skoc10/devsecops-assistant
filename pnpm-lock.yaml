@@ -52,6 +52,40 @@ importers:
         specifier: workspace:*
         version: link:../../testkit
 
+  packages/adapters/iac:
+    dependencies:
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../../contracts
+      '@ops/redaction':
+        specifier: workspace:*
+        version: link:../../redaction
+      '@ops/sandbox':
+        specifier: workspace:*
+        version: link:../../sandbox
+      '@ops/workspace':
+        specifier: workspace:*
+        version: link:../../workspace
+      yaml:
+        specifier: ^2.0.0
+        version: 2.9.1
+      zod:
+        specifier: ^4.0.0
+        version: 4.6.7
+    devDependencies:
+      '@ops/audit':
+        specifier: workspace:*
+        version: link:../../audit
+      '@ops/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@ops/policy':
+        specifier: workspace:*
+        version: link:../../policy
+      '@ops/testkit':
+        specifier: workspace:*
+        version: link:../../testkit
+
   packages/adapters/kubernetes:
     dependencies:
       '@ops/broker':

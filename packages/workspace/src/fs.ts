@@ -171,6 +171,22 @@ export class WorktreeFs {
     return { path: rel, created, bytes, lines: content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0), sha256: sha256(content) };
   }
 
+  /** Okunabilir (politikaya uyan, güvenli adlı) tüm dosyalar; deterministik sıra. */
+  async listFiles(): Promise<string[]> {
+    return (await this.allFiles()).filter((f) => readCheck(f, this.policy).ok).sort();
+  }
+
+  /** Tüm metni okur (satır dilimi yok); aynı yol/boyut/ikili denetimleri. */
+  async readText(path: string): Promise<string> {
+    const rel = this.checkedRead(path);
+    const kind = await this.walk(rel);
+    if (kind !== "file") throw new OpsError("fs_not_found", `dosya yok: ${rel}`);
+    const buf = await readFile(join(this.snapshot.workDir, rel));
+    if (buf.length > this.limits.maxReadBytes) throw new OpsError("fs_too_large", `dosya çok büyük (${buf.length} bayt)`);
+    if (buf.includes(0)) throw new OpsError("fs_binary", "ikili dosya okunmaz");
+    return buf.toString("utf8");
+  }
+
   private async allFiles(dirRel = ""): Promise<string[]> {
     const out: string[] = [];
     const entries = await readdir(join(this.snapshot.workDir, dirRel), { withFileTypes: true });

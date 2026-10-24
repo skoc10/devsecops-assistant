@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { detectSandbox } from "@ops/sandbox";
 import { WorkspaceRegistry, createSnapshot } from "../src/index.ts";
-import { SECRET_TFVARS, makeRepo } from "./repo.ts";
-import type { TestRepo } from "./repo.ts";
+import { SECRET_TFVARS, makeRepo } from "@ops/testkit/git-repo";
+import type { TestRepo } from "@ops/testkit/git-repo";
 
 const sandbox = await detectSandbox();
 const P = { writePaths: ["**"], denyPaths: [] as string[] };
