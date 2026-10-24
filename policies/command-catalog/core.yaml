@@ -1,0 +1,80 @@
+# Komut kataloğu (kimliksiz `shell.run`). Kataloğa girmeyen her komut `destroy` muamelesi görür.
+# Bayraklar tek tek izinlidir; bilinmeyen bayrak = sınıflanamaz. Değer alan bayrakların değeri
+# `valuePattern`'e uymalı. Yol argümanları iş alanı kökü (jail) içinde kalmalı ve kimlik/secret
+# yolu desenlerine uymamalı. `read` sınıfı `network: open` komutu KABUL ETMEZ.
+version: 1
+commands:
+  - binary: git
+    description: Depo durumu ve geçmişi (salt okunur). Çalıştırmada sertleştirme öneki otomatik eklenir.
+    class: read
+    network: none
+    hardening:
+      prefix: ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.pager=cat", "-c", "protocol.ext.allow=never", "-c", "safe.directory=*", "--no-pager"]
+      env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" }
+      # repo yapılandırmasındaki harici diff/textconv sürücüleri kod çalıştırır
+      appendAfter: { diff: ["--no-ext-diff", "--no-textconv"], log: ["--no-ext-diff", "--no-textconv"], show: ["--no-ext-diff", "--no-textconv"] }
+    subcommands:
+      - { path: [status], flags: ["--short", "-s", "--branch", "-b", "--porcelain"], positional: { kind: path, max: 20 } }
+      - path: [log]
+        flags: ["--oneline", "--stat", "--name-only", "--name-status", "--no-color", "--graph", "--decorate", "--no-merges", "--first-parent"]
+        valueFlags: ["-n", "--max-count", "--since", "--until", "--author"]
+        positional: { kind: ref, max: 5, afterDoubleDash: path }
+      - path: [diff]
+        flags: ["--stat", "--name-only", "--name-status", "--cached", "--staged", "--no-color", "--shortstat", "--numstat"]
+        positional: { kind: ref, max: 5, afterDoubleDash: path }
+      - path: [show]
+        flags: ["--stat", "--name-only", "--name-status", "--no-color", "--oneline", "--shortstat"]
+        positional: { kind: ref, max: 3, afterDoubleDash: path }
+      - { path: [ls-files], flags: ["--cached", "-c", "--others", "-o", "--exclude-standard"], positional: { kind: path, max: 20 } }
+      - { path: [branch], flags: ["--list", "-a", "-r", "-v", "--all", "--remotes", "--no-color"], positional: { kind: none } }
+  - binary: ls
+    description: Dizin listesi
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: ["-l", "-a", "-h", "-1", "-R", "-t", "-S", "-r", "--color=never"], positional: { kind: path, max: 20 } }
+  - binary: cat
+    description: Dosya içeriği (iş alanı içinde)
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: ["-n"], positional: { kind: path, min: 1, max: 10 } }
+  - binary: head
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: [], valueFlags: ["-n", "-c"], valuePattern: "^[0-9]{1,6}$", positional: { kind: path, max: 10 } }
+  - binary: tail
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: [], valueFlags: ["-n", "-c"], valuePattern: "^[0-9]{1,6}$", positional: { kind: path, max: 10 } }
+  - binary: wc
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: ["-l", "-w", "-c", "-m"], positional: { kind: path, max: 10 } }
+  - binary: grep
+    description: Desen arama; ilk konumsal argüman desendir, kalanlar iş alanı içi yollar. -r ile secret dosyalarına inilmesin diye hariç tutma öneki otomatik eklenir
+    class: read
+    network: none
+    hardening:
+      prefix: ["--exclude-dir=.git", "--exclude-dir=.terraform", "--exclude-dir=.ssh", "--exclude-dir=.aws", "--exclude-dir=.kube", "--exclude=.env*", "--exclude=*.pem", "--exclude=*.key", "--exclude=*.p12", "--exclude=*.pfx", "--exclude=*.tfstate*", "--exclude=*.tfvars", "--exclude=id_*", "--exclude=credentials", "--exclude=.netrc", "--exclude=.npmrc"]
+    subcommands:
+      - { path: [], flags: ["-n", "-i", "-r", "-R", "-E", "-F", "-v", "-c", "-l", "-H", "-h", "-w", "-x", "-o", "-q", "-s", "--color=never"], valueFlags: ["-m", "-A", "-B", "-C"], valuePattern: "^[0-9]{1,4}$", positional: { kind: path, firstIsPattern: true, min: 1, max: 20 } }
+  - binary: jq
+    description: JSON süzme; ilk konumsal argüman süzgeçtir
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: ["-r", "-c", "-e", "-S", "-M", "-n", "-s", "--raw-output", "--compact-output", "--sort-keys"], positional: { kind: path, firstIsPattern: true, min: 1, max: 5 } }
+  - binary: pwd
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: [], positional: { kind: none } }
+  - binary: date
+    class: read
+    network: none
+    subcommands:
+      - { path: [], flags: ["-u", "-I", "--utc", "--iso-8601"], positional: { kind: none } }

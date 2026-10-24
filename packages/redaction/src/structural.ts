@@ -89,7 +89,9 @@ function walk(value: unknown, p: StructuralProfile, c: Counter, path: readonly s
       c.add(`m1:drop-key:${k}`);
       continue;
     }
-    if (p.maskKeys?.test(k) && v !== null && v !== undefined && v !== "" && typeof v !== "boolean") {
+    // `tokens: 1200` gibi SAYAÇ alanları (LLM token sayısı) secret değildir; sayısal parola/PIN alanları yine maskelenir
+    const isCounter = typeof v === "number" && /tokens?(?:_?count|_?limit|_?usage|_?estimate)?$/i.test(k);
+    if (p.maskKeys?.test(k) && v !== null && v !== undefined && v !== "" && typeof v !== "boolean" && !isCounter) {
       // yalnız değer taşıyan alanları maskele (boş/boolean alan bilgi sızdırmaz)
       c.add("m1:mask-key");
       out[k] = redacted("field");

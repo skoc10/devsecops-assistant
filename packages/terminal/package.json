@@ -1,0 +1,19 @@
+{
+  "name": "@ops/terminal",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/classifiers": "workspace:*",
+    "@ops/contracts": "workspace:*",
+    "@ops/sandbox": "workspace:*",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@ops/testkit": "workspace:*"
+  }
+}

@@ -1,4 +1,7 @@
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
+import { mergeCatalogs, parseCatalog, shellCommandClassifier } from "@ops/classifiers";
+import type { CommandCatalog } from "@ops/classifiers";
+import { TerminalAdapter, assertSafeWorkdir } from "@ops/terminal";
 import { KubernetesAdapter } from "@ops/adapter-kubernetes";
 import { AuditLog, FileAuditStorage, FileHeadAnchor } from "@ops/audit";
 import {
@@ -18,7 +21,7 @@ import { KnownSecrets, scrubText } from "@ops/redaction";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { SkillRegistry, createSkillAdapter } from "@ops/skills";
-import { BUILTIN_POLICY_FILE, BUILTIN_SKILLS_DIR, ensureHome } from "./paths.ts";
+import { BUILTIN_CATALOG_FILE, BUILTIN_POLICY_FILE, BUILTIN_SKILLS_DIR, ensureHome } from "./paths.ts";
 import type { OpsPaths } from "./paths.ts";
 
 export interface RuntimeOptions {
@@ -32,6 +35,8 @@ export interface RuntimeOptions {
   readonly sandbox?: Sandbox | null | "detect";
   readonly policy?: PolicyDocument;
   readonly builtinSkillsDir?: string;
+  /** `shell.run` iş alanı (salt-okunur bağlanır). Verilmezse ve/veya sandbox yoksa terminal aracı KAYITLI DEĞİLDİR. */
+  readonly workdir?: string;
   readonly approval?: ApprovalGate;
   readonly registryOptions?: Partial<ProfileRegistryOptions>;
   readonly now?: () => Date;
@@ -116,8 +121,27 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const adapter = new KubernetesAdapter(broker.resolver);
   toolRegistry.register(adapter, adapter.definitions);
 
+  // Terminal servisi: yalnız iş alanı verildiyse VE OS sandbox varsa (aksi halde kabuk yok).
+  const availableAdapters = ["kubernetes"];
+  const classifiers: ((tool: string, args: unknown) => ReturnType<ReturnType<typeof shellCommandClassifier>>)[] = [];
+  let terminalNote = "kapalı";
+  if (o.workdir) {
+    if (!sandbox || sandbox.kind === "none") {
+      terminalNote = "devre dışı (OS sandbox yok)";
+    } else {
+      const workdir = await assertSafeWorkdir(o.workdir);
+      let catalog: CommandCatalog = parseCatalog(await readFile(BUILTIN_CATALOG_FILE, "utf8"));
+      if (await exists(o.paths.userCatalogFile)) catalog = mergeCatalogs(catalog, parseCatalog(await readFile(o.paths.userCatalogFile, "utf8")));
+      const terminal = new TerminalAdapter({ sandbox, catalog, workdir });
+      toolRegistry.register(terminal, terminal.definitions);
+      classifiers.push(shellCommandClassifier(catalog, workdir));
+      availableAdapters.push("terminal");
+      terminalNote = `açık (${workdir})`;
+    }
+  }
+
   const skills = await SkillRegistry.load({ builtinDir: o.builtinSkillsDir ?? BUILTIN_SKILLS_DIR, userDir: o.paths.userSkillsDir });
-  skills.setAvailableAdapters(["kubernetes"]);
+  skills.setAvailableAdapters(availableAdapters);
   const skillAdapter = createSkillAdapter(skills, session, () => toolRegistry);
   toolRegistry.register(skillAdapter.adapter, skillAdapter.definitions);
 
@@ -129,6 +153,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     broker,
     evidence,
     known,
+    ...(classifiers.length ? { classifiers } : {}),
     ...(o.approval ? { approval: o.approval } : {}),
     ...(o.now ? { now: o.now } : {}),
   });
@@ -137,7 +162,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     event: "session_start",
     sessionId: session.id,
     policyVersionHash: policy.versionHash,
-    message: `sandbox=${sandbox?.kind ?? "yok"} skills=${skills.all().map((s) => s.name).join(",")}`,
+    message: `sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} skills=${skills.all().map((s) => s.name).join(",")}`,
   });
 
   const diagnoseProfile = async (id: string): Promise<{ report: DoctorReport; profile: Profile }> => {

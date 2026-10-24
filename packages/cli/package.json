@@ -22,7 +22,9 @@
     "@ops/skills": "workspace:*",
     "zod": "^4.0.0",
     "@ops/providers": "workspace:*",
-    "@ops/runtime-cursor": "workspace:*"
+    "@ops/runtime-cursor": "workspace:*",
+    "@ops/classifiers": "workspace:*",
+    "@ops/terminal": "workspace:*"
   },
   "devDependencies": {
     "@ops/testkit": "workspace:*",

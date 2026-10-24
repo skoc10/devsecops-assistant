@@ -37,6 +37,8 @@ export interface CliEnv {
   /** Test: sağlayıcıyı doğrudan ver. */
   readonly provider?: ModelProvider;
   readonly providerFactory?: ProviderFactory;
+  /** `shell.run` iş alanı (varsayılan: OPS_WORKDIR). */
+  readonly workdir?: string;
   /** Onay kapısı (test: sahte TTY). Varsayılan: `/dev/tty`; açılamazsa onay REDDEDİLİR. */
   readonly approval?: TtyApprovalGate;
   /** `daemon` komutunun beklemesini durduran sinyal (test). */
@@ -57,6 +59,7 @@ const USAGE = [
   "  provider list | set-key AD         sağlayıcıları listele / API anahtarını kasaya yaz (OPS_PROVIDER_KEY_FILE veya TTY)",
   "  daemon                             opsd'yi başlat (UDS)",
   "  chat [--embedded]                  sohbet (opsd'ye bağlanır; --embedded süreç içi)",
+  "  (ortam) OPS_WORKDIR=DİZİN          shell.run iş alanı (salt-okunur; OS sandbox gerekir; ev dizini olamaz)",
 ].join("\n");
 
 const out = (c: CliEnv, s: string): void => void c.io.output.write(`${s}\n`);
@@ -69,6 +72,7 @@ async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approv
     ...(c.store ? { store: c.store } : { passphrase: () => readPassphrase(c.env, c.io) }),
     ...(c.scryptParams ? { scryptParams: c.scryptParams } : {}),
     ...(c.sandbox !== undefined ? { sandbox: c.sandbox } : {}),
+    ...(c.workdir ?? c.env["OPS_WORKDIR"] ? { workdir: (c.workdir ?? c.env["OPS_WORKDIR"]) as string } : {}),
   });
   try {
     return await fn(rt);

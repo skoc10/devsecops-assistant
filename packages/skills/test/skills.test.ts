@@ -15,7 +15,7 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
   it("yüklenir, hata yok, gövde sınırları içinde; tier dizinden gelir", async () => {
     const reg = await SkillRegistry.load({ builtinDir });
     expect(reg.issues).toEqual([]);
-    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes", "local-shell"]);
     for (const s of reg.all()) {
       expect(s.tier).toBe("builtin");
       expect(s.tokens).toBeLessThanOrEqual(LIMITS.bodyTokens);
@@ -26,11 +26,12 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     expect(reg.get("kubernetes")?.sidecar.requests.toolsets).toEqual(["k8s"]);
   });
 
-  it("yerleşik skill gövdeleri küçük (kubernetes ≤ 700, genel ≤ 400 token) ve meta blok ≤ 250 token", async () => {
+  it("yerleşik skill gövdeleri küçük (kubernetes ≤ 700, genel ≤ 400, local-shell ≤ 650 token) ve meta blok ≤ 300 token", async () => {
     const reg = await SkillRegistry.load({ builtinDir });
     expect(reg.get("kubernetes")!.tokens).toBeLessThanOrEqual(700);
     expect(reg.get("generic-diagnosis")!.tokens).toBeLessThanOrEqual(400);
-    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(250);
+    expect(reg.get("local-shell")!.tokens).toBeLessThanOrEqual(650);
+    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(300);
   });
 
   it("gerektirdiği adapter kayıtlı değilse skill ilan edilmez", async () => {
@@ -38,7 +39,9 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     reg.setAvailableAdapters([]);
     expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis"]);
     reg.setAvailableAdapters(["kubernetes"]);
-    expect(reg.all().length).toBe(2);
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes"]);
+    reg.setAvailableAdapters(["kubernetes", "terminal"]);
+    expect(reg.all().length).toBe(3);
   });
 
   it("B-01: sabit önek (sistem + meta + çekirdek araçlar) ≤ 3k token", async () => {

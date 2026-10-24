@@ -13,6 +13,8 @@ export interface OpsPaths {
   readonly socket: string;
   readonly userSkillsDir: string;
   readonly policyFile: string;
+  /** Kullanıcı komut kataloğu (yerleşiği GENİŞLETİR, geçersiz kılamaz). */
+  readonly userCatalogFile: string;
 }
 
 /** `OPS_HOME` (varsayılan `~/.ops-assistant`). Tüm durum burada: tek kullanıcı, yerel. */
@@ -27,6 +29,7 @@ export function resolvePaths(home: string = process.env["OPS_HOME"] ?? join(home
     socket: join(home, "run", "opsd.sock"),
     userSkillsDir: join(home, "skills"),
     policyFile: join(home, "policy.yaml"),
+    userCatalogFile: join(home, "command-catalog.yaml"),
   };
 }
 
@@ -38,3 +41,4 @@ export async function ensureHome(p: OpsPaths): Promise<void> {
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 export const BUILTIN_SKILLS_DIR = join(REPO_ROOT, "skills");
 export const BUILTIN_POLICY_FILE = join(REPO_ROOT, "policies", "policy.yaml");
+export const BUILTIN_CATALOG_FILE = join(REPO_ROOT, "policies", "command-catalog", "core.yaml");

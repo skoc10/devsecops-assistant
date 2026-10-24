@@ -51,3 +51,17 @@ describe("M1 yapısal reddet listesi", () => {
     expect(JSON.stringify(apply(deep).out)).toContain("max-depth");
   });
 });
+
+describe("M1: sayaç alanları yanlış pozitif vermez", () => {
+  it("sayısal tokens/maxTokens/input_tokens alanları korunur; sayısal parola ve metin token maskelenir", () => {
+    const c = new Counter();
+    const out = applyStructural({ tokens: 1200, maxTokens: 50, input_tokens: 7, tokenCount: 3, password: 12345678, token: "abc", api_key: 99999 }, DEFAULT_PROFILE, c) as Record<string, unknown>;
+    expect(out["tokens"]).toBe(1200);
+    expect(out["maxTokens"]).toBe(50);
+    expect(out["input_tokens"]).toBe(7);
+    expect(out["tokenCount"]).toBe(3);
+    expect(String(out["password"])).toContain("redacted");
+    expect(String(out["token"])).toContain("redacted");
+    expect(String(out["api_key"])).toContain("redacted");
+  });
+});

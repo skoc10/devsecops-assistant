@@ -83,6 +83,22 @@ importers:
         specifier: workspace:*
         version: link:../testkit
 
+  packages/classifiers:
+    dependencies:
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      yaml:
+        specifier: ^2.0.0
+        version: 2.9.1
+      zod:
+        specifier: ^4.0.0
+        version: 4.6.7
+    devDependencies:
+      fast-check:
+        specifier: ^4.10.2
+        version: 4.10.2
+
   packages/cli:
     dependencies:
       '@ops/adapter-kubernetes':
@@ -94,6 +110,9 @@ importers:
       '@ops/broker':
         specifier: workspace:*
         version: link:../broker
+      '@ops/classifiers':
+        specifier: workspace:*
+        version: link:../classifiers
       '@ops/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -118,6 +137,9 @@ importers:
       '@ops/skills':
         specifier: workspace:*
         version: link:../skills
+      '@ops/terminal':
+        specifier: workspace:*
+        version: link:../terminal
       zod:
         specifier: ^4.0.0
         version: 4.6.7
@@ -236,6 +258,25 @@ importers:
       yaml:
         specifier: ^2.0.0
         version: 2.9.1
+      zod:
+        specifier: ^4.0.0
+        version: 4.6.7
+    devDependencies:
+      '@ops/testkit':
+        specifier: workspace:*
+        version: link:../testkit
+
+  packages/terminal:
+    dependencies:
+      '@ops/classifiers':
+        specifier: workspace:*
+        version: link:../classifiers
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@ops/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       zod:
         specifier: ^4.0.0
         version: 4.6.7

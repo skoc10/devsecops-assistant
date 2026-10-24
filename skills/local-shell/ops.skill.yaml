@@ -1,0 +1,5 @@
+requires:
+  adapters: [terminal]
+requests:
+  toolsets: [shell]
+model_hint: large
