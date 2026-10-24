@@ -1,7 +1,7 @@
 import { lstat, readlink } from "node:fs/promises";
 import { DEFAULT_PATH, validateSpec } from "./types.ts";
-import type { Sandbox, SandboxResult, SandboxSpec } from "./types.ts";
-import { spawnLimited } from "./spawn.ts";
+import type { Sandbox, SandboxProcess, SandboxResult, SandboxSpec } from "./types.ts";
+import { spawnLimited, spawnStreaming } from "./spawn.ts";
 
 /** Host dizin düzeni (merged-usr symlink'leri vb.). Test için enjekte edilebilir. */
 export interface HostLayout {
@@ -94,5 +94,10 @@ export class BwrapSandbox implements Sandbox {
       env: { PATH: DEFAULT_PATH },
       ...(spec.stdin ? { stdin: spec.stdin } : {}),
     });
+  }
+
+  async spawn(spec: SandboxSpec): Promise<SandboxProcess> {
+    const args = await buildBwrapArgs(spec, this.layout);
+    return spawnStreaming(this.bwrap, args, { env: { PATH: DEFAULT_PATH }, lifetimeMs: spec.timeoutMs });
   }
 }

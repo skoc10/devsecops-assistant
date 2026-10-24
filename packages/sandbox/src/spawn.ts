@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { SandboxResult } from "./types.ts";
+import type { SandboxProcess, SandboxResult } from "./types.ts";
 
 export interface SpawnOpts {
   readonly timeoutMs: number;
@@ -54,4 +54,30 @@ export function spawnLimited(file: string, args: readonly string[], opts: SpawnO
     if (opts.stdin) child.stdin.end(Buffer.from(opts.stdin));
     else child.stdin.end();
   });
+}
+
+/** Akışlı spawn: ömür sınırı dolunca süreç grubu öldürülür. */
+export function spawnStreaming(file: string, args: readonly string[], opts: { env: Record<string, string>; lifetimeMs: number }): SandboxProcess {
+  const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"], env: opts.env, shell: false, detached: true });
+  const kill = (): void => {
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      else child.kill("SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  };
+  const timer = setTimeout(kill, opts.lifetimeMs);
+  const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve({ code: null, signal: "spawn_error" });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+  });
+  child.stdin.on("error", () => undefined);
+  return { stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, kill, exited };
 }

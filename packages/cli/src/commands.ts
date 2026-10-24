@@ -10,13 +10,15 @@ import { formatUsage, usageFromAudit } from "@ops/core";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { readAuditRecords, LocalBackend } from "./backend.ts";
+import type { Sender } from "./backend.ts";
 import { OpsdClient } from "./client.ts";
 import { renderDoctor, runChat } from "./chat.ts";
 import { Opsd } from "./opsd.ts";
 import { ensureHome } from "./paths.ts";
 import type { OpsPaths } from "./paths.ts";
 import { readPassphrase } from "./prompt.ts";
-import { createProvider } from "./providers.ts";
+import { registerBuiltinProviders } from "./builtin-providers.ts";
+import { createProvider, isAgentRuntime, providerKeyName, providerNames } from "./providers.ts";
 import type { ProviderFactory } from "./providers.ts";
 import { createRuntime } from "./runtime.ts";
 import type { Runtime } from "./runtime.ts";
@@ -47,6 +49,7 @@ const USAGE = [
   "  doctor                             ortam kimlikleri ve sandbox durumu",
   "  audit verify                       denetim zincirini doğrula",
   "  usage                              token kullanım raporu (denetimden)",
+  "  provider list | set-key AD         sağlayıcıları listele / API anahtarını kasaya yaz (OPS_PROVIDER_KEY_FILE veya TTY)",
   "  daemon                             opsd'yi başlat (UDS)",
   "  chat [--embedded]                  sohbet (opsd'ye bağlanır; --embedded süreç içi)",
 ].join("\n");
@@ -66,6 +69,15 @@ async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>): Promi
   } finally {
     await rt.close();
   }
+}
+
+registerBuiltinProviders();
+
+/** Yapılandırılan sağlayıcıya göre host döngülü veya sağlayıcı döngülü orkestratör. */
+async function engineFor(c: CliEnv, rt: Runtime): Promise<Sender> {
+  if (c.provider) return rt.createOrchestrator(c.provider);
+  const sel = await (c.providerFactory ?? createProvider)({ env: c.env, store: rt.store, known: rt.known, sandbox: rt.sandbox });
+  return isAgentRuntime(sel) ? rt.createRuntimeOrchestrator(sel) : rt.createOrchestrator(sel);
 }
 
 const list = (v: string | undefined): string[] => (v ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
@@ -152,6 +164,26 @@ export async function runCli(c: CliEnv): Promise<number> {
         throw new OpsError("usage", "profile alt komutu: add | list | rm | doctor | rbac");
       }
 
+      case "provider": {
+        if (sub === "list") {
+          out(c, providerNames().map((n) => `${n}${c.env["OPS_PROVIDER"] === n ? "  (etkin: OPS_PROVIDER)" : ""}`).join("\n"));
+          return 0;
+        }
+        if (sub === "set-key") {
+          const name = rest[0];
+          if (!name || !providerNames().includes(name)) throw new OpsError("usage", `kullanım: ops provider set-key AD (kayıtlı: ${providerNames().join(", ")})`);
+          const key = await readPassphrase(c.env, c.io, `${name} API anahtarı: `, "OPS_PROVIDER_KEY_FILE");
+          try {
+            await withRuntime(c, (rt) => rt.store.set(providerKeyName(name), key));
+          } finally {
+            key.fill(0);
+          }
+          out(c, `${name} anahtarı kasaya yazıldı (değer gösterilmez).`);
+          return 0;
+        }
+        throw new OpsError("usage", "provider alt komutu: list | set-key AD");
+      }
+
       case "doctor": {
         const home = c.env["HOME"] ?? "";
         const amb = home ? await scanAmbientCredentials(home) : [];
@@ -191,9 +223,8 @@ export async function runCli(c: CliEnv): Promise<number> {
       }
 
       case "daemon": {
-        const provider = c.provider ?? (await (c.providerFactory ?? createProvider)(c.env));
         return await withRuntime(c, async (rt) => {
-          const orch = rt.createOrchestrator(provider);
+          const orch = await engineFor(c, rt);
           const d = new Opsd({ runtime: rt, orchestrator: orch, socketPath: c.paths.socket, onShutdown: () => stopper.abort() });
           const stopper = new AbortController();
           c.stop?.addEventListener("abort", () => stopper.abort(), { once: true });
@@ -208,9 +239,8 @@ export async function runCli(c: CliEnv): Promise<number> {
       case "chat": {
         const embedded = sub === "--embedded" || rest.includes("--embedded");
         if (embedded) {
-          const provider = c.provider ?? (await (c.providerFactory ?? createProvider)(c.env));
           await withRuntime(c, async (rt) => {
-            await runChat(new LocalBackend(rt, rt.createOrchestrator(provider)), { input: c.io.input, output: c.io.output });
+            await runChat(new LocalBackend(rt, await engineFor(c, rt)), { input: c.io.input, output: c.io.output });
           });
           return 0;
         }

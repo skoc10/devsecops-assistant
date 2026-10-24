@@ -103,9 +103,15 @@ importers:
       '@ops/policy':
         specifier: workspace:*
         version: link:../policy
+      '@ops/providers':
+        specifier: workspace:*
+        version: link:../providers
       '@ops/redaction':
         specifier: workspace:*
         version: link:../redaction
+      '@ops/runtime-cursor':
+        specifier: workspace:*
+        version: link:../runtimes/cursor
       '@ops/sandbox':
         specifier: workspace:*
         version: link:../sandbox
@@ -167,6 +173,16 @@ importers:
         specifier: workspace:*
         version: link:../testkit
 
+  packages/providers:
+    dependencies:
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      '@ops/testkit':
+        specifier: workspace:*
+        version: link:../testkit
+
   packages/redaction:
     dependencies:
       '@ops/contracts':
@@ -176,6 +192,28 @@ importers:
       '@ops/testkit':
         specifier: workspace:*
         version: link:../testkit
+
+  packages/runtimes/cursor:
+    dependencies:
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../../contracts
+      '@ops/sandbox':
+        specifier: workspace:*
+        version: link:../../sandbox
+    devDependencies:
+      '@ops/broker':
+        specifier: workspace:*
+        version: link:../../broker
+      '@ops/cli':
+        specifier: workspace:*
+        version: link:../../cli
+      '@ops/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@ops/testkit':
+        specifier: workspace:*
+        version: link:../../testkit
 
   packages/sandbox:
     dependencies:

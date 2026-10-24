@@ -10,8 +10,8 @@ import {
   ensureAuditKey,
 } from "@ops/broker";
 import type { ProfileRegistryOptions } from "@ops/broker";
-import type { ApprovalGate, DoctorReport, ModelProvider, Profile, SecretStore } from "@ops/contracts";
-import { EvidenceStore, Orchestrator, Session, ToolGateway, ToolRegistry, createLocalAdapter } from "@ops/core";
+import type { AgentRuntime, ApprovalGate, DoctorReport, ModelProvider, Profile, SecretStore } from "@ops/contracts";
+import { EvidenceStore, Orchestrator, RuntimeOrchestrator, Session, ToolGateway, ToolRegistry, createLocalAdapter } from "@ops/core";
 import { DEFAULT_POLICY, PolicyEngine, loadPolicyFile } from "@ops/policy";
 import type { PolicyDocument } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
@@ -58,6 +58,8 @@ export interface Runtime {
   /** Profili doktordan geçirip oturuma bağlar; `bindable=false` ise BAĞLAMAZ. */
   bindProfile(id: string): Promise<DoctorReport>;
   createOrchestrator(provider: ModelProvider, options?: ConstructorParameters<typeof Orchestrator>[0]["options"]): Orchestrator;
+  /** Sağlayıcı-döngülü çalışma zamanı (Cursor): araçlar yalnız PEP köprüsünden. */
+  createRuntimeOrchestrator(runtime: AgentRuntime): RuntimeOrchestrator;
   close(): Promise<void>;
 }
 
@@ -160,6 +162,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     return { report, profile };
   };
 
+  let closed = false;
   const rt: Runtime = {
     paths: o.paths,
     store,
@@ -198,7 +201,14 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
         ...(options ? { options } : {}),
       });
     },
+    createRuntimeOrchestrator(runtime) {
+      // araç listesi görev başında sabitlendiğinden kullanılabilir skill'ler (en çok 2) önceden etkinleşir
+      const preload = skills.all().slice(0, 2).map((sk) => ({ name: sk.name, tier: sk.tier, body: sk.body, tokens: sk.tokens, toolsets: sk.sidecar.requests.toolsets }));
+      return new RuntimeOrchestrator({ runtime, gateway, registry: toolRegistry, session, evidence, policy, audit, known, skills, preloadSkills: preload });
+    },
     async close() {
+      if (closed) return;
+      closed = true;
       await audit.append({ event: "session_end", sessionId: session.id, message: `toolCalls=${session.usage.toolCalls}` }).catch(() => undefined);
       broker.clearExecCache();
       if ("close" in store && typeof (store as { close?: unknown }).close === "function") (store as { close(): void }).close();

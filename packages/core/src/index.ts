@@ -19,3 +19,7 @@ export { BASE_SYSTEM, buildSystem, skillMetadataBlock } from "./prompt.ts";
 export type { SkillCatalog, SkillMeta, SystemInput } from "./prompt.ts";
 export { UsageMeter, usageFromAudit, formatUsage } from "./usage.ts";
 export type { UsageReport, UsageRow } from "./usage.ts";
+export { ToolExecutor, synthDenied } from "./executor.ts";
+export type { ExecutorDeps } from "./executor.ts";
+export { RuntimeOrchestrator } from "./runtime-orchestrator.ts";
+export type { RuntimeOrchestratorDeps } from "./runtime-orchestrator.ts";

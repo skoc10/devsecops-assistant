@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP7 tamamlandı (bileşim kökü, opsd, CLI, E-01, B-04).
+Son güncelleme: WP8 tamamlandı (OpenAI-uyumlu sağlayıcı, Cursor çalışma zamanı — sahte SDK ile).
 
 ## Faz 0
 
@@ -63,8 +63,11 @@ Son güncelleme: WP7 tamamlandı (bileşim kökü, opsd, CLI, E-01, B-04).
 | Sohbet arayüzü: model/araç kaynaklı tüm metin ANSI/OSC/bidi/kontrol karakterlerinden arındırılarak basılır | **Enforced** | `packages/cli` | `e2e.test.ts` |
 | E-01 (Faz 0 kabul, scripted model + sahte küme): doktor → skill.load → health → events+logs (paralel) → atıflı kök neden; silme/ölçekleme reddi (S-07); canary 4 kanalda temiz (S-06); `audit verify` + bozulma tespiti (S-08); sağlayıcı bölgesi değişimi (S-13) | **Enforced** (scripted modelle). Gerçek sağlayıcıyla ELLE kabul WP8 sonrası | `packages/cli` | E-01 |
 | B-01 (sabit önek ≤ 3k), B-03 (sonuç ≤ 1,5k veya referans), B-04 (`test/e2e/baseline.json`; +%10 eşiği; sonuç toplamı ≤ 8k) | **Enforced** | `packages/cli`, `test/e2e` | B-01/03/04 |
-| Model sağlayıcıları (`OPS_PROVIDER` kaydı hazır, sağlayıcı yok) | Planned (WP8) | `packages/providers` | S-13 |
-| Sağlayıcılar (OpenAI-uyumlu, Cursor runtime) | Planned | `packages/providers`, `packages/runtimes` | S-10, S-13 |
+| OpenAI-uyumlu sağlayıcı (`loopOwner=host`; OpenAI/Azure uyumlu uçlar, Ollama/vLLM/llama.cpp): uzak uç yalnız https (http yalnız loopback), yönlendirme izlenmez, yanıt/süre sınırı, araç adı kodlaması (`.`↔`__`), hata mesajında API anahtarı yok, `trust_zone` yapılandırmadan (varsayılan: loopback→local, uzak→third-party-cloud), anahtar kasada (`ops provider set-key`) ve M3'te | **Enforced** (yerel sahte uca karşı gerçek HTTP); gerçek bulut sağlayıcıya karşı denenmedi | `packages/providers`, `packages/cli` | `providers/test`, `cli/test/provider-e2e.test.ts` |
+| S-13: sağlayıcı değişince politika/araç sonuçları aynı; hassas bağlamda (Secret listesi) uzak bölge sağlayıcısı REDDEDİLİR, yerel devam eder | **Enforced** | `packages/core`, `packages/cli` | `provider-e2e.test.ts` |
+| Cursor çalışma zamanı (`loopOwner=provider`): `cursor-host` ayrı süreç + OS sandbox (temiz env, ev dizini/kimlik yolları yok, anahtar yalnız stdin), tek başlatma fonksiyonu + fail-closed seçenek doğrulaması, NDJSON araç köprüsü (her çağrı PEP'e), tespit edici bekçi (alarm + iptal + oturum tainted + devre dışı), stateless tur, tavsiye kipi | **Enforced** SAHTE SDK + gerçek bwrap ile; **gerçek `@cursor/sdk` ile DOĞRULANMADI** (ADR-0004). Spike geçmeden araç modu kapalı (tavsiye kipi) | `packages/runtimes/cursor`, `packages/core` | S-10 (`cursor.test.ts`) |
+| Cursor ağı: sandbox içinde `host` ağı (sağlayıcı uçlarına allowlist YOK) | **Planned** — bilinen sınır | `packages/sandbox` | — |
+| Cursor `tool_call` adlarının/`ToolName` listesinin gerçek biçimi, `request` olayı, hook'lar | **Doğrulanmadı** (varsayım; `src/sdk.ts`, `src/map.ts`) | `packages/runtimes/cursor` | ADR-0004 |
 
 ## Faz 1 / 1b / 2 / 3
 

@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
 import { estimateTokens, zoneAllows } from "@ops/contracts";
 import type { AuditSink, Message, ModelProvider, ToolCall, ToolResult, TrustZone } from "@ops/contracts";
 import type { PolicyEngine } from "@ops/policy";
 import { scrubText } from "@ops/redaction";
 import type { KnownSecrets } from "@ops/redaction";
 import { verifyCitations } from "./citations.ts";
+import { ToolExecutor } from "./executor.ts";
 import type { CitationCheck } from "./citations.ts";
 import type { EvidenceStore } from "./evidence.ts";
 import { formatForModel } from "./format.ts";
@@ -55,24 +55,6 @@ export interface OrchestratorDeps {
   };
 }
 
-function synthDenied(tool: string, reasonCode: string, summary: string): ToolResult {
-  return {
-    callId: randomUUID(),
-    tool,
-    status: "denied",
-    summary,
-    byReference: false,
-    truncated: false,
-    redactions: [],
-    provenance: { source: "orchestrator", observedAt: new Date().toISOString() },
-    sensitivity: "none",
-    taint: "trusted",
-    subjects: [],
-    tokens: { estimate: 0 },
-    reasonCode,
-  };
-}
-
 /**
  * Orkestratör (`loopOwner: host`): modelden yalnız ARAÇ ÇAĞRISI ÖNERİSİ alır, çalıştırmaz; her
  * çağrı PEP'ten (ToolGateway) geçer. Sorumlulukları: sistem istemi/araç seti kurulumu (tembel
@@ -87,6 +69,17 @@ export class Orchestrator {
 
   constructor(deps: OrchestratorDeps) {
     this.d = deps;
+  }
+
+  private executor(zone: TrustZone): ToolExecutor {
+    return new ToolExecutor({
+      gateway: this.d.gateway,
+      registry: this.d.registry,
+      session: this.d.session,
+      audit: this.d.audit,
+      provider: { id: this.d.provider.id, model: this.d.provider.model },
+      zone,
+    });
   }
 
   get history(): readonly Message[] {
@@ -228,10 +221,10 @@ export class Orchestrator {
       const allRead = toolCalls.every((c) => registry.get(c.name)?.def.descriptor.class === "read");
       let results: ToolResult[];
       if (allRead) {
-        results = await Promise.all(toolCalls.map((c) => this.runOne(c, zone, signal)));
+        results = await Promise.all(toolCalls.map((c) => this.executor(zone).execute(c, signal)));
       } else {
         results = [];
-        for (const c of toolCalls) results.push(await this.runOne(c, zone, signal));
+        for (const c of toolCalls) results.push(await this.executor(zone).execute(c, signal));
       }
       for (let i = 0; i < toolCalls.length; i++) {
         const c = toolCalls[i] as ToolCall;
@@ -256,41 +249,5 @@ export class Orchestrator {
         };
       }
     }
-  }
-
-  private async runOne(c: ToolCall, zone: TrustZone, signal?: AbortSignal): Promise<ToolResult> {
-    const { gateway, registry, session, audit } = this.d;
-    const reg = registry.get(c.name);
-    let profileId: string | undefined;
-    if (reg) {
-      const desc = reg.def.descriptor;
-      if (!session.activeToolsets.has(desc.toolset)) {
-        const summary = `araç seti etkin değil ('${desc.toolset}'): önce ilgili skill'i skill.load ile yükleyin`;
-        await audit.append({ event: "intent", sessionId: session.id, callId: c.id, tool: c.name, decision: "deny", reasonCode: "unknown_tool", message: "araç seti etkin değil" }).catch(() => undefined);
-        return synthDenied(c.name, "unknown_tool", summary);
-      }
-      if (desc.profileKind !== null) {
-        const p = session.boundByKind(desc.profileKind);
-        if (!p) {
-          return this.denyUnbound(c, desc.profileKind);
-        }
-        profileId = p.id;
-      }
-    }
-    return gateway.invoke({
-      tool: c.name,
-      args: c.args,
-      ...(profileId ? { profile: profileId } : {}),
-      providerZone: zone,
-      provider: { id: this.d.provider.id, model: this.d.provider.model },
-      ...(signal ? { signal } : {}),
-    });
-  }
-
-  private async denyUnbound(c: ToolCall, kind: string): Promise<ToolResult> {
-    await this.d.audit
-      .append({ event: "intent", sessionId: this.d.session.id, callId: c.id, tool: c.name, decision: "deny", reasonCode: "profile_not_bound", message: `'${kind}' profili bağlı değil` })
-      .catch(() => undefined);
-    return synthDenied(c.name, "profile_not_bound", `'${kind}' türünde bağlı profil yok: kullanıcı /use ile bir profil bağlamalı`);
   }
 }

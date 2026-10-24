@@ -201,6 +201,9 @@ class CountingSandbox implements Sandbox {
     this.runs += 1;
     return this.inner.run(spec);
   }
+  spawn(spec: SandboxSpec): ReturnType<Sandbox["spawn"]> {
+    return this.inner.spawn(spec);
+  }
 }
 
 describe("ExecCredentialRunner + LocalBroker (exec kaynağı)", () => {

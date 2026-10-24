@@ -1,0 +1,20 @@
+{
+  "name": "@ops/runtime-cursor",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/contracts": "workspace:*",
+    "@ops/sandbox": "workspace:*"
+  },
+  "devDependencies": {
+    "@ops/core": "workspace:*",
+    "@ops/testkit": "workspace:*",
+    "@ops/broker": "workspace:*",
+    "@ops/cli": "workspace:*"
+  }
+}

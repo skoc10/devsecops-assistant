@@ -1,6 +1,6 @@
 import { DEFAULT_PATH, validateSpec } from "./types.ts";
-import type { Sandbox, SandboxResult, SandboxSpec } from "./types.ts";
-import { spawnLimited } from "./spawn.ts";
+import type { Sandbox, SandboxProcess, SandboxResult, SandboxSpec } from "./types.ts";
+import { spawnLimited, spawnStreaming } from "./spawn.ts";
 
 /**
  * İZOLASYONSUZ çalıştırıcı: yalnız ortamı temizler. Dosya sistemi, ağ ve süreç görünürlüğü
@@ -23,5 +23,11 @@ export class UnsafeDirectRunner implements Sandbox {
       env: { PATH: DEFAULT_PATH, ...(spec.home ? { HOME: spec.home } : {}), ...spec.env },
       ...(spec.stdin ? { stdin: spec.stdin } : {}),
     });
+  }
+
+  async spawn(spec: SandboxSpec): Promise<SandboxProcess> {
+    validateSpec(spec);
+    const [file, ...args] = spec.argv as [string, ...string[]];
+    return spawnStreaming(file, args, { env: { PATH: DEFAULT_PATH, ...(spec.home ? { HOME: spec.home } : {}), ...spec.env }, lifetimeMs: spec.timeoutMs });
   }
 }

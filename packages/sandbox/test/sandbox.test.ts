@@ -256,6 +256,35 @@ describe("bwrap ile gerçek izolasyon (S-15)", () => {
   });
 });
 
+describe("akışlı spawn (cursor-host için)", () => {
+  it("UnsafeDirectRunner: stdin/stdout çift yönlü; kill süreç grubunu öldürür; ömür sınırı", async () => {
+    const r = new UnsafeDirectRunner({ acknowledgeNoIsolation: true });
+    const p = await r.spawn({ argv: ["/bin/sh", "-c", "read x; echo got:$x; sleep 30"], env: {}, timeoutMs: 20_000, maxOutputBytes: 1 });
+    const out: string[] = [];
+    p.stdout.on("data", (b: Buffer) => out.push(b.toString()));
+    p.stdin.write("merhaba\n");
+    for (let i = 0; i < 50 && !out.join("").includes("got:merhaba"); i++) await new Promise((r2) => setTimeout(r2, 20));
+    expect(out.join("")).toContain("got:merhaba");
+    const t0 = Date.now();
+    p.kill();
+    const ex = await p.exited;
+    expect(ex.signal).toBe("SIGKILL");
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    const short = await r.spawn({ argv: ["/bin/sh", "-c", "sleep 30"], env: {}, timeoutMs: 300, maxOutputBytes: 1 });
+    expect((await short.exited).signal).toBe("SIGKILL");
+  });
+
+  (real ? it : it.skip)("bwrap: akışlı süreç izole (ev dizini yok) ve stdin ile konuşur", async () => {
+    const p = await (real as Sandbox).spawn({ argv: ["/bin/sh", "-c", "read x; echo got:$x; ls /root /home 2>&1 | head -2"], env: {}, timeoutMs: 10_000, maxOutputBytes: 1 });
+    const out: string[] = [];
+    p.stdout.on("data", (b: Buffer) => out.push(b.toString()));
+    p.stdin.end("selam\n");
+    await p.exited;
+    expect(out.join("")).toContain("got:selam");
+    expect(out.join("")).toContain("No such file");
+  });
+});
+
 describe("BwrapSandbox yanlış yol", () => {
   it("var olmayan bwrap ikilisi anlamlı hata verir", async () => {
     await expect(new BwrapSandbox("/yok/bwrap").run(base)).rejects.toThrow();

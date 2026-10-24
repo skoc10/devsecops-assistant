@@ -20,7 +20,9 @@
     "@ops/redaction": "workspace:*",
     "@ops/sandbox": "workspace:*",
     "@ops/skills": "workspace:*",
-    "zod": "^4.0.0"
+    "zod": "^4.0.0",
+    "@ops/providers": "workspace:*",
+    "@ops/runtime-cursor": "workspace:*"
   },
   "devDependencies": {
     "@ops/testkit": "workspace:*",

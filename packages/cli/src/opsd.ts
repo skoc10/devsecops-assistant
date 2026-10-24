@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { usageFromAudit, formatUsage } from "@ops/core";
-import type { Orchestrator } from "@ops/core";
+import type { Sender } from "./backend.ts";
 import { readAuditRecords } from "./backend.ts";
 import type { ProfileRow } from "./chat.ts";
 import type { Runtime } from "./runtime.ts";
@@ -20,7 +20,7 @@ const Request = z.strictObject({
 
 export interface OpsdOptions {
   readonly runtime: Runtime;
-  readonly orchestrator: Orchestrator;
+  readonly orchestrator: Sender;
   readonly socketPath: string;
   readonly onShutdown?: () => void;
 }

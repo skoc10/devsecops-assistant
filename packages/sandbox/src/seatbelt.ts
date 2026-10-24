@@ -1,6 +1,6 @@
 import { DEFAULT_PATH, validateSpec } from "./types.ts";
-import type { Sandbox, SandboxResult, SandboxSpec } from "./types.ts";
-import { spawnLimited } from "./spawn.ts";
+import type { Sandbox, SandboxProcess, SandboxResult, SandboxSpec } from "./types.ts";
+import { spawnLimited, spawnStreaming } from "./spawn.ts";
 
 /** Seatbelt (SBPL) dizge sabiti için güvenli kaçış: yalnız kontrollü karakterler kabul edilir. */
 export function sbplString(s: string): string {
@@ -63,5 +63,10 @@ export class SeatbeltSandbox implements Sandbox {
       env: { PATH: DEFAULT_PATH },
       ...(spec.stdin ? { stdin: spec.stdin } : {}),
     });
+  }
+
+  async spawn(spec: SandboxSpec): Promise<SandboxProcess> {
+    const { file, args } = this.buildCommand(spec);
+    return spawnStreaming(file, args, { env: { PATH: DEFAULT_PATH }, lifetimeMs: spec.timeoutMs });
   }
 }

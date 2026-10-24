@@ -28,11 +28,25 @@ export interface SandboxResult {
   readonly truncated: boolean;
 }
 
+import type { Readable, Writable } from "node:stream";
+
+/** Akışlı (çift yönlü) sandbox süreci: stdin/stdout üzerinden satır tabanlı protokol için. */
+export interface SandboxProcess {
+  readonly stdin: Writable;
+  readonly stdout: Readable;
+  readonly stderr: Readable;
+  /** Süreç grubunu öldürür (idempotent). */
+  kill(): void;
+  readonly exited: Promise<{ code: number | null; signal: string | null }>;
+}
+
 export type SandboxKind = "bwrap" | "seatbelt" | "none";
 
 export interface Sandbox {
   readonly kind: SandboxKind;
   run(spec: SandboxSpec): Promise<SandboxResult>;
+  /** Akışlı çalıştırma. `timeoutMs` toplam ömürdür; `maxOutputBytes` uygulanmaz (tüketici sınırlar). */
+  spawn(spec: SandboxSpec): Promise<SandboxProcess>;
 }
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;

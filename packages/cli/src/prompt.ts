@@ -10,15 +10,16 @@ export async function readPassphrase(
   env: Readonly<Record<string, string | undefined>>,
   io: { input: Readable & { isTTY?: boolean; setRawMode?: (m: boolean) => void }; output: Writable },
   question = "Kasa parolası: ",
+  fileVar = "OPS_PASSPHRASE_FILE",
 ): Promise<Uint8Array> {
-  const file = env["OPS_PASSPHRASE_FILE"];
+  const file = env[fileVar];
   if (file) {
     const st = await stat(file);
     if ((st.mode & 0o077) !== 0) throw new OpsError("passphrase_file_permissions", "parola dosyası yalnız sahibi tarafından okunabilir olmalı (chmod 600)");
     return new Uint8Array(Buffer.from((await readFile(file, "utf8")).replace(/\r?\n$/, ""), "utf8"));
   }
   if (!io.input.isTTY || !io.input.setRawMode) {
-    throw new OpsError("passphrase_unavailable", "etkileşimli terminal yok: OPS_PASSPHRASE_FILE ile parola dosyası verin");
+    throw new OpsError("passphrase_unavailable", `etkileşimli terminal yok: ${fileVar} ile dosya verin`);
   }
   io.output.write(question);
   io.input.setRawMode(true);
