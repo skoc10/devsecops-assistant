@@ -218,6 +218,9 @@ importers:
       '@ops/adapter-github':
         specifier: workspace:*
         version: link:../adapters/github
+      '@ops/adapter-iac':
+        specifier: workspace:*
+        version: link:../adapters/iac
       '@ops/adapter-kubernetes':
         specifier: workspace:*
         version: link:../adapters/kubernetes
@@ -239,6 +242,9 @@ importers:
       '@ops/core':
         specifier: workspace:*
         version: link:../core
+      '@ops/mcp-bridge':
+        specifier: workspace:*
+        version: link:../mcp-bridge
       '@ops/policy':
         specifier: workspace:*
         version: link:../policy
@@ -260,6 +266,9 @@ importers:
       '@ops/terminal':
         specifier: workspace:*
         version: link:../terminal
+      '@ops/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       zod:
         specifier: ^4.0.0
         version: 4.6.7

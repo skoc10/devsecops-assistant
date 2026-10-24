@@ -53,6 +53,15 @@ describe("parseMcpManifest", () => {
     expect(() => parseMcpManifest(dup)).toThrow(/yinelenen araç adı/);
   });
 
+  it("sha256 değeri YAML'da sayıya benzese de (000…0, 12e3…) özgün metin olarak okunur — pin sessizce bozulmaz", () => {
+    const allDigits = "0".repeat(64);
+    const expLike = "1234e" + "5".repeat(59);
+    for (const h of [allDigits, expLike]) {
+      const m = parseMcpManifest(base().replace(SHA, h));
+      expect(m.servers[0]!.sha256).toBe(h);
+    }
+  });
+
   it("YAML takma adı (alias), yinelenen anahtar ve aşırı büyük manifest reddedilir", () => {
     const alias = `servers:\n  - id: a\n    command: /x/a\n    sha256: &h ${SHA}\n    files: [{ path: /x/f, sha256: *h }]\n    tools: [{ name: t, description: d }]\n`;
     expect(() => parseMcpManifest(alias)).toThrow(McpManifestError);

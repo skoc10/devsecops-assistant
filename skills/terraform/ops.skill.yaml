@@ -1,0 +1,5 @@
+requires:
+  adapters: [workspace, iac, iac-terraform]
+requests:
+  toolsets: [workspace, iac]
+model_hint: large

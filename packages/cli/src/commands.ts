@@ -1,4 +1,5 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Readable, Writable } from "node:stream";
 import { generateReadOnlyRbac } from "@ops/adapter-kubernetes";
@@ -7,6 +8,10 @@ import { scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
 import { ENVIRONMENTS, OpsError, RISK_CLASSES } from "@ops/contracts";
 import type { Environment, ModelProvider, RiskClass, SecretStore } from "@ops/contracts";
 import { formatUsage, usageFromAudit } from "@ops/core";
+import { McpBridgeAdapter, parseMcpManifest } from "@ops/mcp-bridge";
+import { stripControlChars } from "@ops/redaction";
+import { WORKSPACE_ENGINES, WorkspaceManager, WorkspaceRegistry } from "@ops/workspace";
+import type { WorkspaceEngine } from "@ops/workspace";
 import { explainReason } from "@ops/policy";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
@@ -39,6 +44,8 @@ export interface CliEnv {
   readonly providerFactory?: ProviderFactory;
   /** `shell.run` iş alanı (varsayılan: OPS_WORKDIR). */
   readonly workdir?: string;
+  /** Etkin IaC çalışma alanı (varsayılan: `--workspace` / OPS_WORKSPACE). */
+  readonly workspace?: string;
   /** Onay kapısı (test: sahte TTY). Varsayılan: `/dev/tty`; açılamazsa onay REDDEDİLİR. */
   readonly approval?: TtyApprovalGate;
   /** `daemon` komutunun beklemesini durduran sinyal (test). */
@@ -62,17 +69,28 @@ const USAGE = [
   "  usage                              token kullanım raporu (denetimden)",
   "  explain-policy [--last N | --code KOD]   reddedilen/sorulan çağrıları açıkla",
   "  provider list | set-key AD         sağlayıcıları listele / API anahtarını kasaya yaz (OPS_PROVIDER_KEY_FILE veya TTY)",
-  "  daemon                             opsd'yi başlat (UDS)",
-  "  chat [--embedded]                  sohbet (opsd'ye bağlanır; --embedded süreç içi)",
+  "  workspace add --id ID --path DİZİN --engine terraform|opentofu|ansible [--write-paths g1,g2] [--deny-paths g1,g2] [--replace]",
+  "  workspace list | rm ID | snapshots [ID]",
+  "  workspace diff ID [--session S] [--path P]      ajanın değişiklikleri (anlık kopya ↔ özgün HEAD)",
+  "  workspace export ID --out DOSYA [--session S]   değişiklikleri `git apply` ile uygulanabilir yama olarak yaz (depoya YAZMAZ)",
+  "  mcp check [SUNUCU]                 OPS_HOME/mcp-servers.yaml sunucularını sandbox'ta başlatıp manifestle karşılaştır (araç çağırmaz)",
+  "  daemon [--workspace ID]            opsd'yi başlat (UDS)",
+  "  chat [--embedded] [--workspace ID] sohbet (opsd'ye bağlanır; --embedded süreç içi)",
   "  (ortam) OPS_WORKDIR=DİZİN          shell.run iş alanı (salt-okunur; OS sandbox gerekir; ev dizini olamaz)",
+  "  (ortam) OPS_WORKSPACE=ID           etkin IaC çalışma alanı; OPS_TOOL_DIRS=d1:d2 terraform/tofu/ansible dizinleri; OPS_IAC_PROVIDER_MIRROR=DİZİN yerel sağlayıcı aynası",
 ].join("\n");
 
 const out = (c: CliEnv, s: string): void => void c.io.output.write(`${s}\n`);
 const err = (c: CliEnv, s: string): void => void c.io.error.write(`${s}\n`);
 
-async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approval?: TtyApprovalGate): Promise<T> {
+async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approval?: TtyApprovalGate, workspace?: string): Promise<T> {
+  const ws = workspace ?? c.workspace ?? c.env["OPS_WORKSPACE"];
+  const toolDirs = c.env["OPS_TOOL_DIRS"]?.split(":").filter(Boolean);
   const rt = await createRuntime({
     paths: c.paths,
+    ...(ws ? { workspace: ws } : {}),
+    ...(toolDirs?.length ? { toolDirs } : {}),
+    ...(c.env["OPS_IAC_PROVIDER_MIRROR"] ? { providerMirror: c.env["OPS_IAC_PROVIDER_MIRROR"] } : {}),
     ...(approval ? { approval } : {}),
     ...(c.store ? { store: c.store } : { passphrase: () => readPassphrase(c.env, c.io) }),
     ...(c.scryptParams ? { scryptParams: c.scryptParams } : {}),
@@ -177,6 +195,91 @@ async function addTokenProfile(c: CliEnv, kind: "pipeline" | "scm", args: string
   for (const w of res.warnings) out(c, `⚠ ${w}`);
   out(c, "Belirteç yalnız kasada. `ops profile doctor` belirtecin çalıştığını ve klasik belirteçlerde yazma kapsamı olmadığını sınar; fine-grained belirteç izinleri API'den doğrulanamaz.");
   return 0;
+}
+
+async function workspaceCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
+  const registry = await WorkspaceRegistry.open(c.paths.workspacesFile);
+  const manager = new WorkspaceManager({ registry, worktreesDir: c.paths.worktreesDir, sandbox: null });
+  switch (sub) {
+    case "add": {
+      const { values } = parseArgs({ args: rest, options: { id: { type: "string" }, path: { type: "string" }, engine: { type: "string" }, "write-paths": { type: "string" }, "deny-paths": { type: "string" }, replace: { type: "boolean" } }, strict: true });
+      if (!values.id || !values.path || !values.engine) throw new OpsError("usage", "--id, --path ve --engine gerekli");
+      if (!WORKSPACE_ENGINES.includes(values.engine as WorkspaceEngine)) throw new OpsError("usage", `--engine şunlardan biri olmalı: ${WORKSPACE_ENGINES.join(", ")}`);
+      const ws = await registry.add(
+        { id: values.id, path: resolve(values.path), engine: values.engine as WorkspaceEngine, ...(values["write-paths"] ? { writePaths: list(values["write-paths"]) } : {}), ...(values["deny-paths"] ? { denyPaths: list(values["deny-paths"]) } : {}) },
+        { ...(values.replace ? { replace: true } : {}), ...(c.env["HOME"] ? { home: c.env["HOME"] } : {}) },
+      );
+      out(c, `Çalışma alanı kaydedildi: ${ws.id} (${ws.engine}, ${ws.path})`);
+      out(c, "Ajan deponuza YAZMAZ: her oturumda HEAD'in anlık kopyasında çalışır. Değişiklikleri `ops workspace diff/export` ile alırsınız. State, tfvars, .env, anahtar ve CI tanımı dosyaları kopyalanmaz/yazılamaz.");
+      return 0;
+    }
+    case "list": {
+      const rows = registry.list();
+      out(c, rows.length === 0 ? "(çalışma alanı yok)" : rows.map((w) => `${w.id}\t${w.engine}\t${w.path}\tyazılabilir ${w.writePaths.join("|")}\tek yasak ${w.denyPaths.join("|") || "-"}`).join("\n"));
+      return 0;
+    }
+    case "rm": {
+      const id = rest[0];
+      if (!id) throw new OpsError("usage", "kullanım: ops workspace rm ID");
+      const removed = await registry.remove(id);
+      out(c, removed ? `Kayıt silindi: ${id} (anlık kopyalar ${c.paths.worktreesDir} altında kalır; elle silebilirsiniz)` : `Bulunamadı: ${id}`);
+      return removed ? 0 : 1;
+    }
+    case "snapshots": {
+      const snaps = await manager.snapshots(rest[0]);
+      out(c, snaps.length === 0 ? "(anlık kopya yok)" : snaps.map((x) => `${x.workspaceId}\toturum ${x.sessionId}\t${x.createdAt}\tHEAD ${x.head.slice(0, 12)}`).join("\n"));
+      return 0;
+    }
+    case "diff":
+    case "export": {
+      const { values, positionals } = parseArgs({ args: rest, options: { session: { type: "string" }, path: { type: "string" }, out: { type: "string" } }, allowPositionals: true, strict: true });
+      const id = positionals[0];
+      if (!id) throw new OpsError("usage", `kullanım: ops workspace ${sub} ID${sub === "export" ? " --out DOSYA" : ""} [--session S]`);
+      const { info, fs } = await manager.openSnapshot(id, values.session);
+      const { changes, patch } = await fs.changes(sub === "diff" ? values.path : undefined);
+      if (sub === "diff") {
+        out(c, `# ${info.workspaceId} oturum ${info.sessionId} (HEAD ${info.head.slice(0, 12)}): ${changes.length} dosya değişti`);
+        for (const ch of changes) out(c, `#   ${ch.status === "added" ? "+" : "~"} ${ch.path}  (+${ch.additions} -${ch.deletions})`);
+        if (patch !== "") out(c, stripControlChars(patch).trimEnd());
+        return 0;
+      }
+      if (!values.out) throw new OpsError("usage", "--out DOSYA gerekli");
+      if (changes.length === 0) {
+        out(c, "Değişiklik yok; yama yazılmadı.");
+        return 0;
+      }
+      await writeFile(values.out, patch, { flag: "wx", mode: 0o600 }).catch((e: NodeJS.ErrnoException) => {
+        throw new OpsError("export_failed", e.code === "EEXIST" ? "hedef dosya zaten var (üzerine yazılmaz)" : `yazılamadı: ${e.code ?? "?"}`);
+      });
+      out(c, `${changes.length} dosyalık yama yazıldı: ${values.out}`);
+      out(c, `Depoda HEAD ${info.head.slice(0, 12)} üzerinde: git apply --check ${values.out} && git checkout -b ops/${info.workspaceId} && git apply ${values.out}`);
+      out(c, "Yamayı UYGULAMADAN önce gözden geçirin (ops workspace diff). Uygulama ve PR sizin elinizdedir.");
+      return 0;
+    }
+    default:
+      throw new OpsError("usage", "workspace alt komutu: add | list | rm | snapshots | diff | export");
+  }
+}
+
+async function mcpCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
+  if (sub !== "check") throw new OpsError("usage", "kullanım: ops mcp check [SUNUCU]");
+  let text: string;
+  try {
+    text = await readFile(c.paths.mcpManifestFile, "utf8");
+  } catch {
+    throw new OpsError("mcp_manifest_missing", `manifest yok: ${c.paths.mcpManifestFile}`);
+  }
+  const manifest = parseMcpManifest(text);
+  const sandbox = c.sandbox === undefined || c.sandbox === "detect" ? await detectSandbox() : c.sandbox;
+  const adapter = new McpBridgeAdapter({ manifest, sandbox });
+  const ids = rest[0] ? [rest[0]] : manifest.servers.map((s) => s.id);
+  let bad = 0;
+  for (const id of ids) {
+    const r = await adapter.check(id);
+    if (!r.ok) bad++;
+    out(c, `${r.ok ? "✓" : "✗"} ${r.server}${r.serverName ? ` (${r.serverName}, protokol ${r.protocolVersion})` : ""}${r.missing.length ? `  eksik araçlar: ${r.missing.join(", ")}` : ""}${r.undeclared ? `  manifestte olmayan ${r.undeclared} sunucu aracı (açılmaz)` : ""}${r.error ? `  hata: ${stripControlChars(r.error)}` : ""}`);
+  }
+  return bad === 0 ? 0 : 1;
 }
 
 export async function runCli(c: CliEnv): Promise<number> {
@@ -334,7 +437,14 @@ export async function runCli(c: CliEnv): Promise<number> {
         return 0;
       }
 
+      case "workspace":
+        return await workspaceCommand(c, sub, rest);
+
+      case "mcp":
+        return await mcpCommand(c, sub, rest);
+
       case "daemon": {
+        const { values: dv } = parseArgs({ args: c.argv.slice(1), options: { workspace: { type: "string" } }, strict: true });
         const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
         return await withRuntime(c, async (rt) => {
           const orch = await engineFor(c, rt);
@@ -346,17 +456,19 @@ export async function runCli(c: CliEnv): Promise<number> {
           await new Promise<void>((resolve) => stopper.signal.addEventListener("abort", () => resolve(), { once: true }));
           await d.close();
           return 0;
-        }, gate);
+        }, gate, dv.workspace);
       }
 
       case "chat": {
-        const embedded = sub === "--embedded" || rest.includes("--embedded");
+        const { values: cv } = parseArgs({ args: c.argv.slice(1), options: { embedded: { type: "boolean" }, workspace: { type: "string" } }, strict: true });
+        const embedded = cv.embedded === true;
+        if (cv.workspace && !embedded) throw new OpsError("usage", "--workspace yalnız --embedded veya `ops daemon --workspace ID` ile kullanılır (çalışma alanı opsd sürecine aittir)");
         if (embedded) {
           const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
           await withRuntime(c, async (rt) => {
             await runChat(new LocalBackend(rt, await engineFor(c, rt)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events });
             out(c, gate.summaryLine());
-          }, gate);
+          }, gate, cv.workspace);
           return 0;
         }
         const client = await OpsdClient.connect(c.paths.socket).catch(() => {

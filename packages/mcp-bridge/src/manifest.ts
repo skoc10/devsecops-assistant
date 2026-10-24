@@ -1,4 +1,4 @@
-import { parseDocument } from "yaml";
+import { Scalar, isScalar, parseDocument, visit } from "yaml";
 import { z } from "zod";
 import { RISK_CLASSES, SensitivitySchema, TOOLSET_PATTERN, TOOL_NAME_PATTERN } from "@ops/contracts";
 
@@ -136,6 +136,16 @@ export function parseMcpManifest(text: string): McpManifest {
   if (Buffer.byteLength(text) > MAX_MANIFEST_BYTES) throw new McpManifestError("manifest çok büyük (> 64 KiB)");
   const doc = parseDocument(text, { uniqueKeys: true });
   if (doc.errors.length > 0) throw new McpManifestError(`manifest YAML hatası: ${(doc.errors[0]?.message ?? "").split("\n")[0]?.slice(0, 160)}`);
+  // `sha256: 000…0` veya `12e3…` YAML'da sayıdır (hassasiyet kaybolur → pin yanlış karşılaştırılır). Pin alanları
+  // her zaman özgün metinleriyle DİZGE okunur.
+  visit(doc, {
+    Pair(_k, pair) {
+      if (isScalar(pair.key) && pair.key.value === "sha256" && isScalar(pair.value) && typeof pair.value.value !== "string") {
+        const src = (pair.value as Scalar).source;
+        if (typeof src === "string") pair.value = new Scalar(src);
+      }
+    },
+  });
   let js: unknown;
   try {
     js = doc.toJS({ maxAliasCount: 0 });

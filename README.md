@@ -9,7 +9,7 @@ Herhangi bir şirketin, herhangi bir ortamında kurulabilen **genel amaçlı Dev
 - Sohbetle soru cevaplar; cevabını **kanıt kimlikleriyle** (`evidence_id`) destekler.
 - Bağlı kaynaklardan salt okunur kanıt toplar ve deterministik anahtarlarla (image digest, commit SHA, workload) tek zaman çizelgesinde birleştirir.
 - Değişikliği önce gösterir (diff, dry-run); öneriyi PR / değişiklik dosyası olarak çıkarır, hedef sistemin kendi onay mekanizmasını atlamaz.
-- Terraform/OpenTofu ve Ansible kodu yazar, doğrular ve PR olarak önerir; `apply` varsayılan olarak hedefin pipeline'ına bırakılır.
+- Terraform/OpenTofu ve Ansible kodu deponun **anlık kopyasında** yazar ve doğrular (fmt/validate/lint), değişikliği `git apply` ile uygulanabilir **yama** olarak verir; `plan`/`apply` ve PR akışı henüz yok (Faz 2) — uygulama hedefin pipeline'ına bırakılır.
 - Politika izin verdiği sınıfta (`read < mutate < deploy < destroy`), kullanıcı onayıyla dar kapsamlı işlem yapar.
 
 ## Temel ilkeler
@@ -45,6 +45,13 @@ node packages/cli/src/bin.ts profile rbac --sa-namespace ops --namespace default
 export OPS_DB_PASSWORD_FILE=~/.ops-db-password
 node packages/cli/src/bin.ts profile add db --id shop --env stage --host db.example --database shop --user ops_reader --scope public,sales --ca-file ~/db-ca.pem
 node packages/cli/src/bin.ts profile doctor shop        # fiili rol yetkileri ↔ beyan (yazma/CREATE/süper yetki varsa BAĞLANMAZ)
+# IaC (Terraform/OpenTofu/Ansible): ajan deponuza YAZMAZ, HEAD'in anlık kopyasında çalışır (ikililer ürünle gelmez)
+export OPS_TOOL_DIRS=/opt/ops-tools/bin:/opt/ops-tools/venv/bin     # tofu/terraform/ansible/ansible-lint dizinleri
+node packages/cli/src/bin.ts workspace add --id infra --path ~/src/infra --engine opentofu
+node packages/cli/src/bin.ts chat --embedded --workspace infra     # terraform skill'i otomatik ilan edilir
+node packages/cli/src/bin.ts workspace diff infra                  # ajanın değişiklikleri
+node packages/cli/src/bin.ts workspace export infra --out infra.patch   # git apply ile uygulanabilir yama (depoya yazmaz)
+# (isteğe bağlı) dış MCP sunucuları: OPS_HOME/mcp-servers.yaml (ikili sha256 pini, yalnız read); `ops mcp check`
 node packages/cli/src/bin.ts doctor                    # sandbox + ortam kimlikleri (içerik okunmaz)
 node packages/cli/src/bin.ts audit verify
 ```

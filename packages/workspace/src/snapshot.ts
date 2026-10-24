@@ -1,4 +1,4 @@
-import { access, constants, mkdir, writeFile } from "node:fs/promises";
+import { access, constants, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { OpsError } from "@ops/contracts";
 import type { Sandbox } from "@ops/sandbox";
@@ -187,4 +187,23 @@ export async function createSnapshot(opts: { repoPath: string; destDir: string; 
   const manifest: SnapshotManifest = { version: 1, head, createdAt: (opts.now ?? (() => new Date()))().toISOString(), files, skipped: skipped.slice(0, 200) };
   await writeFile(join(destDir, "manifest.json"), `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
   return { dir: destDir, workDir, baseDir, manifest };
+}
+
+/** Kalıcı bir anlık kopyayı (`manifest.json` + `work/` + `base/`) yeniden açar. Sembolik bağ ve beklenmeyen yapı reddedilir. */
+export async function loadSnapshot(dir: string): Promise<Snapshot> {
+  for (const d of [dir, join(dir, "work"), join(dir, "base")]) {
+    const st = await lstat(d).catch(() => null);
+    if (!st || !st.isDirectory() || st.isSymbolicLink()) throw new OpsError("snapshot_invalid", "anlık kopya yapısı geçersiz");
+  }
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8"));
+  } catch {
+    throw new OpsError("snapshot_invalid", "manifest.json okunamadı");
+  }
+  const m = manifest as Partial<SnapshotManifest>;
+  if (m.version !== 1 || typeof m.head !== "string" || !/^[0-9a-f]{40,64}$/.test(m.head) || typeof m.createdAt !== "string" || !m.files || typeof m.files !== "object") {
+    throw new OpsError("snapshot_invalid", "manifest.json geçersiz");
+  }
+  return { dir, workDir: join(dir, "work"), baseDir: join(dir, "base"), manifest: m as SnapshotManifest };
 }

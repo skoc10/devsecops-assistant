@@ -27,6 +27,21 @@ jobs:
       # Gerçek PostgreSQL testleri (S-02/S-03/S-14 DB ayağı, I-02): testkit geçici bir küme başlatır
       # (TLS + scram; ayrı süreç, yalnız loopback). Sunucu kurulu değilse bu testler uyarıyla ATLANIR.
       - run: sudo apt-get install -y postgresql postgresql-client
+      # IaC testleri (S-17..S-19, Faz 1b): OpenTofu ve Terraform (sürüm + sha256 PİNLİ), ansible-core + ansible-lint (pip, sürüm
+      # pinli, ayrı venv). Kurulu değilse ilgili testler uyarıyla ATLANIR. sha256 değerleri yayıncıların SHA256SUMS dosyalarıyla
+      # (aynı kaynaktan) eşleştirildi; SHA256SUMS imza doğrulaması (GPG/cosign) yapılmadı → "doğrulanacak".
+      - name: IaC araçları (OpenTofu, Terraform, ansible-core, ansible-lint)
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/ops-tools"; mkdir -p "$T/bin" "$T/dl"
+          curl -fsSL -o "$T/dl/tofu.zip" "https://github.com/opentofu/opentofu/releases/download/v1.8.5/tofu_1.8.5_linux_amd64.zip"
+          echo "e2951ba6be8ae9427aabbd5c6f243855e8b526cb2ae6bc33a05dae22d7e82632  $T/dl/tofu.zip" | sha256sum -c -
+          curl -fsSL -o "$T/dl/tf.zip" "https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip"
+          echo "186e0145f5e5f2eb97cbd785bc78f21bae4ef15119349f6ad4fa535b83b10df8  $T/dl/tf.zip" | sha256sum -c -
+          unzip -q -o "$T/dl/tofu.zip" tofu -d "$T/bin"; unzip -q -o "$T/dl/tf.zip" terraform -d "$T/bin"
+          python3 -m venv "$T/venv"
+          "$T/venv/bin/pip" install --quiet "ansible-core==2.21.5" "ansible-lint==26.10.1"
+          echo "OPS_TOOL_DIRS=$T/bin:$T/venv/bin" >> "$GITHUB_ENV"
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: pnpm typecheck
       - run: pnpm test

@@ -17,6 +17,12 @@ export interface OpsPaths {
   readonly userCatalogFile: string;
   /** Maskeli sütun bildirimi (`masking.yaml`); yoksa yalnız varsayılan sütun adı kuralları + dedektörler. */
   readonly maskingFile: string;
+  /** Kayıtlı IaC çalışma alanları (secret içermez). */
+  readonly workspacesFile: string;
+  /** Oturum başına kalıcı anlık kopyalar (`<oturum>--<alan>/{work,base}`). */
+  readonly worktreesDir: string;
+  /** Dış MCP sunucuları için kullanıcı manifesti (`mcp-servers.yaml`); yoksa köprü kapalı. */
+  readonly mcpManifestFile: string;
 }
 
 /** `OPS_HOME` (varsayılan `~/.ops-assistant`). Tüm durum burada: tek kullanıcı, yerel. */
@@ -33,6 +39,9 @@ export function resolvePaths(home: string = process.env["OPS_HOME"] ?? join(home
     policyFile: join(home, "policy.yaml"),
     userCatalogFile: join(home, "command-catalog.yaml"),
     maskingFile: join(home, "masking.yaml"),
+    workspacesFile: join(home, "workspaces.json"),
+    worktreesDir: join(home, "worktrees"),
+    mcpManifestFile: join(home, "mcp-servers.yaml"),
   };
 }
 

@@ -4,6 +4,9 @@ import type { CommandCatalog } from "@ops/classifiers";
 import { TerminalAdapter, assertSafeWorkdir } from "@ops/terminal";
 import { KubernetesAdapter } from "@ops/adapter-kubernetes";
 import { GithubActionsAdapter, GithubScmAdapter } from "@ops/adapter-github";
+import { IacAdapter } from "@ops/adapter-iac";
+import { McpBridgeAdapter, parseMcpManifest } from "@ops/mcp-bridge";
+import { WorkspaceAdapter, WorkspaceManager, WorkspaceRegistry } from "@ops/workspace";
 import { EMPTY_MASKING_CONFIG, PostgresAdapter, loadMaskingConfig, maskingRulesFor } from "@ops/adapter-postgres";
 import type { MaskingConfig } from "@ops/adapter-postgres";
 import { AuditLog, FileAuditStorage, FileHeadAnchor } from "@ops/audit";
@@ -41,6 +44,12 @@ export interface RuntimeOptions {
   /** `shell.run` iş alanı (salt-okunur bağlanır). Verilmezse ve/veya sandbox yoksa terminal aracı KAYITLI DEĞİLDİR. */
   readonly workdir?: string;
   readonly approval?: ApprovalGate;
+  /** Oturumun etkin IaC çalışma alanı (kayıtlı kimlik). Verilmezse `fs.*`/`iac.*` araçları çalışmaz ve terraform/ansible skill'leri gizli kalır. */
+  readonly workspace?: string;
+  /** IaC ikililerinin aranacağı dizinler (`OPS_TOOL_DIRS`); `PATH`'e güvenilmez. */
+  readonly toolDirs?: readonly string[];
+  /** Terraform/OpenTofu sağlayıcıları için yerel dosya aynası (`OPS_IAC_PROVIDER_MIRROR`). */
+  readonly providerMirror?: string;
   readonly registryOptions?: Partial<ProfileRegistryOptions>;
   readonly now?: () => Date;
 }
@@ -63,6 +72,10 @@ export interface Runtime {
   readonly postgres: PostgresAdapter;
   readonly githubActions: GithubActionsAdapter;
   readonly githubScm: GithubScmAdapter;
+  readonly workspaces: WorkspaceManager;
+  readonly iac: IacAdapter;
+  /** `mcp-servers.yaml` varsa MCP istemci köprüsü; yoksa `null`. */
+  readonly mcp: McpBridgeAdapter | null;
   readonly sandbox: Sandbox | null;
   /** Profili doktordan geçirir (bağlamaz). */
   diagnose(id: string): Promise<DoctorReport>;
@@ -139,6 +152,22 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const githubScm = new GithubScmAdapter(broker.resolver, { ...(o.now ? { now: o.now } : {}) });
   toolRegistry.register(githubScm, githubScm.definitions);
 
+  // IaC (Terraform/OpenTofu, Ansible): çalışma alanı anlık kopyası + sandbox'lı araçlar. Araçlar her zaman
+  // kayıtlıdır (toolset etkinleşene dek bağlama girmez); skill'ler yalnız etkin çalışma alanı varsa görünür.
+  const workspaceRegistry = await WorkspaceRegistry.open(o.paths.workspacesFile);
+  const workspaces = new WorkspaceManager({ registry: workspaceRegistry, worktreesDir: o.paths.worktreesDir, sandbox, known });
+  const workspaceAdapter = new WorkspaceAdapter(workspaces);
+  toolRegistry.register(workspaceAdapter, workspaceAdapter.definitions);
+  const iac = new IacAdapter({ manager: workspaces, sandbox, ...(o.toolDirs ? { toolDirs: o.toolDirs } : {}), ...(o.providerMirror ? { providerMirror: o.providerMirror } : {}) });
+  toolRegistry.register(iac, iac.definitions);
+
+  // MCP istemci köprüsü v0: yalnız kullanıcı manifesti varsa. Geçersiz manifest = başlangıç hatası (fail-closed).
+  let mcp: McpBridgeAdapter | null = null;
+  if (await exists(o.paths.mcpManifestFile)) {
+    mcp = new McpBridgeAdapter({ manifest: parseMcpManifest(await readFile(o.paths.mcpManifestFile, "utf8")), sandbox, known });
+    toolRegistry.register(mcp, mcp.definitions);
+  }
+
   // Terminal servisi: yalnız iş alanı verildiyse VE OS sandbox varsa (aksi halde kabuk yok).
   const availableAdapters = ["kubernetes", "postgres", "github-actions", "github-scm"];
   const classifiers: ((tool: string, args: unknown) => ReturnType<ReturnType<typeof shellCommandClassifier>>)[] = [];
@@ -159,9 +188,18 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   }
 
   const skills = await SkillRegistry.load({ builtinDir: o.builtinSkillsDir ?? BUILTIN_SKILLS_DIR, userDir: o.paths.userSkillsDir });
-  skills.setAvailableAdapters(availableAdapters);
   const skillAdapter = createSkillAdapter(skills, session, () => toolRegistry);
   toolRegistry.register(skillAdapter.adapter, skillAdapter.definitions);
+
+  // Etkin çalışma alanı: oturum kimliğiyle anlık kopya çıkarılır (yoksa/başarısızsa oturum BAŞLAMAZ).
+  let workspaceNote = "yok";
+  if (o.workspace) {
+    const active = await workspaces.activate(o.workspace, session.id);
+    availableAdapters.push("workspace", "iac", active.ws.engine === "ansible" ? "iac-ansible" : "iac-terraform");
+    workspaceNote = `${active.ws.id} (${active.ws.engine})`;
+  }
+  if (mcp) availableAdapters.push("mcp-bridge");
+  skills.setAvailableAdapters(availableAdapters);
 
   const gateway = new ToolGateway({
     registry: toolRegistry,
@@ -181,7 +219,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     event: "session_start",
     sessionId: session.id,
     policyVersionHash: policy.versionHash,
-    message: `sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} skills=${skills.all().map((s) => s.name).join(",")}`,
+    message: `sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
   });
 
   const diagnoseProfile = async (id: string): Promise<{ report: DoctorReport; profile: Profile }> => {
@@ -227,6 +265,9 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     postgres,
     githubActions,
     githubScm,
+    workspaces,
+    iac,
+    mcp,
     sandbox,
     async diagnose(id: string): Promise<DoctorReport> {
       return (await diagnoseProfile(id)).report;
@@ -257,6 +298,9 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
       const adapterOfKind: Record<string, string> = { k8s: "kubernetes", db: "postgres", pipeline: "github-actions", scm: "github-scm" };
       const preload = (): { name: string; tier: Parameters<Session["activateSkill"]>[0]["tier"]; body: string; tokens: number; toolsets: string[] }[] => {
         const bound = new Set(session.boundProfiles().map((p) => adapterOfKind[p.kind]).filter((x): x is string => x !== undefined));
+      // etkin çalışma alanı varsa IaC skill'i (motoruna uyan) önceliklidir
+      const ws = workspaces.current();
+      if (ws) for (const t of ["workspace", "iac", ws.ws.engine === "ansible" ? "iac-ansible" : "iac-terraform"]) bound.add(t);
         const rank = (sk: ReturnType<typeof skills.all>[number]): number =>
           sk.sidecar.requires.adapters.some((a) => bound.has(a)) ? 0 : sk.name === "generic-diagnosis" ? 1 : 2;
         return [...skills.all()]

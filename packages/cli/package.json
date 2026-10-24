@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ops/adapter-github": "workspace:*",
+    "@ops/adapter-iac": "workspace:*",
     "@ops/adapter-kubernetes": "workspace:*",
     "@ops/adapter-postgres": "workspace:*",
     "@ops/audit": "workspace:*",
@@ -19,6 +20,7 @@
     "@ops/classifiers": "workspace:*",
     "@ops/contracts": "workspace:*",
     "@ops/core": "workspace:*",
+    "@ops/mcp-bridge": "workspace:*",
     "@ops/policy": "workspace:*",
     "@ops/providers": "workspace:*",
     "@ops/redaction": "workspace:*",
@@ -26,6 +28,7 @@
     "@ops/sandbox": "workspace:*",
     "@ops/skills": "workspace:*",
     "@ops/terminal": "workspace:*",
+    "@ops/workspace": "workspace:*",
     "zod": "^4.0.0"
   },
   "devDependencies": {

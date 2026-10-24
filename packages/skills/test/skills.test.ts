@@ -15,7 +15,7 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
   it("yüklenir, hata yok, gövde sınırları içinde; tier dizinden gelir", async () => {
     const reg = await SkillRegistry.load({ builtinDir });
     expect(reg.issues).toEqual([]);
-    expect(reg.all().map((s) => s.name)).toEqual(["database", "generic-diagnosis", "kubernetes", "local-shell", "pipelines"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "database", "generic-diagnosis", "kubernetes", "local-shell", "pipelines", "terraform"]);
     for (const s of reg.all()) {
       expect(s.tier).toBe("builtin");
       expect(s.tokens).toBeLessThanOrEqual(LIMITS.bodyTokens);
@@ -31,6 +31,8 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     expect(reg.get("kubernetes")!.tokens).toBeLessThanOrEqual(700);
     expect(reg.get("generic-diagnosis")!.tokens).toBeLessThanOrEqual(400);
     expect(reg.get("local-shell")!.tokens).toBeLessThanOrEqual(650);
+    expect(reg.get("terraform")!.tokens).toBeLessThanOrEqual(850);
+    expect(reg.get("ansible")!.tokens).toBeLessThanOrEqual(850);
     expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(300);
   });
 
@@ -42,6 +44,17 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "kubernetes"]);
     reg.setAvailableAdapters(["kubernetes", "terminal"]);
     expect(reg.all().length).toBe(3);
+  });
+
+  it("IaC skill'leri yalnız etkin çalışma alanının motoruna göre ilan edilir (terraform ↔ ansible)", async () => {
+    const reg = await SkillRegistry.load({ builtinDir });
+    reg.setAvailableAdapters(["workspace", "iac", "iac-terraform"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis", "terraform"]);
+    expect(reg.get("terraform")?.sidecar.requests.toolsets).toEqual(["workspace", "iac"]);
+    reg.setAvailableAdapters(["workspace", "iac", "iac-ansible"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "generic-diagnosis"]);
+    reg.setAvailableAdapters(["workspace", "iac"]); // motor etiketi yok → hiçbiri
+    expect(reg.all().map((s) => s.name)).toEqual(["generic-diagnosis"]);
   });
 
   it("B-01: sabit önek (sistem + meta + çekirdek araçlar) ≤ 3k token", async () => {
