@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, defineTool, OpsError } from "@ops/contracts";
 import type { Adapter, AdapterCall, Profile, RawToolOutput, Target, ToolDefinition } from "@ops/contracts";
 import type { EvidenceStore } from "./evidence.ts";
+import { buildTimeline } from "./timeline.ts";
 
 const limits = { timeoutMs: 5000, maxBytes: 200_000, maxItems: 200, maxOutputTokens: 1500 };
 
@@ -41,9 +42,27 @@ const searchTool = defineTool(
   z.strictObject({ query: z.string().min(1).max(200), limit: z.number().int().min(1).max(20).optional() }),
 );
 
+const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})$/;
+
+const timelineTool = defineTool(
+  {
+    ...base,
+    name: "timeline.build",
+    description:
+      "Kanıtlardan tek zaman çizelgesi; imaj özeti, commit SHA, koşu kimliğiyle deterministik bağ. Serbest metin içermez.",
+    typicalOutputTokens: 900,
+  },
+  z.strictObject({
+    evidence: z.array(z.string().regex(/^ev-\d+$/)).max(30).optional(),
+    from: z.string().regex(ISO).optional(),
+    to: z.string().regex(ISO).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }),
+);
+
 /** Çekirdek yerel araçlar (kimliksiz): kanıt deposu okuma. Bunlar da PEP boru hattından geçer. */
 export function createLocalAdapter(evidence: EvidenceStore): { adapter: Adapter; definitions: ToolDefinition[] } {
-  const definitions = [getTool, searchTool];
+  const definitions = [getTool, searchTool, timelineTool];
   const manifest = AdapterManifestSchema.parse({
     id: "core-local",
     version: "0.0.0",
@@ -96,6 +115,23 @@ export function createLocalAdapter(evidence: EvidenceStore): { adapter: Adapter;
           summary: `${hits.length} eşleşme`,
           sensitivity: maxSens,
           ...(touched.some((e) => e.taint === "untrusted") ? { taint: "untrusted" as const } : {}),
+        };
+      }
+      if (call.tool === "timeline.build") {
+        const a = call.args as { evidence?: string[]; from?: string; to?: string; limit?: number };
+        const used = a.evidence
+          ? a.evidence.map((id) => {
+              const e = evidence.get(id);
+              if (!e) throw new OpsError("evidence_not_found", `kanıt bulunamadı: ${id}`);
+              return e;
+            })
+          : evidence.all().filter((e) => !e.tool.startsWith("evidence.") && e.tool !== "timeline.build").slice(-30);
+        const { timeline, sensitivity } = buildTimeline(used, { ...(a.from ? { from: a.from } : {}), ...(a.to ? { to: a.to } : {}), ...(a.limit ? { limit: a.limit } : {}) });
+        return {
+          data: timeline,
+          summary: `${timeline.events.length} olay, ${timeline.links.length} anahtar bağı (${used.length} kanıt)`,
+          sensitivity,
+          subjects: [...new Set(used.flatMap((e) => [...e.subjects]))].slice(0, 60),
         };
       }
       throw new OpsError("unknown_tool", `bilinmeyen yerel araç: ${call.tool}`);

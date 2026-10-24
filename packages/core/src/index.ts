@@ -23,3 +23,6 @@ export { ToolExecutor, synthDenied } from "./executor.ts";
 export type { ExecutorDeps } from "./executor.ts";
 export { RuntimeOrchestrator } from "./runtime-orchestrator.ts";
 export type { RuntimeOrchestratorDeps } from "./runtime-orchestrator.ts";
+
+export { buildTimeline } from "./timeline.ts";
+export type { Timeline, TimelineEvent, TimelineLink, TimelineOptions, TimelineSource } from "./timeline.ts";

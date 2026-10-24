@@ -11,6 +11,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@ops/adapter-github": "workspace:*",
     "@ops/adapter-kubernetes": "workspace:*",
     "@ops/adapter-postgres": "workspace:*",
     "@ops/audit": "workspace:*",

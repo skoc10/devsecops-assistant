@@ -76,7 +76,7 @@ describe("Orchestrator: temel döngü", () => {
     const ev = await collect(o, "listele");
     const tr = ev.find((e) => e.type === "tool_result") as Extract<OrchestratorEvent, { type: "tool_result" }>;
     expect(tr).toMatchObject({ status: "denied", reasonCode: "unknown_tool" });
-    expect((p.requests[0] as GenerateRequest).tools.map((t) => t.name)).toEqual(["evidence.get", "evidence.search"]);
+    expect((p.requests[0] as GenerateRequest).tools.map((t) => t.name)).toEqual(["evidence.get", "evidence.search", "timeline.build"]);
     expect(h.k8s.calls.length).toBe(0);
   });
 

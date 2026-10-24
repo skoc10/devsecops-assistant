@@ -21,6 +21,37 @@ importers:
         specifier: ^5.0.5
         version: 5.0.5(@types/node@26.6.5)(vite@8.3.5(@types/node@26.6.5)(yaml@2.9.1))
 
+  packages/adapters/github:
+    dependencies:
+      '@ops/broker':
+        specifier: workspace:*
+        version: link:../../broker
+      '@ops/contracts':
+        specifier: workspace:*
+        version: link:../../contracts
+      yaml:
+        specifier: ^2.0.0
+        version: 2.9.1
+      zod:
+        specifier: ^4.0.0
+        version: 4.6.7
+    devDependencies:
+      '@ops/audit':
+        specifier: workspace:*
+        version: link:../../audit
+      '@ops/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@ops/policy':
+        specifier: workspace:*
+        version: link:../../policy
+      '@ops/redaction':
+        specifier: workspace:*
+        version: link:../../redaction
+      '@ops/testkit':
+        specifier: workspace:*
+        version: link:../../testkit
+
   packages/adapters/kubernetes:
     dependencies:
       '@ops/broker':
@@ -150,6 +181,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@ops/adapter-github':
+        specifier: workspace:*
+        version: link:../adapters/github
       '@ops/adapter-kubernetes':
         specifier: workspace:*
         version: link:../adapters/kubernetes

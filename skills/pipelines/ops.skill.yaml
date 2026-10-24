@@ -1,0 +1,5 @@
+requires:
+  adapters: [github-actions, github-scm]
+requests:
+  toolsets: [pipelines, scm]
+model_hint: large

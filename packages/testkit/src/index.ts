@@ -10,3 +10,4 @@ export * from "./kubeconfig.ts";
 export * from "./fake-k8s.ts";
 export * from "./k8s-scenario.ts";
 export * from "./fake-openai.ts";
+export * from "./fake-github.ts";

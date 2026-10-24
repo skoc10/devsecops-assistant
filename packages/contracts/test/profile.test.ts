@@ -51,6 +51,19 @@ describe("ProfileSchema", () => {
   });
 });
 
+describe("scopeAllows: sahip/* kalıbı", () => {
+  it("yalnız tek düzey altını kapsar; iç içe ve benzer önek kapsanmaz", () => {
+    expect(scopeAllows(["acme/*"], "acme/payments")).toBe(true);
+    expect(scopeAllows(["acme/*"], "acme/a/b")).toBe(false);
+    expect(scopeAllows(["acme/*"], "acme-evil/payments")).toBe(false);
+    expect(scopeAllows(["acme/*"], "acme/")).toBe(false);
+    expect(scopeAllows(["acme/*"], "acme")).toBe(false);
+    expect(scopeAllows(["acme/payments"], "acme/billing")).toBe(false);
+    expect(scopeAllows(["*/*"], "acme/payments")).toBe(false);
+    expect(scopeAllows(["a*/*"], "ab/c")).toBe(false);
+  });
+});
+
 describe("scopeAllows", () => {
   it("* hepsini kapsar, yoksa tam eşleşme", () => {
     expect(scopeAllows(["*"], "anything")).toBe(true);

@@ -79,11 +79,11 @@ describe("ToolRegistry", () => {
   it("specsFor yalnız etkin araç setlerini ve deterministik sırayla döndürür (B-05)", async () => {
     const h = await makeHarness();
     const names = (sets: string[]): string[] => h.registry.specsFor(sets).map((s) => s.name);
-    expect(names(["core"])).toEqual(["evidence.get", "evidence.search"]);
+    expect(names(["core"])).toEqual(["evidence.get", "evidence.search", "timeline.build"]);
     const k8s = names(["core", "k8s-core"]);
     // araç setleri etkinleşme sırasıyla, her set içinde ada göre; yeni set yalnız SONA eklenir
-    expect(k8s.slice(0, 2)).toEqual(["evidence.get", "evidence.search"]);
-    const rest = k8s.slice(2);
+    expect(k8s.slice(0, 3)).toEqual(["evidence.get", "evidence.search", "timeline.build"]);
+    const rest = k8s.slice(3);
     expect(rest).toEqual([...rest].sort((x, y) => x.localeCompare(y)));
     expect(k8s).not.toContain("db.query.read");
     expect(names(["core", "k8s-core"])).toEqual(k8s);

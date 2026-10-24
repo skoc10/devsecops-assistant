@@ -3,6 +3,7 @@ import { initSqlClassifier, mergeCatalogs, parseCatalog, shellCommandClassifier 
 import type { CommandCatalog } from "@ops/classifiers";
 import { TerminalAdapter, assertSafeWorkdir } from "@ops/terminal";
 import { KubernetesAdapter } from "@ops/adapter-kubernetes";
+import { GithubActionsAdapter, GithubScmAdapter } from "@ops/adapter-github";
 import { EMPTY_MASKING_CONFIG, PostgresAdapter, loadMaskingConfig, maskingRulesFor } from "@ops/adapter-postgres";
 import type { MaskingConfig } from "@ops/adapter-postgres";
 import { AuditLog, FileAuditStorage, FileHeadAnchor } from "@ops/audit";
@@ -60,6 +61,8 @@ export interface Runtime {
   readonly skills: SkillRegistry;
   readonly adapter: KubernetesAdapter;
   readonly postgres: PostgresAdapter;
+  readonly githubActions: GithubActionsAdapter;
+  readonly githubScm: GithubScmAdapter;
   readonly sandbox: Sandbox | null;
   /** Profili doktordan geçirir (bağlamaz). */
   diagnose(id: string): Promise<DoctorReport>;
@@ -130,8 +133,14 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const postgres = new PostgresAdapter(broker.resolver, { masking, ...(o.now ? { now: o.now } : {}) });
   toolRegistry.register(postgres, postgres.definitions);
 
+  // CI/CD ve kaynak deposu (GitHub REST, yalnız GET)
+  const githubActions = new GithubActionsAdapter(broker.resolver, { ...(o.now ? { now: o.now } : {}) });
+  toolRegistry.register(githubActions, githubActions.definitions);
+  const githubScm = new GithubScmAdapter(broker.resolver, { ...(o.now ? { now: o.now } : {}) });
+  toolRegistry.register(githubScm, githubScm.definitions);
+
   // Terminal servisi: yalnız iş alanı verildiyse VE OS sandbox varsa (aksi halde kabuk yok).
-  const availableAdapters = ["kubernetes", "postgres"];
+  const availableAdapters = ["kubernetes", "postgres", "github-actions", "github-scm"];
   const classifiers: ((tool: string, args: unknown) => ReturnType<ReturnType<typeof shellCommandClassifier>>)[] = [];
   let terminalNote = "kapalı";
   if (o.workdir) {
@@ -178,8 +187,9 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const diagnoseProfile = async (id: string): Promise<{ report: DoctorReport; profile: Profile }> => {
     const profile: Profile | undefined = registry.get(id);
     if (!profile) throw new Error(`profil bulunamadı: ${id}`);
-    const doctorAdapter = profile.kind === "k8s" ? adapter : profile.kind === "db" ? postgres : null;
-    if (!doctorAdapter) throw new Error(`bu sürümde yalnız 'k8s' ve 'db' profilleri bağlanabilir: ${profile.kind}`);
+    const doctorAdapter =
+      profile.kind === "k8s" ? adapter : profile.kind === "db" ? postgres : profile.kind === "pipeline" ? githubActions : profile.kind === "scm" ? githubScm : null;
+    if (!doctorAdapter) throw new Error(`bu sürümde yalnız 'k8s', 'db', 'pipeline' ve 'scm' profilleri bağlanabilir: ${profile.kind}`);
     await broker.prime?.(profile, known);
     const lease = await broker.acquire({ profile, purpose: "doctor", callId: `doctor-${profile.id}`, ttlSec: 60 }, known);
     let report: DoctorReport;
@@ -215,6 +225,8 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     skills,
     adapter,
     postgres,
+    githubActions,
+    githubScm,
     sandbox,
     async diagnose(id: string): Promise<DoctorReport> {
       return (await diagnoseProfile(id)).report;
@@ -242,7 +254,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
       // araç listesi görev başında sabitlendiğinden kullanılabilir skill'ler (en çok 2) önceden etkinleşir
       // Öncelik: bağlı profil türlerinin adapter'ını gerektiren skill'ler; sonra genel teşhis; en çok 2.
       // Her görevin başında hesaplanır (profiller sohbet sırasında bağlanır).
-      const adapterOfKind: Record<string, string> = { k8s: "kubernetes", db: "postgres" };
+      const adapterOfKind: Record<string, string> = { k8s: "kubernetes", db: "postgres", pipeline: "github-actions", scm: "github-scm" };
       const preload = (): { name: string; tier: Parameters<Session["activateSkill"]>[0]["tier"]; body: string; tokens: number; toolsets: string[] }[] => {
         const bound = new Set(session.boundProfiles().map((p) => adapterOfKind[p.kind]).filter((x): x is string => x !== undefined));
         const rank = (sk: ReturnType<typeof skills.all>[number]): number =>

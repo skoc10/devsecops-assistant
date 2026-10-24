@@ -140,7 +140,7 @@ describe("B-01/B-03/B-04: token ekonomisi", () => {
     const prefix = r.system.split("\n\nBağlı profiller")[0] as string;
     expect(prefix.startsWith(BASE_SYSTEM)).toBe(true);
     expect(estimateTokens(prefix + JSON.stringify(r.tools))).toBeLessThanOrEqual(3_000);
-    expect(r.tools.map((t) => t.name)).toEqual(["evidence.get", "evidence.search", "k8s.profile.describe", "skill.list", "skill.load"]);
+    expect(r.tools.map((t) => t.name)).toEqual(["evidence.get", "evidence.search", "k8s.profile.describe", "skill.list", "skill.load", "timeline.build"]);
     void skillMetadataBlock;
   });
 

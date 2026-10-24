@@ -4,6 +4,11 @@ const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const num = (v: unknown, d = 0): number => (typeof v === "number" && Number.isFinite(v) ? v : d);
 /** Kubelet/çalışma zamanı kaynaklı kısa kod; serbest metni sızdırmaz. */
 const token = (v: unknown): string => (typeof v === "string" && /^[A-Za-z0-9_.-]{1,48}$/.test(v) ? v : "Other");
+const isoTime = (v: unknown): string | undefined => {
+  if (typeof v !== "string") return undefined;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? undefined : new Date(t).toISOString();
+};
 const dnsName = (v: unknown): string => (typeof v === "string" && /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/.test(v) ? v : "?");
 
 export interface Finding {
@@ -81,6 +86,8 @@ export function summarizeWorkload(kind: string, o: Obj): { workload: Obj; findin
       generation: generation >= 0 ? generation : undefined,
       observedGeneration: observed >= 0 ? observed : undefined,
       conditions,
+      /** Son yayılım/ilerleme güncellemesi (Progressing koşulu); zaman çizelgesi için. */
+      lastUpdate: isoTime(progressing?.["lastUpdateTime"]),
     },
     findings,
   };
@@ -97,9 +104,16 @@ export function summarizePods(pods: Obj[]): { pods: Obj; images: WorkloadHealth[
   let notReady = 0;
   let restartsTotal = 0;
   let restartsMax = 0;
+  let newest = 0;
+  let oldest = Number.POSITIVE_INFINITY;
 
   for (const p of pods) {
     const meta = obj(p["metadata"]);
+    const created = Date.parse(typeof meta["creationTimestamp"] === "string" ? meta["creationTimestamp"] : "");
+    if (!Number.isNaN(created)) {
+      newest = Math.max(newest, created);
+      oldest = Math.min(oldest, created);
+    }
     const status = obj(p["status"]);
     const spec = obj(p["spec"]);
     const name = dnsName(meta["name"]);
@@ -142,7 +156,15 @@ export function summarizePods(pods: Obj[]): { pods: Obj; images: WorkloadHealth[
     }
   }
   return {
-    pods: { total: pods.length, byPhase, notReady, restarts: { total: restartsTotal, max: restartsMax }, problems: problems.slice(0, 20) },
+    pods: {
+      total: pods.length,
+      byPhase,
+      notReady,
+      restarts: { total: restartsTotal, max: restartsMax },
+      problems: problems.slice(0, 20),
+      newestCreatedAt: newest > 0 ? new Date(newest).toISOString() : undefined,
+      oldestCreatedAt: Number.isFinite(oldest) ? new Date(oldest).toISOString() : undefined,
+    },
     images: [...images.values()],
     findings,
     nodeNames: [...nodes].slice(0, 10),

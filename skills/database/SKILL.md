@@ -1,6 +1,6 @@
 ---
 name: database
-description: PostgreSQL salt okunur inceleme (uzun sorgu, kilit, yavaş sorgu planı, tablo/şema sorusu, kayıt sayımı). Veritabanı veya SQL sorularında kullan.
+description: PostgreSQL salt okunur inceleme (yavaş sorgu, kilit, şema, sayım). SQL sorularında kullan.
 ---
 # Veritabanı (PostgreSQL, salt okunur)
 

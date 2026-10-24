@@ -3,6 +3,7 @@ import type { Environment, Profile, RiskClass, SecretStore, TrustZone } from "@o
 import { credentialKey } from "./broker.ts";
 import { ambientFor, validateBindPath } from "./exec-runner.ts";
 import { buildDbCredential } from "./db-credential.ts";
+import { buildTokenCredential } from "./token-credential.ts";
 import { importKubeconfig } from "./kubeconfig.ts";
 import type { KubeImportOptions } from "./kubeconfig.ts";
 import type { ProfileRegistry } from "./profiles.ts";
@@ -61,6 +62,26 @@ export interface AddDatabaseRequest {
   readonly replace?: boolean;
 }
 
+export interface AddTokenRequest {
+  readonly id: string;
+  /** `pipeline` (CI/CD okuma) veya `scm` (kaynak deposu okuma). */
+  readonly kind: "pipeline" | "scm";
+  readonly environment: Environment;
+  readonly displayName?: string;
+  readonly apiBase: string;
+  /** Yalnız kasaya gider; CLI 0600 dosyadan/yankısız TTY'den okur. */
+  readonly token: string;
+  readonly caPem?: string;
+  /** İzinli depolar: `sahip/depo`, `sahip/*` veya `*`. */
+  readonly allowedScopes: readonly string[];
+  /** Sağlayıcıya özgü secret olmayan öznitelikler (ör. `logHosts`). */
+  readonly attributes?: Readonly<Record<string, string>>;
+  readonly classCeiling?: RiskClass;
+  readonly egressClass?: TrustZone;
+  readonly replace?: boolean;
+}
+
+const REPO_SCOPE = /^(?:\*|[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?:\*|[A-Za-z0-9._-]{1,100}))$/;
 const SCHEMA_NAME = /^[a-z_][a-z0-9_$]{0,62}$/;
 
 export interface AddResult {
@@ -174,6 +195,41 @@ export class ProfileService {
       credentialSource: { kind: "static", ambientDependencies: [] },
       egressClass: req.egressClass ?? defaultEgressFor("db", req.environment),
       attributes: { role: "reader", datasource, defaultSchema },
+    });
+    const key = credentialKey(profile.id);
+    const had = await this.store.get(key);
+    if (had && !req.replace) throw new OpsError("profile_exists", `kasada bu profil için kimlik zaten var: ${profile.id}`);
+    await this.store.set(key, new Uint8Array(Buffer.from(JSON.stringify(imp.blob), "utf8")));
+    try {
+      await this.registry.add(profile, req.replace ? { replace: true } : {});
+    } catch (e) {
+      if (!had) await this.store.delete(key);
+      throw e;
+    }
+    return { profile, warnings };
+  }
+
+  /** `pipeline`/`scm` profili (GitHub REST). Belirteç kasaya yazılır; profil/uyarılar belirteç içermez. */
+  async addToken(req: AddTokenRequest): Promise<AddResult> {
+    const ceiling: RiskClass = req.classCeiling ?? "read";
+    if (ceiling !== "read") throw new OpsError("ceiling_unsupported", `${req.kind} profilleri bu sürümde yalnız 'read' tavanlıdır (yazma Faz 2)`);
+    const scopes = [...req.allowedScopes].map((x) => x.toLowerCase()); // GitHub depo adları büyük/küçük harfe duyarsızdır
+    if (scopes.length === 0) throw new OpsError("scope_required", "izinli depo belirtilmedi (allowedScopes verin: sahip/depo, sahip/* veya *)");
+    for (const sc of scopes) if (!REPO_SCOPE.test(sc)) throw new OpsError("scope_invalid", `depo kapsamı geçersiz (sahip/depo | sahip/* | *): ${sc.slice(0, 60)}`);
+    const imp = buildTokenCredential({ apiBase: req.apiBase, token: req.token, ...(req.caPem !== undefined ? { caPem: req.caPem } : {}) });
+    const warnings = [...imp.warnings];
+    if (scopes.includes("*")) warnings.push("allowedScopes '*': erişilebilen tüm depolar izinli");
+    const profile = ProfileSchema.parse({
+      id: req.id,
+      kind: req.kind,
+      displayName: req.displayName ?? `${req.kind} ${new URL(imp.endpoint).hostname}`,
+      environment: req.environment,
+      targetPin: { endpoint: imp.endpoint, ...(imp.caFingerprint ? { caFingerprint: imp.caFingerprint } : {}) },
+      classCeiling: ceiling,
+      allowedScopes: scopes,
+      credentialSource: { kind: "static", ambientDependencies: [] },
+      egressClass: req.egressClass ?? defaultEgressFor(req.kind, req.environment),
+      attributes: { ...(req.attributes ?? {}), role: "reader" },
     });
     const key = credentialKey(profile.id);
     const had = await this.store.get(key);

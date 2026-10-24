@@ -12,6 +12,7 @@ import type {
 import type { ExecCredentialRunner, ExecCredentialResult } from "./exec-runner.ts";
 import type { KubeCredentialBlob } from "./kubeconfig.ts";
 import type { DbCredential, DbCredentialBlob } from "./db-credential.ts";
+import type { TokenCredential, TokenCredentialBlob } from "./token-credential.ts";
 
 export const credentialKey = (profileId: string): string => `profile/${profileId}/credential`;
 
@@ -34,18 +35,20 @@ export interface KubeCredential {
 export interface CredentialResolver {
   k8s(handle: CredentialHandle): KubeCredential;
   db(handle: CredentialHandle): DbCredential;
+  token(handle: CredentialHandle): TokenCredential;
 }
 
 interface Material {
   readonly profileId: string;
   readonly kubeBlob: KubeCredentialBlob | null;
   readonly dbBlob: DbCredentialBlob | null;
+  readonly tokenBlob: TokenCredentialBlob | null;
   /** JSON baytlarının kopyası: bırakınca sıfırlanır (JS string kopyaları için en iyi çaba). */
   readonly raw: Buffer;
   active: boolean;
 }
 
-type AnyBlob = KubeCredentialBlob | DbCredentialBlob;
+type AnyBlob = KubeCredentialBlob | DbCredentialBlob | TokenCredentialBlob;
 
 function parseBlob(raw: Uint8Array): AnyBlob {
   let j: unknown;
@@ -57,6 +60,7 @@ function parseBlob(raw: Uint8Array): AnyBlob {
   const b = j as { v?: unknown; kind?: unknown; server?: unknown; host?: unknown; password?: unknown } | null;
   if (b && b.v === 1 && (b.kind === "k8s-static" || b.kind === "k8s-exec") && typeof b.server === "string") return b as KubeCredentialBlob;
   if (b && b.v === 1 && b.kind === "db-static" && typeof b.host === "string" && typeof b.password === "string") return b as DbCredentialBlob;
+  if (b && b.v === 1 && (b as { kind?: unknown }).kind === "token-static" && typeof (b as { token?: unknown }).token === "string" && typeof (b as { apiBase?: unknown }).apiBase === "string") return b as unknown as TokenCredentialBlob;
   throw new OpsError("credential_corrupt", "kasadaki kimlik materyali tanınmıyor");
 }
 
@@ -119,6 +123,13 @@ export class LocalBroker implements CredentialBroker {
         const b = m.dbBlob;
         return { host: b.host, port: b.port, database: b.database, user: b.user, password: b.password, tls: b.tls };
       },
+      token: (handle) => {
+        const m = this.materials.get(handle);
+        if (!m || !m.active) throw new OpsError("lease_inactive", "kimlik tutamacı geçersiz veya süresi dolmuş");
+        if (!m.tokenBlob) throw new OpsError("credential_kind_mismatch", "tutamaç belirteç kimliği taşımıyor");
+        const b = m.tokenBlob;
+        return { apiBase: b.apiBase, token: b.token, ...(b.caPem ? { caPem: b.caPem } : {}) };
+      },
     };
   }
 
@@ -147,6 +158,10 @@ export class LocalBroker implements CredentialBroker {
       const blob = parseBlob(raw);
       if (blob.kind === "db-static") {
         sink.add(`profile:${profile.id}:password`, blob.password);
+        return;
+      }
+      if (blob.kind === "token-static") {
+        sink.add(`profile:${profile.id}:token`, blob.token);
         return;
       }
       if (blob.kind === "k8s-exec") return;
@@ -196,9 +211,13 @@ export class LocalBroker implements CredentialBroker {
     }
     let blob: KubeCredentialBlob | null = null;
     let dbBlob: DbCredentialBlob | null = null;
+    let tokenBlob: TokenCredentialBlob | null = null;
     if (parsed.kind === "db-static") {
       dbBlob = parsed;
       sink.add(`profile:${req.profile.id}:password`, parsed.password);
+    } else if (parsed.kind === "token-static") {
+      tokenBlob = parsed;
+      sink.add(`profile:${req.profile.id}:token`, parsed.token);
     } else {
       blob = parsed;
       if (blob.kind === "k8s-exec") {
@@ -218,7 +237,7 @@ export class LocalBroker implements CredentialBroker {
       profileId: req.profile.id,
       leaseId: randomUUID(),
     });
-    const m: Material = { profileId: req.profile.id, kubeBlob: blob, dbBlob, raw, active: true };
+    const m: Material = { profileId: req.profile.id, kubeBlob: blob, dbBlob, tokenBlob, raw, active: true };
     this.materials.set(handle, m);
     this.active += 1;
 

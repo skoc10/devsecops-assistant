@@ -63,9 +63,19 @@ export const ProfileSchema = z.strictObject({
 export type Profile = z.infer<typeof ProfileSchema>;
 export type ProfileInput = z.input<typeof ProfileSchema>;
 
-/** Kapsam listesi bir değeri kapsıyor mu? (`*` her şeyi kapsar.) */
+/**
+ * Kapsam listesi bir değeri kapsıyor mu? `*` her şeyi kapsar; `sahip/*` biçimi (yalnız sonda `/*`)
+ * `sahip/depo` gibi TEK düzey altı kapsamları kapsar (iç içe `sahip/a/b` kapsanmaz).
+ */
 export function scopeAllows(allowed: readonly string[], scope: string): boolean {
-  return allowed.includes("*") || allowed.includes(scope);
+  if (allowed.includes("*") || allowed.includes(scope)) return true;
+  for (const a of allowed) {
+    if (a.length > 2 && a.endsWith("/*") && !a.slice(0, -2).includes("*")) {
+      const prefix = a.slice(0, -1); // "sahip/"
+      if (scope.startsWith(prefix) && scope.length > prefix.length && !scope.slice(prefix.length).includes("/")) return true;
+    }
+  }
+  return false;
 }
 
 export const TargetSchema = z.strictObject({

@@ -89,7 +89,7 @@ describe("OpenAI-uyumlu sağlayıcı + gerçek HTTP + CLI (E-01 gerçek sağlay�
       }
     }
     // araç adları dış sağlayıcıya kodlanmış gider
-    expect(srv.requests[0]!.body.tools?.map((t) => t.function.name)).toEqual(["evidence__get", "evidence__search", "k8s__profile__describe", "skill__list", "skill__load"]);
+    expect(srv.requests[0]!.body.tools?.map((t) => t.function.name)).toEqual(["evidence__get", "evidence__search", "k8s__profile__describe", "skill__list", "skill__load", "timeline__build"]);
     // model turları denetime sağlayıcı/model/bölge ile yazılmış
     expect(audit).toContain('"provider":"openai-compatible"');
     expect(audit).toContain('"model":"yerel-model"');
