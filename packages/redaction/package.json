@@ -1,0 +1,16 @@
+{
+  "name": "@ops/redaction",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@ops/testkit": "workspace:*"
+  }
+}

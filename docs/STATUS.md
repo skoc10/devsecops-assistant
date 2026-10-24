@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP1 tamamlandı (sözleşmeler + testkit çekirdeği).
+Son güncelleme: WP2 tamamlandı (denetim + redaksiyon + kompaktlaştırma).
 
 ## Faz 0
 
@@ -10,8 +10,14 @@ Son güncelleme: WP1 tamamlandı (sözleşmeler + testkit çekirdeği).
 |---|---|---|---|
 | Sözleşmeler (Profile, Target, ToolDescriptor, ToolResult, PolicyDecision, AuditRecord, ModelProvider, AgentRuntime, DatabaseDriver, SecretStore) | **Enforced** (zod şemaları; strict, secret alanı yok) | `packages/contracts` | `contracts/test/*` |
 | Testkit çekirdeği: canary (ham/base64/url/hex/json/bölünmüş), CaptureSink, imzalı sahte profil, izole `OPS_HOME`, ScriptedProvider, FakeAdapter, adapter yapı denetimi | **Enforced** | `packages/testkit` | `testkit/test/*` |
-| Denetim hash zinciri + fail-closed yazıcı | Planned | `packages/audit` | S-08 |
-| Redaksiyon M1/M2/M3/M5/M6 + kompaktlaştırma | Planned | `packages/redaction` | S-06, B-03 |
+| Denetim: HMAC'li hash zinciri, write-ahead fail-closed yazıcı (depolama/çapa hatasında günlük kilitlenir), `verify` (düzenleme/silme/sıra değişimi/yanlış anahtar) | **Enforced** | `packages/audit` | S-08 (`audit/test`) |
+| Denetim: kuyruk kesme tespiti (başlık çapası) | **Best-effort** — çapa aynı kullanıcı hesabında; tamper-tespit, önleme değil; çapasız kesme fark edilmez | `packages/audit` | S-08 |
+| Redaksiyon M1 yapısal reddet listesi (kayıtlı profil varsayılan maskeleri kaybedemez) | **Enforced** | `packages/redaction` | S-06 |
+| Redaksiyon M2 desen/entropi (gitleaks tarzı dar kural seti) | **Best-effort** — bilinmeyen biçim kaçabilir | `packages/redaction` | S-06 |
+| Redaksiyon M3 bilinen-secret taraması (ham/base64 hizalamaları/url/hex/json/satır) | **Enforced** kayıtlı değerler için; bölünmüş/birleştirilmiş sızıntı **Best-effort** (tespit edilemez) | `packages/redaction` | S-06 |
+| M4 değer dedektörleri + sütun maskesi (AST kuralı Faz 1'de DB adapter'ında) | **Best-effort** | `packages/redaction` | S-06 |
+| M5 limit, M6 kontrol karakteri/bidi temizliği | **Enforced**; M6 taint zarfı tek başına güvenlik sınırı değildir | `packages/redaction` | S-06 |
+| Kompaktlaştırma (projeksiyon, boş atma, tablo, liste/log kümeleme, token tavanı, `byReference`), redaksiyondan sonra | **Enforced** | `packages/redaction` | B-03 |
 | Politika v0 + PEP boru hattı | Planned | `packages/policy`, `packages/core` | S-03, S-04, S-12, S-13 |
 | Kasa + broker + kubeconfig içe aktarma | Planned | `packages/broker` | S-06, S-04 |
 | Kubernetes okuma adapter'ı | Planned | `packages/adapters/kubernetes` | C-xx |
