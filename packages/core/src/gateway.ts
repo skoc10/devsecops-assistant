@@ -185,11 +185,12 @@ export class ToolGateway {
     st.cls = unclassified ? "destroy" : cls;
 
     // 5-6. Politika (bağlam etiketi/taint dahil)
-    const decision = policy.decide({ tool: desc, effectiveClass: cls, unclassified, profile, target, context: session.context });
+    const effSens: Sensitivity = maxSensitivity(desc.sensitivity, reg.adapter.sensitivityOf?.(desc.name, args) ?? "none");
+    const decision = policy.decide({ tool: desc, effectiveClass: cls, unclassified, profile, target, context: session.context, effectiveSensitivity: effSens });
     if (decision.effect === "deny") return this.deny(st, decision.reasonCode, decision.detail);
 
     // Egress ön denetimi: veri o sağlayıcıya gidemeyecekse çağrıyı hiç çalıştırma
-    const futureCap = this.zoneCapFor(desc.sensitivity, profile);
+    const futureCap = this.zoneCapFor(effSens, profile);
     if (!zoneAllows(req.providerZone, futureCap)) {
       return this.deny(st, "no_eligible_provider", `sağlayıcı bölgesi '${req.providerZone}', verinin gidebileceği en uzak bölge '${futureCap}'`);
     }
@@ -231,8 +232,25 @@ export class ToolGateway {
         why: decision.reasonCode,
       };
       const outcome = await gate.request({ actionHash, summary, expiresInSec: 300 });
+      const hashOk = outcome.approved && outcome.actionHash === actionHash;
+      // onay kararı (verildi/reddedildi) denetime ayrıca yazılır; yazılamazsa çağrı çalışmaz
+      try {
+        await audit.append({
+          event: "approval",
+          sessionId: session.id,
+          callId: st.callId,
+          tool: desc.name,
+          ...(profile ? { profile: profile.id, environment: profile.environment } : {}),
+          actionHash,
+          decision: hashOk ? "allow" : "deny",
+          ...(outcome.approved ? { approvalId: outcome.approvalId } : {}),
+          message: outcome.approved ? (hashOk ? "onaylandı" : "onay başka bir eyleme ait") : scrubText(outcome.reason, known),
+        });
+      } catch {
+        return this.deny(st, "audit_unavailable", "onay kaydı yazılamadı; çağrı çalıştırılmadı", { skipAudit: true });
+      }
       if (!outcome.approved) return this.deny(st, "approval_denied", outcome.reason);
-      if (outcome.actionHash !== actionHash) return this.deny(st, "approval_denied", "onay başka bir eyleme ait (eylem hash'i uyuşmuyor)");
+      if (!hashOk) return this.deny(st, "approval_denied", "onay başka bir eyleme ait (eylem hash'i uyuşmuyor)");
       approvalId = outcome.approvalId;
     }
 

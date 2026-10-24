@@ -13,3 +13,5 @@ export { registerProvider, createProvider, providerNames, providerKeyName, readP
 export type { ProviderFactory, ProviderContext } from "./providers.ts";
 export { registerBuiltinProviders } from "./builtin-providers.ts";
 export { readPassphrase } from "./prompt.ts";
+export { TtyApprovalGate, openDevTty, renderSummary, requiredAnswer, CONFIRM_PHRASE, DEFAULT_APPROVAL_BUDGET } from "./approval.ts";
+export type { ApprovalBudget, TtyApprovalOptions, TtyIo } from "./approval.ts";

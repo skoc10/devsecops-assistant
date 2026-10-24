@@ -80,6 +80,11 @@ export interface Adapter {
   resolveTarget(tool: string, args: unknown, profile: Profile): Target;
   /** Sınıfı yalnız YÜKSELTEBİLİR (PEP `max` alır). */
   classify?(tool: string, args: unknown): RiskClass | undefined;
+  /**
+   * Çağrı ÖNCESİ, argümana özgü hassasiyet (ör. `Secret` türü listesi). Yalnız YÜKSELTİR (PEP `max`
+   * alır): politika (taint yükseltme) ve egress ön denetimi bunu kullanır.
+   */
+  sensitivityOf?(tool: string, args: unknown): Sensitivity | undefined;
   connectCheck?(
     handle: CredentialHandle,
     profile: Profile,

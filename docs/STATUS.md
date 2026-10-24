@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP8 tamamlandı (OpenAI-uyumlu sağlayıcı, Cursor çalışma zamanı — sahte SDK ile).
+Son güncelleme: Faz 1a-i (onay kapısı v0, çağrıya özgü hassasiyet, explain-policy).
 
 ## Faz 0
 
@@ -21,7 +21,10 @@ Son güncelleme: WP8 tamamlandı (OpenAI-uyumlu sağlayıcı, Cursor çalışma 
 | PEP (Tool Gateway) 14 adımlı boru hattı: şema(strict) → profil → hedef pini/kapsam → sınıflama → politika → atıf → onay → denetim(intent, write-ahead) → lease → adapter → lease bırak → çıktı hattı → denetim(result) → egress | **Enforced** | `packages/core` | S-03, S-04, S-06, S-08, S-12, S-13 (`core/test/gateway.test.ts`) |
 | Politika motoru: sınıf tavanı sert, sınıflanamayan=destroy, deny>ask>allow, allow yalnız süreli+dar+mutate, kurallar tavan/taint'i gevşetemez | **Enforced** | `packages/policy` | `policy/test` |
 | Bağlam etiketi + taint yükseltme (mutasyon, başka profile okuma, daha hassas veri, dış ağ → en az ask) | **Enforced** | `packages/policy`, `packages/core` | T2 testleri |
-| Onay kapısı | **Planned** — kapı yoksa `ask` kararı `approval_unavailable` ile reddedilir (Faz 0 davranışı); v0 Faz 1 | `packages/core` | S-09, S-16 |
+| Onay kapısı v0 (`TtyApprovalGate`): yanıt YALNIZ kontrol terminalinden (`/dev/tty`; yoksa ret); kanonik özet PEP'ten (argümanlar redakte + kontrol karakteri temizli); sınıfa göre yazılı doğrulama (mutate: `evet`; deploy/prod: ortam adı; destroy: ortam/kaynak); "hep izin ver" YOK; zaman aşımı = ret; onay bütçesi (varsayılan 10 dk'da 5 onaydan sonra `ONAYLIYORUM` + soğuma); oturum sonu özeti; sohbet girdisi onay sırasında duraklatılır; kapı yoksa `ask` → `approval_unavailable` | **Enforced** (sahte TTY ile; gerçek `/dev/tty` etkileşimli elle doğrulanmalı). Eylem hash'i + TOCTOU (hedef sürüm yeniden doğrulama) ve tam diff ekranı Faz 2 | `packages/cli`, `packages/core` | S-09 (kısmi), S-16 (soket tarafı) |
+| Denetim: onay kararı ayrı `approval` kaydı (verildi/reddedildi/başka eyleme ait); yazılamazsa çağrı çalışmaz | **Enforced** | `packages/core` | `approval.test.ts` |
+| Çağrıya özgü hassasiyet (`Adapter.sensitivityOf`, yalnız yükseltir): politikadaki taint yükseltmesi ve egress ÖN denetimi kullanır (ör. `Secret` listesi: untrusted log sonrası `ask`, uzak sağlayıcıda çağrı öncesi ret) | **Enforced** | `packages/core`, `packages/policy`, `packages/adapters/kubernetes` | policy + `approval.test.ts` + S-13 |
+| `ops explain-policy` (`--code`, `--last N`): her sebep kodunun açıklaması; denetimden reddedilen/sorulan çağrılar | **Enforced** | `packages/policy`, `packages/cli` | `approval.test.ts` |
 | Mutasyon atfı: hedef kaynak, aynı profil/çağdan taze kanıtın `subject`'inde olmalı (sözdizimsel; anlamsal ilgiyi insan onayı doğrular) | **Enforced** (sözdizimsel kısım) | `packages/core` | S-05 çekirdeği |
 | Egress: bağlam `zoneCap` ↔ sağlayıcı bölgesi (ön ve son denetim); uygun sağlayıcı yoksa fail-closed | **Enforced** (gateway tarafı); sağlayıcı yönlendirmesi orkestratörde **Planned** | `packages/core` | T14 testleri |
 | Bütçeler: oturum çağrı sayısı, sonuç token tavanı, oturum token eşikleri (`policy.yaml` `budgets`) | **Enforced** (sayaçlar); model `usage` beslemesi orkestratörde **Planned** | `packages/policy`, `packages/core` | bütçe testleri |

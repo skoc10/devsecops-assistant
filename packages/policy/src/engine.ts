@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { riskAtLeast, riskRank, sensitivityRank } from "@ops/contracts";
+import type { Sensitivity } from "@ops/contracts";
 import type {
   ContextLabel,
   PolicyDecision,
@@ -22,6 +23,8 @@ export interface PolicyInput {
   readonly profile: Profile | null;
   readonly target: Target | null;
   readonly context: ContextLabel;
+  /** Çağrıya özgü hassasiyet (adapter `sensitivityOf` ⊔ araç hassasiyeti); yoksa `tool.sensitivity`. */
+  readonly effectiveSensitivity?: Sensitivity;
 }
 
 function canonicalJson(v: unknown): string {
@@ -131,7 +134,7 @@ export class PolicyEngine {
     if (profile && context.profilesTouched.length > 0 && !context.profilesTouched.includes(profile.id)) {
       return `bağlamda untrusted içerik varken başka profile okuma (${profile.id})`;
     }
-    if (sensitivityRank(tool.sensitivity) > sensitivityRank(context.maxSensitivity)) {
+    if (sensitivityRank(input.effectiveSensitivity ?? tool.sensitivity) > sensitivityRank(context.maxSensitivity)) {
       return "bağlamda untrusted içerik varken daha hassas veriye okuma";
     }
     return null;

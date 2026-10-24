@@ -118,8 +118,10 @@ describe("OpenAI-uyumlu sağlayıcı + gerçek HTTP + CLI (E-01 gerçek sağlay�
     await srv.stop();
     srv = await FakeOpenAiServer.start(secretSteps);
     const remote = await run(["chat", "--embedded"], "/use payments-sbx\nsecret'ları say\n/quit\n", { OPS_PROVIDER_ZONE: "third-party-cloud" });
-    expect(remote.out).toContain("no_eligible_provider");
-    expect(srv.requests.length).toBe(2); // Secret listesi sonrası üçüncü model çağrısı YAPILMADI
+    // Secret listesi çağrı ÖNCESİ (adapter sensitivityOf → secret-adjacent) egress ön denetiminde reddedilir
+    expect(remote.out).toContain("REDDEDİLDİ [no_eligible_provider]");
+    expect(fx.api.requests.some((q) => q.path.includes("/secrets"))).toBe(false);
+    expect(srv.requests.length).toBe(3);
     await srv.stop();
     srv = await FakeOpenAiServer.start(secretSteps);
     const local = await run(["chat", "--embedded"], "/use payments-sbx\nsecret'ları say\n/quit\n", { OPS_PROVIDER_ZONE: "local" });

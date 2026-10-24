@@ -213,3 +213,17 @@ describe("determinizm, sürüm ve bütçe", () => {
     }
   });
 });
+
+describe("çağrıya özgü hassasiyet (effectiveSensitivity)", () => {
+  const engine = new PolicyEngine(DEFAULT_POLICY);
+  it("untrusted bağlamda araç tanımı 'internal' olsa bile çağrı 'secret-adjacent' ise ask", () => {
+    const c = ctx({ tainted: true, maxSensitivity: "internal", profilesTouched: ["test-k8s"] });
+    expect(engine.decide(input({ context: c })).effect).toBe("allow");
+    const d = engine.decide(input({ context: c, effectiveSensitivity: "secret-adjacent" }));
+    expect(d).toMatchObject({ effect: "ask", reasonCode: "taint_escalation" });
+    expect(d.detail).toMatch(/daha hassas/);
+  });
+  it("temiz bağlamda yükseltme yok", () => {
+    expect(engine.decide(input({ context: ctx({ tainted: false }), effectiveSensitivity: "secret-adjacent" })).effect).toBe("allow");
+  });
+});

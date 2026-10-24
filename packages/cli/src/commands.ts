@@ -7,12 +7,14 @@ import { scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
 import { ENVIRONMENTS, OpsError, RISK_CLASSES } from "@ops/contracts";
 import type { Environment, ModelProvider, RiskClass, SecretStore } from "@ops/contracts";
 import { formatUsage, usageFromAudit } from "@ops/core";
+import { explainReason } from "@ops/policy";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { readAuditRecords, LocalBackend } from "./backend.ts";
 import type { Sender } from "./backend.ts";
 import { OpsdClient } from "./client.ts";
 import { renderDoctor, runChat } from "./chat.ts";
+import { TtyApprovalGate, openDevTty } from "./approval.ts";
 import { Opsd } from "./opsd.ts";
 import { ensureHome } from "./paths.ts";
 import type { OpsPaths } from "./paths.ts";
@@ -35,6 +37,8 @@ export interface CliEnv {
   /** Test: sağlayıcıyı doğrudan ver. */
   readonly provider?: ModelProvider;
   readonly providerFactory?: ProviderFactory;
+  /** Onay kapısı (test: sahte TTY). Varsayılan: `/dev/tty`; açılamazsa onay REDDEDİLİR. */
+  readonly approval?: TtyApprovalGate;
   /** `daemon` komutunun beklemesini durduran sinyal (test). */
   readonly stop?: AbortSignal;
 }
@@ -49,6 +53,7 @@ const USAGE = [
   "  doctor                             ortam kimlikleri ve sandbox durumu",
   "  audit verify                       denetim zincirini doğrula",
   "  usage                              token kullanım raporu (denetimden)",
+  "  explain-policy [--last N | --code KOD]   reddedilen/sorulan çağrıları açıkla",
   "  provider list | set-key AD         sağlayıcıları listele / API anahtarını kasaya yaz (OPS_PROVIDER_KEY_FILE veya TTY)",
   "  daemon                             opsd'yi başlat (UDS)",
   "  chat [--embedded]                  sohbet (opsd'ye bağlanır; --embedded süreç içi)",
@@ -57,9 +62,10 @@ const USAGE = [
 const out = (c: CliEnv, s: string): void => void c.io.output.write(`${s}\n`);
 const err = (c: CliEnv, s: string): void => void c.io.error.write(`${s}\n`);
 
-async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>): Promise<T> {
+async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approval?: TtyApprovalGate): Promise<T> {
   const rt = await createRuntime({
     paths: c.paths,
+    ...(approval ? { approval } : {}),
     ...(c.store ? { store: c.store } : { passphrase: () => readPassphrase(c.env, c.io) }),
     ...(c.scryptParams ? { scryptParams: c.scryptParams } : {}),
     ...(c.sandbox !== undefined ? { sandbox: c.sandbox } : {}),
@@ -164,6 +170,19 @@ export async function runCli(c: CliEnv): Promise<number> {
         throw new OpsError("usage", "profile alt komutu: add | list | rm | doctor | rbac");
       }
 
+      case "explain-policy": {
+        const { values } = parseArgs({ args: c.argv.slice(1), options: { last: { type: "string" }, code: { type: "string" } }, strict: true });
+        if (values.code) {
+          out(c, `${values.code}: ${explainReason(values.code)}`);
+          return 0;
+        }
+        const n = Number(values.last ?? "10");
+        const recs = (await readAuditRecords(c.paths.auditLog)).filter((r) => r.reasonCode && (r.decision === "deny" || r.decision === "ask") && (r.event === "result" || r.event === "intent" || r.event === "approval")).slice(-n);
+        if (recs.length === 0) out(c, "Reddedilen/sorulan çağrı bulunamadı.");
+        for (const r of recs) out(c, `[${r.ts}] ${r.tool ?? "-"} ${r.profile ? `(${r.profile}) ` : ""}→ ${r.decision} ${r.reasonCode}\n    ${explainReason(r.reasonCode as string)}${r.message ? `\n    ayrıntı: ${r.message}` : ""}`);
+        return 0;
+      }
+
       case "provider": {
         if (sub === "list") {
           out(c, providerNames().map((n) => `${n}${c.env["OPS_PROVIDER"] === n ? "  (etkin: OPS_PROVIDER)" : ""}`).join("\n"));
@@ -223,6 +242,7 @@ export async function runCli(c: CliEnv): Promise<number> {
       }
 
       case "daemon": {
+        const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
         return await withRuntime(c, async (rt) => {
           const orch = await engineFor(c, rt);
           const d = new Opsd({ runtime: rt, orchestrator: orch, socketPath: c.paths.socket, onShutdown: () => stopper.abort() });
@@ -233,15 +253,17 @@ export async function runCli(c: CliEnv): Promise<number> {
           await new Promise<void>((resolve) => stopper.signal.addEventListener("abort", () => resolve(), { once: true }));
           await d.close();
           return 0;
-        });
+        }, gate);
       }
 
       case "chat": {
         const embedded = sub === "--embedded" || rest.includes("--embedded");
         if (embedded) {
+          const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
           await withRuntime(c, async (rt) => {
-            await runChat(new LocalBackend(rt, await engineFor(c, rt)), { input: c.io.input, output: c.io.output });
-          });
+            await runChat(new LocalBackend(rt, await engineFor(c, rt)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events });
+            out(c, gate.summaryLine());
+          }, gate);
           return 0;
         }
         const client = await OpsdClient.connect(c.paths.socket).catch(() => {

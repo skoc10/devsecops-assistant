@@ -8,6 +8,7 @@ import type {
   DoctorReport,
   Profile,
   RawToolOutput,
+  Sensitivity,
   Target,
 } from "@ops/contracts";
 import type { CredentialResolver, KubeCredential } from "@ops/broker";
@@ -101,6 +102,16 @@ export class KubernetesAdapter implements Adapter {
     if (!profile.targetPin.endpoint.startsWith("https://")) problems.push("pin uç noktası https olmalı");
     if (profile.credentialSource.kind !== "static" && profile.credentialSource.kind !== "exec") problems.push(`kimlik kaynağı henüz desteklenmiyor: ${profile.credentialSource.kind}`);
     return problems;
+  }
+
+  /** `Secret` türü (ad/tür/anahtar sayısı bile) secret-adjacent: bağlam yalnız yerel sağlayıcıya gidebilir. */
+  sensitivityOf(tool: string, args: unknown): Sensitivity | undefined {
+    if (tool !== "k8s.resources.list" && tool !== "k8s.resources.get" && tool !== "k8s.resources.describe") return undefined;
+    try {
+      return resolveKind(str((args ?? {}) as Args, "kind") ?? "").kind === "Secret" ? "secret-adjacent" : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   // ---- hedef -------------------------------------------------------------------------------

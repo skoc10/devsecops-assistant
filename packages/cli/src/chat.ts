@@ -1,3 +1,4 @@
+import type { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import type { DoctorReport } from "@ops/contracts";
@@ -64,11 +65,15 @@ export function renderDoctor(r: DoctorReport): string {
 }
 
 /** Satır tabanlı sohbet döngüsü. Terminal olmayan girdide de çalışır (test, boru). */
-export async function runChat(backend: ChatBackend, io: { input: Readable; output: Writable }): Promise<void> {
+export async function runChat(backend: ChatBackend, io: { input: Readable; output: Writable }, opts: { approvalEvents?: EventEmitter } = {}): Promise<void> {
   const out = (s: string): void => {
     io.output.write(`${s}\n`);
   };
   const rl = createInterface({ input: io.input, crlfDelay: Infinity });
+  // Onay istemi kontrol terminalinden okunur; sohbet girdisi o sırada DURAKLATILIR ki yanıt
+  // sohbet satırı olarak (modele) gitmesin.
+  opts.approvalEvents?.on("start", () => rl.pause());
+  opts.approvalEvents?.on("end", () => rl.resume());
   out("ops-assistant — /help ile komutlar. Secret'ları sohbete yapıştırmayın.");
   for await (const raw of rl) {
     const line = raw.trim();
