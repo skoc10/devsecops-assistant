@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP4 tamamlandı (kasa + broker + kubeconfig içe aktarma).
+Son güncelleme: WP5 tamamlandı (sahte k8s API + Kubernetes okuma adapter'ı).
 
 ## Faz 0
 
@@ -35,7 +35,10 @@ Son güncelleme: WP4 tamamlandı (kasa + broker + kubeconfig içe aktarma).
 | Ortam kimliği taraması (yalnız varlık + izin bitleri; içerik okunmaz) | **Enforced** | `packages/broker` | `broker/test/service.test.ts` |
 | Denetim HMAC anahtarı kasada (`audit/hmac-key`) | **Enforced** | `packages/broker` | `broker/test/service.test.ts` |
 | Exec kimlik eklentisi (argv şablonu + sandbox), `connectCheck`, profil doktoru | Planned (WP6) | `packages/broker`, `packages/sandbox` | S-14, S-15 |
-| Kubernetes okuma adapter'ı | Planned | `packages/adapters/kubernetes` | C-xx |
+| Kubernetes okuma adapter'ı: `k8s.profile.describe`, `resources.list/get/describe`, `events.list`, `pods.logs`; yalnız GET; kompakt projeksiyon + `select`; kapalı tür tablosu; namespace/ad DNS regex'i | **Enforced** (testli, sahte API'ye karşı gerçek TLS) — gerçek kümeye karşı (`kind`) denenmedi, I-01 WP6'da | `packages/adapters/kubernetes` | `adapters/kubernetes/test/adapter.test.ts` |
+| Kimlik pini: sunucu URL'si ve CA parmak izi kimlik gönderilmeden ÖNCE doğrulanır; yönlendirme izlenmez; yanıt boyutu sınırlı | **Enforced** | `packages/adapters/kubernetes` | S-04, S-12 |
+| `Secret` türü `as=Table` ile okunur: değerler sunucudan hiç çekilmez; ek olarak ConfigMap secret-benzeri anahtarları, `managedFields`, `last-applied-configuration` atılır; M1 `k8s` profili son hat | **Enforced** | `packages/adapters/kubernetes` | S-06 (adapter ayağı) |
+| Conformance paketi v0 (yapı + davranış: sızıntı, kapsam reddi, pin, çıktı tavanı/projeksiyon) | **Enforced** (kubernetes için); genel davranış paketi diğer adapter'larla genişler | `packages/testkit`, `packages/adapters/kubernetes` | C-xx |
 | Sandbox sarmalayıcı, exec eklentisi şablonu, doktor | Planned | `packages/sandbox`, `packages/broker` | S-14, S-15 |
 | Orkestratör, `opsd`, `ops chat`, tembel skill, token ölçümü | Planned | `packages/core`, `packages/cli`, `packages/skills` | E-01, B-01, B-04 |
 | Sağlayıcılar (OpenAI-uyumlu, Cursor runtime) | Planned | `packages/providers`, `packages/runtimes` | S-10, S-13 |

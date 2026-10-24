@@ -1,0 +1,22 @@
+{
+  "name": "@ops/adapter-kubernetes",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/broker": "workspace:*",
+    "@ops/contracts": "workspace:*",
+    "@ops/redaction": "workspace:*",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@ops/audit": "workspace:*",
+    "@ops/core": "workspace:*",
+    "@ops/policy": "workspace:*",
+    "@ops/testkit": "workspace:*"
+  }
+}

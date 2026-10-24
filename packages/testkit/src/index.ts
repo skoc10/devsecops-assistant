@@ -7,3 +7,5 @@ export * from "./structure.ts";
 export * from "./fake-broker.ts";
 export * from "./pki.ts";
 export * from "./kubeconfig.ts";
+export * from "./fake-k8s.ts";
+export * from "./k8s-scenario.ts";

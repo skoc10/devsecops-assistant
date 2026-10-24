@@ -12,3 +12,4 @@ export * from "./database.ts";
 export * from "./secrets.ts";
 export * from "./broker.ts";
 export * from "./approval.ts";
+export * from "./endpoint.ts";
