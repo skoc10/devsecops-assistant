@@ -62,7 +62,10 @@ export const AuditRecordSchema = AuditBodySchema.extend({
 });
 export type AuditRecord = z.infer<typeof AuditRecordSchema>;
 
+/** Yazıcı `ts` ve `principal` alanlarını boşsa kendisi doldurur. */
+export type AuditEntry = Omit<AuditBody, "ts" | "principal"> & Partial<Pick<AuditBody, "ts" | "principal">>;
+
 /** Denetim yazıcısı sözleşmesi. `append` başarısız olursa çağıran araç çağrısını ÇALIŞTIRMAZ. */
 export interface AuditSink {
-  append(body: AuditBody): Promise<AuditRecord>;
+  append(entry: AuditEntry): Promise<AuditRecord>;
 }

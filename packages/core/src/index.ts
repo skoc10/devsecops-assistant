@@ -1,0 +1,11 @@
+export { ToolGateway } from "./gateway.ts";
+export type { CommandClassifier, GatewayDeps, InvokeRequest } from "./gateway.ts";
+export { Session } from "./session.ts";
+export type { SessionUsage } from "./session.ts";
+export { EvidenceStore } from "./evidence.ts";
+export type { EvidenceEntry, NewEvidence, SliceResult } from "./evidence.ts";
+export { ToolRegistry } from "./registry.ts";
+export type { RegisteredTool } from "./registry.ts";
+export { createLocalAdapter } from "./local-tools.ts";
+export { formatForModel } from "./format.ts";
+export { normalizeEndpoint } from "./url.ts";

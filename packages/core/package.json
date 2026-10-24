@@ -1,0 +1,20 @@
+{
+  "name": "@ops/core",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/audit": "workspace:*",
+    "@ops/contracts": "workspace:*",
+    "@ops/policy": "workspace:*",
+    "@ops/redaction": "workspace:*",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@ops/testkit": "workspace:*"
+  }
+}

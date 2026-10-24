@@ -1,0 +1,30 @@
+# ops-assistant erişim politikası (hedef sistemin politikası DEĞİL).
+#
+# Taban davranış kodda sabittir ve buradaki kurallarla gevşetilemez:
+#   - sınıf > profil tavanı            → deny
+#   - sınıflanamayan işlem             → destroy muamelesi (tavan izin vermiyorsa deny)
+#   - bağlamda untrusted içerik varken mutasyon / başka profile okuma /
+#     daha hassas veriye okuma / dış ağ çıkışı → en az ask
+# Kurallar yalnız sıkılaştırabilir (deny/ask) ya da dar koşullarda `mutate` için
+# süreli bir allow ile taban onayı gevşetebilir (deploy/destroy için allow yazılamaz).
+version: 1
+
+budgets:
+  maxToolCalls: 60            # oturum başına en çok araç çağrısı
+  maxResultTokens: 1500       # tek araç sonucunun modele gidebileceği token tavanı
+  softSessionTokens: 150000   # yumuşak eşik: uyarı
+  hardSessionTokens: 400000   # sert eşik: yeni çağrı reddedilir
+
+rules: []
+# Örnekler:
+#
+# - id: prod-okuma-sor
+#   description: prod profillerinde her okumadan önce sor
+#   when: { environment: [prod], class: [read] }
+#   effect: ask
+#
+# - id: stage-scale-izin
+#   description: stage'de payments namespace'inde scale için 8 saatlik izin
+#   when: { tool: "k8s.scale", profile: "stage-eu", scope: ["payments"] }
+#   effect: allow
+#   expires: "2027-01-01T00:00:00Z"

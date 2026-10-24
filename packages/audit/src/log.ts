@@ -1,10 +1,7 @@
 import { AuditBodySchema, AuditRecordSchema, OpsError } from "@ops/contracts";
-import type { AuditBody, AuditRecord, AuditSink } from "@ops/contracts";
+import type { AuditBody, AuditEntry, AuditRecord, AuditSink } from "@ops/contracts";
 import { chainHash, GENESIS_HASH } from "./chain.ts";
 import type { AuditStorage, HeadAnchor } from "./storage.ts";
-
-/** `ts` ve `principal` boş bırakılırsa log doldurur. */
-export type AuditEntry = Omit<AuditBody, "ts" | "principal"> & Partial<Pick<AuditBody, "ts" | "principal">>;
 
 export interface AuditLogOptions {
   storage: AuditStorage;

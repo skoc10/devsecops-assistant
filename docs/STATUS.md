@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP2 tamamlandı (denetim + redaksiyon + kompaktlaştırma).
+Son güncelleme: WP3 tamamlandı (politika v0 + PEP).
 
 ## Faz 0
 
@@ -18,7 +18,14 @@ Son güncelleme: WP2 tamamlandı (denetim + redaksiyon + kompaktlaştırma).
 | M4 değer dedektörleri + sütun maskesi (AST kuralı Faz 1'de DB adapter'ında) | **Best-effort** | `packages/redaction` | S-06 |
 | M5 limit, M6 kontrol karakteri/bidi temizliği | **Enforced**; M6 taint zarfı tek başına güvenlik sınırı değildir | `packages/redaction` | S-06 |
 | Kompaktlaştırma (projeksiyon, boş atma, tablo, liste/log kümeleme, token tavanı, `byReference`), redaksiyondan sonra | **Enforced** | `packages/redaction` | B-03 |
-| Politika v0 + PEP boru hattı | Planned | `packages/policy`, `packages/core` | S-03, S-04, S-12, S-13 |
+| PEP (Tool Gateway) 14 adımlı boru hattı: şema(strict) → profil → hedef pini/kapsam → sınıflama → politika → atıf → onay → denetim(intent, write-ahead) → lease → adapter → lease bırak → çıktı hattı → denetim(result) → egress | **Enforced** | `packages/core` | S-03, S-04, S-06, S-08, S-12, S-13 (`core/test/gateway.test.ts`) |
+| Politika motoru: sınıf tavanı sert, sınıflanamayan=destroy, deny>ask>allow, allow yalnız süreli+dar+mutate, kurallar tavan/taint'i gevşetemez | **Enforced** | `packages/policy` | `policy/test` |
+| Bağlam etiketi + taint yükseltme (mutasyon, başka profile okuma, daha hassas veri, dış ağ → en az ask) | **Enforced** | `packages/policy`, `packages/core` | T2 testleri |
+| Onay kapısı | **Planned** — kapı yoksa `ask` kararı `approval_unavailable` ile reddedilir (Faz 0 davranışı); v0 Faz 1 | `packages/core` | S-09, S-16 |
+| Mutasyon atfı: hedef kaynak, aynı profil/çağdan taze kanıtın `subject`'inde olmalı (sözdizimsel; anlamsal ilgiyi insan onayı doğrular) | **Enforced** (sözdizimsel kısım) | `packages/core` | S-05 çekirdeği |
+| Egress: bağlam `zoneCap` ↔ sağlayıcı bölgesi (ön ve son denetim); uygun sağlayıcı yoksa fail-closed | **Enforced** (gateway tarafı); sağlayıcı yönlendirmesi orkestratörde **Planned** | `packages/core` | T14 testleri |
+| Bütçeler: oturum çağrı sayısı, sonuç token tavanı, oturum token eşikleri (`policy.yaml` `budgets`) | **Enforced** (sayaçlar); model `usage` beslemesi orkestratörde **Planned** | `packages/policy`, `packages/core` | bütçe testleri |
+| Broker `prime`: profil secret'ları ilk çağrıdan ÖNCE M3'e kaydedilir | **Enforced** (gateway tarafı; gerçek broker WP4) | `packages/core` | S-06 |
 | Kasa + broker + kubeconfig içe aktarma | Planned | `packages/broker` | S-06, S-04 |
 | Kubernetes okuma adapter'ı | Planned | `packages/adapters/kubernetes` | C-xx |
 | Sandbox sarmalayıcı, exec eklentisi şablonu, doktor | Planned | `packages/sandbox`, `packages/broker` | S-14, S-15 |

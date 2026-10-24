@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { RiskClass, Sensitivity } from "./classes.ts";
+import type { Taint } from "./result.ts";
 import { CREDENTIAL_SOURCE_KINDS, ProfileKindSchema } from "./profile.ts";
 import type { Profile, Target } from "./profile.ts";
 import { ToolDescriptorSchema } from "./tool.ts";
@@ -66,6 +67,8 @@ export interface RawToolOutput {
   subjects?: string[];
   /** Adapter çıktıya özgü hassasiyeti yükseltebilir (düşüremez). */
   sensitivity?: Sensitivity;
+  /** Adapter çıktıyı untrusted işaretleyebilir (örn. untrusted kanıtı yeniden okuyan yerel araç); düşüremez. */
+  taint?: Taint;
 }
 
 export interface Adapter {
