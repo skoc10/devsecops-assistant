@@ -1,0 +1,23 @@
+{
+  "name": "@ops/mcp-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/contracts": "workspace:*",
+    "@ops/redaction": "workspace:*",
+    "@ops/sandbox": "workspace:*",
+    "yaml": "^2.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@ops/audit": "workspace:*",
+    "@ops/core": "workspace:*",
+    "@ops/policy": "workspace:*",
+    "@ops/testkit": "workspace:*"
+  }
+}
