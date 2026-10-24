@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@ops/contracts": "workspace:*",
+    "libpg-query": "^18.2.0",
     "yaml": "^2.0.0",
     "zod": "^4.0.0"
   },
