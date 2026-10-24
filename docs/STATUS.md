@@ -2,7 +2,7 @@
 
 Etiketler (tasarım kararı D14): **Enforced** = kodda uygulanıyor ve testle doğrulanıyor · **Best-effort** = uygulanıyor ama garanti değil (sınırı yazılı) · **Planned** = henüz yok · **Library-only** = kütüphane var, çalışma zamanı yoluna bağlı değil.
 
-Son güncelleme: WP5 tamamlandı (sahte k8s API + Kubernetes okuma adapter'ı).
+Son güncelleme: WP6a tamamlandı (can_i, workload.health, profil doktoru, RBAC manifest üreticisi).
 
 ## Faz 0
 
@@ -38,6 +38,10 @@ Son güncelleme: WP5 tamamlandı (sahte k8s API + Kubernetes okuma adapter'ı).
 | Kubernetes okuma adapter'ı: `k8s.profile.describe`, `resources.list/get/describe`, `events.list`, `pods.logs`; yalnız GET; kompakt projeksiyon + `select`; kapalı tür tablosu; namespace/ad DNS regex'i | **Enforced** (testli, sahte API'ye karşı gerçek TLS) — gerçek kümeye karşı (`kind`) denenmedi, I-01 WP6'da | `packages/adapters/kubernetes` | `adapters/kubernetes/test/adapter.test.ts` |
 | Kimlik pini: sunucu URL'si ve CA parmak izi kimlik gönderilmeden ÖNCE doğrulanır; yönlendirme izlenmez; yanıt boyutu sınırlı | **Enforced** | `packages/adapters/kubernetes` | S-04, S-12 |
 | `Secret` türü `as=Table` ile okunur: değerler sunucudan hiç çekilmez; ek olarak ConfigMap secret-benzeri anahtarları, `managedFields`, `last-applied-configuration` atılır; M1 `k8s` profili son hat | **Enforced** | `packages/adapters/kubernetes` | S-06 (adapter ayağı) |
+| `k8s.workload.health`: türetilmiş sağlık (rollout, sorunlu kapsayıcı, imaj digest, HPA/PDB, düğüm baskısı, bulgu kodları); serbest metin ve kubelet mesajları çıktıya girmez, bilinmeyen neden kodları `Other` olur | **Enforced** | `packages/adapters/kubernetes` | `health.test.ts` |
+| `k8s.auth.can_i`: SelfSubjectRulesReview + yerel eşleme | **Enforced** | `packages/adapters/kubernetes` | `health.test.ts` |
+| Profil doktoru (k8s): bağlan → kimlik yankısı → pin → fiili RBAC ↔ beyan edilen tavan; Secret okuma, yazma, exec, silme, joker, impersonate, proxy, token üretme → `read` profili bağlanamaz; yetki kayması oturum başında yakalanır | **Enforced** (`adapter.doctor`; oturum başı çağrı WP7 orkestratöründe) | `packages/adapters/kubernetes` | S-14 (`doctor.test.ts`) |
+| Salt okunur RBAC manifest üreticisi (uygulamaz; Secret/exec/proxy/yazma yok; üretilen kurallar analizörden `read` geçer) | **Enforced** | `packages/adapters/kubernetes` | `rbac.test.ts` |
 | Conformance paketi v0 (yapı + davranış: sızıntı, kapsam reddi, pin, çıktı tavanı/projeksiyon) | **Enforced** (kubernetes için); genel davranış paketi diğer adapter'larla genişler | `packages/testkit`, `packages/adapters/kubernetes` | C-xx |
 | Sandbox sarmalayıcı, exec eklentisi şablonu, doktor | Planned | `packages/sandbox`, `packages/broker` | S-14, S-15 |
 | Orkestratör, `opsd`, `ops chat`, tembel skill, token ölçümü | Planned | `packages/core`, `packages/cli`, `packages/skills` | E-01, B-01, B-04 |

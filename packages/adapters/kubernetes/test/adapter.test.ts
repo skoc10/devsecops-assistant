@@ -14,7 +14,7 @@ describe("KubernetesAdapter yapısı", () => {
     const a = new KubernetesAdapter(new LocalBroker({ store: new MemorySecretStore() }).resolver);
     expect(checkAdapterStructure(a)).toEqual([]);
     const names = a.manifest.tools.map((t) => t.name).sort();
-    expect(names).toEqual(["k8s.events.list", "k8s.pods.logs", "k8s.profile.describe", "k8s.resources.describe", "k8s.resources.get", "k8s.resources.list"]);
+    expect(names).toEqual(["k8s.auth.can_i", "k8s.events.list", "k8s.pods.logs", "k8s.profile.describe", "k8s.resources.describe", "k8s.resources.get", "k8s.resources.list", "k8s.workload.health"]);
     expect(a.manifest.tools.every((t) => t.class === "read")).toBe(true);
     expect(a.manifest.tools.filter((t) => t.toolset === "core").map((t) => t.name)).toEqual(["k8s.profile.describe"]);
     // log/olay/describe çıktıları untrusted

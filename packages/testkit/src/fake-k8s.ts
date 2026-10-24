@@ -66,6 +66,27 @@ export interface FakeK8sOptions {
   readonly username?: string;
 }
 
+export interface FakeRule {
+  verbs: string[];
+  apiGroups: string[];
+  resources: string[];
+  resourceNames?: string[];
+}
+export interface FakeRulesStatus {
+  resourceRules: FakeRule[];
+  incomplete?: boolean;
+  evaluationError?: string;
+}
+
+/** Varsayılan: salt okunur kimlik (Secret yok, yazma yok, exec yok). */
+export const READONLY_RULES: FakeRulesStatus = {
+  resourceRules: [
+    { verbs: ["get", "list", "watch"], apiGroups: [""], resources: ["pods", "pods/log", "services", "endpoints", "configmaps", "events", "nodes", "namespaces"] },
+    { verbs: ["get", "list", "watch"], apiGroups: ["apps"], resources: ["deployments", "replicasets", "statefulsets", "daemonsets"] },
+    { verbs: ["get", "list", "watch"], apiGroups: ["batch", "autoscaling", "policy"], resources: ["jobs", "cronjobs", "horizontalpodautoscalers", "poddisruptionbudgets"] },
+  ],
+};
+
 interface LogEntry {
   readonly ts: Date;
   readonly text: string;
@@ -114,6 +135,7 @@ export class FakeK8sApi {
   private readonly store = new Map<string, K8sObject>();
   private readonly logs = new Map<string, LogEntry[]>();
   private readonly faults = new Map<string, (res: ServerResponse) => void>();
+  private readonly rules = new Map<string, FakeRulesStatus>();
   private readonly sockets = new Set<Socket>();
   private readonly now: () => Date;
 
@@ -181,6 +203,12 @@ export class FakeK8sApi {
   /** Yol önekine uyan isteklere belirli bir yanıt verir (ör. 403 RBAC, yönlendirme, dev gövde). */
   fault(pathPrefix: string, responder: (res: ServerResponse) => void): this {
     this.faults.set(pathPrefix, responder);
+    return this;
+  }
+
+  /** SelfSubjectRulesReview yanıtı: namespace'e özel veya `*` (varsayılan). */
+  setRules(namespace: string, status: FakeRulesStatus): this {
+    this.rules.set(namespace, status);
     return this;
   }
 
@@ -335,7 +363,24 @@ export class FakeK8sApi {
         }),
       );
     }
-    void body;
+    if (path === "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews") {
+      let ns = "default";
+      try {
+        ns = String((JSON.parse(body) as { spec?: { namespace?: string } }).spec?.namespace ?? "default");
+      } catch {
+        return this.send(res, 400, statusBody(400, "BadRequest", "invalid body"));
+      }
+      const st = this.rules.get(ns) ?? this.rules.get("*") ?? READONLY_RULES;
+      return this.send(
+        res,
+        201,
+        JSON.stringify({
+          kind: "SelfSubjectRulesReview",
+          apiVersion: "authorization.k8s.io/v1",
+          status: { resourceRules: st.resourceRules, nonResourceRules: [{ verbs: ["get"], nonResourceURLs: ["/healthz", "/version"] }], incomplete: st.incomplete ?? false, ...(st.evaluationError ? { evaluationError: st.evaluationError } : {}) },
+        }),
+      );
+    }
     return this.send(res, 404, statusBody(404, "NotFound", "the server could not find the requested resource"));
   }
 }

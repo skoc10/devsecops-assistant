@@ -5,6 +5,7 @@ import type {
   AdapterCall,
   AdapterManifest,
   CredentialHandle,
+  DoctorReport,
   Profile,
   RawToolOutput,
   Target,
@@ -16,6 +17,10 @@ import { parseSince } from "./duration.ts";
 import { CLUSTER_SCOPE, resolveKind, resourcePath } from "./kinds.ts";
 import type { KindInfo } from "./kinds.ts";
 import { registerK8sRedactionProfile, sanitizeObject } from "./sanitize.ts";
+import { diagnose } from "./doctor.ts";
+import { analyzeRules, ruleAllows } from "./rbac.ts";
+import type { RbacRule } from "./rbac.ts";
+import { summarizeHpa, summarizeNode, summarizePdb, summarizePods, summarizeWorkload } from "./health.ts";
 import { K8S_READ_TOOLS } from "./tools.ts";
 
 type Args = Record<string, unknown>;
@@ -135,6 +140,12 @@ export class KubernetesAdapter implements Adapter {
         const namespace = str(a, "namespace") as string;
         return t([namespace], [`Pod/${namespace}/${str(a, "pod")}`]);
       }
+      case "k8s.auth.can_i":
+        return t([str(a, "namespace") as string]);
+      case "k8s.workload.health": {
+        const namespace = str(a, "namespace") as string;
+        return t([namespace], [`${str(a, "kind")}/${namespace}/${str(a, "name")}`]);
+      }
       default:
         throw new OpsError("unknown_tool", `bilinmeyen araç: ${tool}`);
     }
@@ -175,6 +186,31 @@ export class KubernetesAdapter implements Adapter {
     }
   }
 
+  /** Beyan edilen tavan ↔ fiili RBAC; oturum başında ve `profile add`'de çalışır. */
+  async doctor(handle: CredentialHandle, profile: Profile): Promise<DoctorReport> {
+    const cred = this.resolver.k8s(handle);
+    let client: K8sClient | undefined;
+    try {
+      client = new K8sClient(cred, profile.targetPin, { maxBytes: 1_000_000, timeoutMs: 15_000 });
+    } catch (e) {
+      return diagnose(profile, {
+        connect: () => Promise.reject(e),
+        rulesFor: () => Promise.reject(e),
+        now: this.now,
+      });
+    }
+    const c = client;
+    try {
+      return await diagnose(profile, {
+        connect: () => this.connectCheck(handle, profile),
+        rulesFor: (ns) => this.rulesFor(c, ns),
+        now: this.now,
+      });
+    } finally {
+      c.close();
+    }
+  }
+
   // ---- araçlar -----------------------------------------------------------------------------
 
   async invoke(call: AdapterCall): Promise<RawToolOutput> {
@@ -197,6 +233,10 @@ export class KubernetesAdapter implements Adapter {
           return await this.events(client, a, call);
         case "k8s.pods.logs":
           return await this.logs(client, a, call);
+        case "k8s.auth.can_i":
+          return await this.canI(client, a);
+        case "k8s.workload.health":
+          return await this.health(client, a, call.profile);
         default:
           throw new OpsError("unknown_tool", `bilinmeyen araç: ${call.tool}`);
       }
@@ -416,6 +456,108 @@ export class KubernetesAdapter implements Adapter {
       summary: `log ${namespace}/${pod}${str(a, "container") ? `:${str(a, "container")}` : ""}${a["previous"] === true ? " (önceki)" : ""}: ${lines} satır, son ${str(a, "since")}${truncated ? ", kesildi" : ""}`,
       truncated,
       subjects: [`Pod/${namespace}/${pod}`],
+    };
+  }
+
+  // ---- yetki ve sağlık ---------------------------------------------------------------------
+
+  /** SelfSubjectRulesReview: kimliğin namespace'teki fiili kuralları. */
+  async rulesFor(client: K8sClient, namespace: string): Promise<{ rules: RbacRule[]; incomplete: boolean; evaluationError?: string }> {
+    const resp = await client.review("selfRules", { apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectRulesReview", spec: { namespace } });
+    if (resp.status !== 200 && resp.status !== 201) throw new OpsError("k8s_api_error", apiErrorMessage(resp, `yetki kuralları (${namespace})`));
+    const st = obj(obj(JSON.parse(resp.body))["status"]);
+    const rules = (Array.isArray(st["resourceRules"]) ? st["resourceRules"] : []).map((r) => {
+      const o = obj(r);
+      const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+      return { verbs: strs(o["verbs"]), apiGroups: strs(o["apiGroups"]), resources: strs(o["resources"]), resourceNames: strs(o["resourceNames"]) } satisfies RbacRule;
+    });
+    return {
+      rules,
+      incomplete: st["incomplete"] === true,
+      ...(typeof st["evaluationError"] === "string" ? { evaluationError: (st["evaluationError"] as string).slice(0, 200) } : {}),
+    };
+  }
+
+  private async canI(client: K8sClient, a: Args): Promise<RawToolOutput> {
+    const namespace = str(a, "namespace") as string;
+    const { rules, incomplete } = await this.rulesFor(client, namespace);
+    const verb = str(a, "verb");
+    const resource = str(a, "resource");
+    if (verb && resource) {
+      const group = str(a, "group");
+      const allowed = ruleAllows(rules, { verb, resource, ...(group !== undefined ? { group } : {}) });
+      return {
+        data: { namespace, verb, resource, group: group ?? "", allowed, incomplete: incomplete || undefined },
+        summary: `${verb} ${resource} (${namespace}): ${allowed ? "izinli" : "izinsiz"}`,
+      };
+    }
+    const analysis = analyzeRules(rules);
+    const compact = rules.map((r) => ({ verbs: r.verbs.join(","), groups: (r.apiGroups ?? []).join(",") || "core", resources: (r.resources ?? []).join(","), names: (r.resourceNames ?? []).length ? r.resourceNames : undefined }));
+    return {
+      data: { namespace, effectiveClass: analysis.effective, secretsReadable: analysis.secretsReadable, incomplete: incomplete || undefined, rules: compact },
+      summary: `${rules.length} kural (${namespace}); fiili sınıf: ${analysis.effective}`,
+      sensitivity: "internal",
+    };
+  }
+
+  private async health(client: K8sClient, a: Args, profile: Profile): Promise<RawToolOutput> {
+    const kind = str(a, "kind") as string;
+    const name = str(a, "name") as string;
+    const namespace = str(a, "namespace") as string;
+    const k = resolveKind(kind);
+    const wl = obj(jsonOf(await client.get(resourcePath(k, namespace, name)), `${kind} ${namespace}/${name}`));
+    const { workload, findings } = summarizeWorkload(kind, wl);
+
+    const spec = obj(wl["spec"]);
+    const matchLabels = obj(obj(spec["selector"])["matchLabels"]);
+    const selector = Object.entries(matchLabels).filter((e): e is [string, string] => typeof e[1] === "string").map(([k2, v]) => `${k2}=${v}`).join(",");
+    const tmplLabels = Object.fromEntries(Object.entries(obj(obj(obj(spec["template"])["metadata"])["labels"])).filter((e): e is [string, string] => typeof e[1] === "string"));
+
+    const listOf = async (kindName: string, query: Record<string, string | number | undefined>): Promise<Record<string, unknown>[]> => {
+      const kk = resolveKind(kindName);
+      const j = obj(jsonOf(await client.get(resourcePath(kk, namespace), { limit: 200, ...query }), `${kindName} (${namespace})`));
+      return (Array.isArray(j["items"]) ? j["items"] : []).map(obj);
+    };
+    const [pods, hpas, pdbs] = await Promise.all([
+      selector ? listOf("Pod", { labelSelector: selector }) : Promise.resolve([] as Record<string, unknown>[]),
+      kind === "Job" ? Promise.resolve([] as Record<string, unknown>[]) : listOf("HorizontalPodAutoscaler", {}),
+      kind === "Job" ? Promise.resolve([] as Record<string, unknown>[]) : listOf("PodDisruptionBudget", {}),
+    ]);
+    const ps = summarizePods(pods);
+    const hs = summarizeHpa(hpas, kind, name);
+    const pd = summarizePdb(pdbs, tmplLabels);
+
+    let nodes: Record<string, unknown>[] | "kapsam-dışı" = "kapsam-dışı";
+    const nodeFindings: ReturnType<typeof summarizeNode>["findings"] = [];
+    if (profile.allowedScopes.includes("*") || profile.allowedScopes.includes(CLUSTER_SCOPE)) {
+      const nk = resolveKind("Node");
+      const got = await Promise.all(
+        ps.nodeNames.map(async (n) => {
+          const r = await client.get(resourcePath(nk, undefined, n));
+          return r.status === 200 ? obj(JSON.parse(r.body)) : null;
+        }),
+      );
+      const sums = got.filter((x): x is Record<string, unknown> => x !== null).map(summarizeNode);
+      nodes = sums.map((x) => x.node);
+      for (const s of sums) nodeFindings.push(...s.findings);
+    }
+
+    const all = [...findings, ...ps.findings, ...hs.findings, ...pd.findings, ...nodeFindings];
+    const rank = { critical: 0, warning: 1, info: 2 } as const;
+    all.sort((x, y) => rank[x.severity] - rank[y.severity]);
+    const critical = all.filter((f) => f.severity === "critical").length;
+    return {
+      data: {
+        workload,
+        pods: ps.pods,
+        images: ps.images,
+        hpa: hs.hpa ?? undefined,
+        pdb: pd.pdb ?? undefined,
+        nodes,
+        findings: all.slice(0, 30),
+      },
+      summary: `${kind} ${namespace}/${name}: ${String(workload["ready"])}/${String(workload["desired"])} hazır, ${critical} kritik bulgu`,
+      subjects: [`${kind}/${namespace}/${name}`, ...pods.slice(0, 20).map((p) => `Pod/${namespace}/${String(obj(p["metadata"])["name"])}`)],
     };
   }
 }

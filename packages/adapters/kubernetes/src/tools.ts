@@ -176,4 +176,46 @@ export const podsLogs = defineTool(
   }),
 );
 
-export const K8S_READ_TOOLS: readonly ToolDefinition[] = [profileDescribe, resourcesList, resourcesGet, resourcesDescribe, eventsList, podsLogs];
+export const authCanI = defineTool(
+  {
+    ...base,
+    name: "k8s.auth.can_i",
+    description: "Bu profilin kendi kimliğinin namespace'teki yetkileri (kural listesi). verb+resource verilirse tek evet/hayır.",
+    class: "read",
+    toolset: "k8s",
+    limits: { timeoutMs: 10_000, maxBytes: 100_000, maxItems: 100, maxOutputTokens: 1_200 },
+    untrustedOutput: false,
+    typicalOutputTokens: 400,
+  },
+  z.strictObject({
+    namespace: ns,
+    verb: z.string().regex(/^[a-z*]{1,20}$/).optional(),
+    resource: z.string().regex(/^[a-z0-9*./-]{1,60}$/).optional(),
+    group: z.string().regex(/^[a-z0-9.-]{0,60}$/).optional(),
+  }),
+);
+
+export const workloadHealth = defineTool(
+  {
+    ...base,
+    name: "k8s.workload.health",
+    description: "İş yükünün türetilmiş sağlığı: rollout, replikalar, sorunlu kapsayıcılar, HPA/PDB, düğüm baskısı, bulgu kodları. Önce bunu çağırın.",
+    class: "read",
+    toolset: "k8s",
+    limits: { timeoutMs: 25_000, maxBytes: 200_000, maxItems: 100, maxOutputTokens: 1_500 },
+    untrustedOutput: false,
+    typicalOutputTokens: 450,
+  },
+  z.strictObject({ kind: z.enum(["Deployment", "StatefulSet", "DaemonSet", "Job"]), name: objName, namespace: ns }),
+);
+
+export const K8S_READ_TOOLS: readonly ToolDefinition[] = [
+  profileDescribe,
+  resourcesList,
+  resourcesGet,
+  resourcesDescribe,
+  eventsList,
+  podsLogs,
+  authCanI,
+  workloadHealth,
+];

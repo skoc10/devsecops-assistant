@@ -5,3 +5,8 @@ export { K8sClient, assertPinned, apiErrorMessage } from "./client.ts";
 export { KINDS, resolveKind, CLUSTER_SCOPE } from "./kinds.ts";
 export { sanitizeObject, registerK8sRedactionProfile, CONFIGMAP_PLACEHOLDER } from "./sanitize.ts";
 export { parseSince } from "./duration.ts";
+export { diagnose } from "./doctor.ts";
+export type { DoctorDeps } from "./doctor.ts";
+export { analyzeRules, ruleAllows, generateReadOnlyRbac, READONLY_NAMESPACED_RULES, READONLY_CLUSTER_RULES } from "./rbac.ts";
+export type { RbacRule, ReadOnlyRbacOptions, RuleAnalysis } from "./rbac.ts";
+export { summarizeWorkload, summarizePods, summarizeHpa, summarizePdb, summarizeNode } from "./health.ts";

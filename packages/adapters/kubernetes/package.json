@@ -11,6 +11,7 @@
     "@ops/broker": "workspace:*",
     "@ops/contracts": "workspace:*",
     "@ops/redaction": "workspace:*",
+    "yaml": "^2.0.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

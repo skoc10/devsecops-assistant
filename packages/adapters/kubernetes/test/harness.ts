@@ -85,8 +85,15 @@ export async function makeK8sHarness(opts: K8sHarnessOpts = {}) {
     return sink;
   };
 
+  /** Tam redakte kanıt gövdesi (model görünümü tabloya sıkıştırılmış olabilir). */
+  const evidenceJson = (r: ToolResult): any => {
+    const e = r.evidenceId ? evidence.get(r.evidenceId) : undefined;
+    if (!e) throw new Error("kanıt yok");
+    return JSON.parse(e.text);
+  };
+
   const allCanaries: Canary[] = Object.values(canaries);
-  return { pki, api, canaries, allCanaries, profile, store, broker, adapter, registry, gateway, session, evidence, storage, known, call, sinkFor, stop: () => api.stop() };
+  return { pki, api, canaries, allCanaries, profile, store, broker, adapter, registry, gateway, session, evidence, storage, known, call, sinkFor, evidenceJson, stop: () => api.stop() };
 }
 
 export type K8sHarness = Awaited<ReturnType<typeof makeK8sHarness>>;

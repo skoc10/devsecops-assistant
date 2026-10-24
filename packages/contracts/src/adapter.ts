@@ -3,6 +3,7 @@ import type { RiskClass, Sensitivity } from "./classes.ts";
 import type { Taint } from "./result.ts";
 import { CREDENTIAL_SOURCE_KINDS, ProfileKindSchema } from "./profile.ts";
 import type { Profile, Target } from "./profile.ts";
+import type { DoctorReport } from "./doctor.ts";
 import { ToolDescriptorSchema } from "./tool.ts";
 import type { ToolLimits } from "./tool.ts";
 
@@ -83,6 +84,8 @@ export interface Adapter {
     handle: CredentialHandle,
     profile: Profile,
   ): Promise<{ identity: string; targetFingerprint: string }>;
+  /** Beyan edilen tavan ↔ fiili yetki denetimi; oturum başında ve `profile add`'de çalışır. */
+  doctor?(handle: CredentialHandle, profile: Profile): Promise<DoctorReport>;
   invoke(call: AdapterCall): Promise<RawToolOutput>;
   dispose?(): Promise<void>;
 }

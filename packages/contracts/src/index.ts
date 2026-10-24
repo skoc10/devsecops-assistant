@@ -13,3 +13,4 @@ export * from "./secrets.ts";
 export * from "./broker.ts";
 export * from "./approval.ts";
 export * from "./endpoint.ts";
+export * from "./doctor.ts";
