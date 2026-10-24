@@ -2,6 +2,7 @@ import { OpsError, ProfileSchema } from "@ops/contracts";
 import type { Environment, Profile, RiskClass, SecretStore, TrustZone } from "@ops/contracts";
 import { credentialKey } from "./broker.ts";
 import { ambientFor, validateBindPath } from "./exec-runner.ts";
+import { buildDbCredential } from "./db-credential.ts";
 import { importKubeconfig } from "./kubeconfig.ts";
 import type { KubeImportOptions } from "./kubeconfig.ts";
 import type { ProfileRegistry } from "./profiles.ts";
@@ -35,6 +36,32 @@ export interface AddKubeconfigRequest {
   readonly egressClass?: TrustZone;
   readonly replace?: boolean;
 }
+
+export interface AddDatabaseRequest {
+  readonly id: string;
+  readonly environment: Environment;
+  readonly displayName?: string;
+  readonly host: string;
+  readonly port?: number;
+  readonly database: string;
+  readonly user: string;
+  /** Parola yalnız kasaya gider; CLI 0600 dosyadan/yankısız TTY'den okur. */
+  readonly password: string;
+  readonly caPem?: string;
+  readonly tlsMode?: "verify-full" | "disable";
+  readonly serverName?: string;
+  /** Mantıksal veri kaynağı adı (denetimde/çıktıda görünür); varsayılan veritabanı adı. */
+  readonly datasource?: string;
+  /** İzinli şemalar (`*` = hepsi). Boş olamaz. */
+  readonly allowedScopes: readonly string[];
+  /** Nitelendirilmemiş tabloların çözüleceği şema (`search_path`); varsayılan ilk izinli şema, yoksa `public`. */
+  readonly defaultSchema?: string;
+  readonly classCeiling?: RiskClass;
+  readonly egressClass?: TrustZone;
+  readonly replace?: boolean;
+}
+
+const SCHEMA_NAME = /^[a-z_][a-z0-9_$]{0,62}$/;
 
 export interface AddResult {
   readonly profile: Profile;
@@ -97,6 +124,57 @@ export class ProfileService {
       egressClass: req.egressClass ?? defaultEgressFor("k8s", req.environment),
     });
 
+    const key = credentialKey(profile.id);
+    const had = await this.store.get(key);
+    if (had && !req.replace) throw new OpsError("profile_exists", `kasada bu profil için kimlik zaten var: ${profile.id}`);
+    await this.store.set(key, new Uint8Array(Buffer.from(JSON.stringify(imp.blob), "utf8")));
+    try {
+      await this.registry.add(profile, req.replace ? { replace: true } : {});
+    } catch (e) {
+      if (!had) await this.store.delete(key);
+      throw e;
+    }
+    return { profile, warnings };
+  }
+
+  /**
+   * `db` profili (reader). Yazıcı kimliği Faz 2'dir; bu sürümde tavan `read`'dir. Parola kasaya
+   * yazılır; dönen profil ve uyarılar parola içermez.
+   */
+  async addDatabase(req: AddDatabaseRequest): Promise<AddResult> {
+    const ceiling: RiskClass = req.classCeiling ?? "read";
+    if (ceiling !== "read") throw new OpsError("ceiling_unsupported", "veritabanı profilleri bu sürümde yalnız 'read' tavanlıdır (yazıcı kimliği Faz 2)");
+    const scopes = [...req.allowedScopes];
+    if (scopes.length === 0) throw new OpsError("scope_required", "izinli şema belirtilmedi (allowedScopes verin; '*' = hepsi)");
+    for (const sc of scopes) if (sc !== "*" && !SCHEMA_NAME.test(sc)) throw new OpsError("scope_invalid", `şema adı geçersiz (küçük harf/rakam/_ ile, ≤63): ${sc.slice(0, 40)}`);
+    const defaultSchema = req.defaultSchema ?? scopes.find((x) => x !== "*") ?? "public";
+    if (!SCHEMA_NAME.test(defaultSchema)) throw new OpsError("scope_invalid", "varsayılan şema adı geçersiz");
+    if (!scopes.includes("*") && !scopes.includes(defaultSchema)) throw new OpsError("scope_invalid", "varsayılan şema izinli şemalar arasında olmalı");
+    const imp = buildDbCredential({
+      host: req.host,
+      ...(req.port !== undefined ? { port: req.port } : {}),
+      database: req.database,
+      user: req.user,
+      password: req.password,
+      ...(req.caPem !== undefined ? { caPem: req.caPem } : {}),
+      ...(req.tlsMode ? { tlsMode: req.tlsMode } : {}),
+      ...(req.serverName ? { serverName: req.serverName } : {}),
+    });
+    const warnings = [...imp.warnings];
+    if (scopes.includes("*")) warnings.push("allowedScopes '*': tüm şemalar izinli");
+    const datasource = (req.datasource ?? req.database).slice(0, 63);
+    const profile = ProfileSchema.parse({
+      id: req.id,
+      kind: "db",
+      displayName: req.displayName ?? datasource,
+      environment: req.environment,
+      targetPin: { endpoint: imp.endpoint, ...(imp.caFingerprint ? { caFingerprint: imp.caFingerprint } : {}) },
+      classCeiling: ceiling,
+      allowedScopes: scopes,
+      credentialSource: { kind: "static", ambientDependencies: [] },
+      egressClass: req.egressClass ?? defaultEgressFor("db", req.environment),
+      attributes: { role: "reader", datasource, defaultSchema },
+    });
     const key = credentialKey(profile.id);
     const had = await this.store.get(key);
     if (had && !req.replace) throw new OpsError("profile_exists", `kasada bu profil için kimlik zaten var: ${profile.id}`);

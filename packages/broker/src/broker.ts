@@ -11,6 +11,7 @@ import type {
 } from "@ops/contracts";
 import type { ExecCredentialRunner, ExecCredentialResult } from "./exec-runner.ts";
 import type { KubeCredentialBlob } from "./kubeconfig.ts";
+import type { DbCredential, DbCredentialBlob } from "./db-credential.ts";
 
 export const credentialKey = (profileId: string): string => `profile/${profileId}/credential`;
 
@@ -32,28 +33,31 @@ export interface KubeCredential {
  */
 export interface CredentialResolver {
   k8s(handle: CredentialHandle): KubeCredential;
+  db(handle: CredentialHandle): DbCredential;
 }
 
 interface Material {
   readonly profileId: string;
   readonly kubeBlob: KubeCredentialBlob | null;
+  readonly dbBlob: DbCredentialBlob | null;
   /** JSON baytlarının kopyası: bırakınca sıfırlanır (JS string kopyaları için en iyi çaba). */
   readonly raw: Buffer;
   active: boolean;
 }
 
-function parseBlob(raw: Uint8Array): KubeCredentialBlob {
+type AnyBlob = KubeCredentialBlob | DbCredentialBlob;
+
+function parseBlob(raw: Uint8Array): AnyBlob {
   let j: unknown;
   try {
     j = JSON.parse(Buffer.from(raw).toString("utf8"));
   } catch {
     throw new OpsError("credential_corrupt", "kasadaki kimlik materyali okunamadı");
   }
-  const b = j as Partial<KubeCredentialBlob> | null;
-  if (!b || b.v !== 1 || (b.kind !== "k8s-static" && b.kind !== "k8s-exec") || typeof b.server !== "string") {
-    throw new OpsError("credential_corrupt", "kasadaki kimlik materyali tanınmıyor");
-  }
-  return b as KubeCredentialBlob;
+  const b = j as { v?: unknown; kind?: unknown; server?: unknown; host?: unknown; password?: unknown } | null;
+  if (b && b.v === 1 && (b.kind === "k8s-static" || b.kind === "k8s-exec") && typeof b.server === "string") return b as KubeCredentialBlob;
+  if (b && b.v === 1 && b.kind === "db-static" && typeof b.host === "string" && typeof b.password === "string") return b as DbCredentialBlob;
+  throw new OpsError("credential_corrupt", "kasadaki kimlik materyali tanınmıyor");
 }
 
 export interface LocalBrokerOptions {
@@ -108,6 +112,13 @@ export class LocalBroker implements CredentialBroker {
           ...(b.tlsServerName ? { tlsServerName: b.tlsServerName } : {}),
         };
       },
+      db: (handle) => {
+        const m = this.materials.get(handle);
+        if (!m || !m.active) throw new OpsError("lease_inactive", "kimlik tutamacı geçersiz veya süresi dolmuş");
+        if (!m.dbBlob) throw new OpsError("credential_kind_mismatch", "tutamaç veritabanı kimliği taşımıyor");
+        const b = m.dbBlob;
+        return { host: b.host, port: b.port, database: b.database, user: b.user, password: b.password, tls: b.tls };
+      },
     };
   }
 
@@ -134,6 +145,10 @@ export class LocalBroker implements CredentialBroker {
     const raw = await this.load(profile);
     try {
       const blob = parseBlob(raw);
+      if (blob.kind === "db-static") {
+        sink.add(`profile:${profile.id}:password`, blob.password);
+        return;
+      }
       if (blob.kind === "k8s-exec") return;
       if (blob.token) sink.add(`profile:${profile.id}:token`, blob.token);
       if (blob.clientKeyPem) sink.add(`profile:${profile.id}:client-key`, blob.clientKeyPem);
@@ -172,30 +187,38 @@ export class LocalBroker implements CredentialBroker {
   async acquire(req: LeaseRequest, sink: SecretSink): Promise<Lease> {
     if (this.active >= this.maxLeases) throw new OpsError("lease_limit", "eşzamanlı lease sınırı aşıldı");
     const raw = await this.load(req.profile);
-    let blob: KubeCredentialBlob;
+    let parsed: AnyBlob;
     try {
-      blob = parseBlob(raw);
+      parsed = parseBlob(raw);
     } catch (e) {
       raw.fill(0);
       throw e;
     }
-    if (blob.kind === "k8s-exec") {
-      try {
-        blob = await this.materializeExec(req.profile, blob);
-      } catch (e) {
-        raw.fill(0);
-        throw e;
+    let blob: KubeCredentialBlob | null = null;
+    let dbBlob: DbCredentialBlob | null = null;
+    if (parsed.kind === "db-static") {
+      dbBlob = parsed;
+      sink.add(`profile:${req.profile.id}:password`, parsed.password);
+    } else {
+      blob = parsed;
+      if (blob.kind === "k8s-exec") {
+        try {
+          blob = await this.materializeExec(req.profile, blob);
+        } catch (e) {
+          raw.fill(0);
+          throw e;
+        }
       }
+      if (blob.token) sink.add(`profile:${req.profile.id}:token`, blob.token);
+      if (blob.clientKeyPem) sink.add(`profile:${req.profile.id}:client-key`, blob.clientKeyPem);
     }
-    if (blob.token) sink.add(`profile:${req.profile.id}:token`, blob.token);
-    if (blob.clientKeyPem) sink.add(`profile:${req.profile.id}:client-key`, blob.clientKeyPem);
 
     const handle: CredentialHandle = Object.freeze({
       kind: "credential-handle" as const,
       profileId: req.profile.id,
       leaseId: randomUUID(),
     });
-    const m: Material = { profileId: req.profile.id, kubeBlob: blob, raw, active: true };
+    const m: Material = { profileId: req.profile.id, kubeBlob: blob, dbBlob, raw, active: true };
     this.materials.set(handle, m);
     this.active += 1;
 

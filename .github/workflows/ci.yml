@@ -24,6 +24,9 @@ jobs:
       # kullanıcı ad alanlarını kısıtlar; kısıt kapatılamazsa sandbox testleri otomatik ATLANIR
       # (detectSandbox yoklaması başarısız olur) — atlandığı test çıktısında uyarı olarak görünür.
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # Gerçek PostgreSQL testleri (S-02/S-03/S-14 DB ayağı, I-02): testkit geçici bir küme başlatır
+      # (TLS + scram; ayrı süreç, yalnız loopback). Sunucu kurulu değilse bu testler uyarıyla ATLANIR.
+      - run: sudo apt-get install -y postgresql postgresql-client
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: pnpm typecheck
       - run: pnpm test

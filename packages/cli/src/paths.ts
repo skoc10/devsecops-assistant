@@ -15,6 +15,8 @@ export interface OpsPaths {
   readonly policyFile: string;
   /** Kullanıcı komut kataloğu (yerleşiği GENİŞLETİR, geçersiz kılamaz). */
   readonly userCatalogFile: string;
+  /** Maskeli sütun bildirimi (`masking.yaml`); yoksa yalnız varsayılan sütun adı kuralları + dedektörler. */
+  readonly maskingFile: string;
 }
 
 /** `OPS_HOME` (varsayılan `~/.ops-assistant`). Tüm durum burada: tek kullanıcı, yerel. */
@@ -30,6 +32,7 @@ export function resolvePaths(home: string = process.env["OPS_HOME"] ?? join(home
     userSkillsDir: join(home, "skills"),
     policyFile: join(home, "policy.yaml"),
     userCatalogFile: join(home, "command-catalog.yaml"),
+    maskingFile: join(home, "masking.yaml"),
   };
 }
 

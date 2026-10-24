@@ -30,7 +30,8 @@ export interface RuntimeOrchestratorDeps {
    * Sağlayıcı döngülü çalışma zamanında araç listesi görev başında SABİTLENİR (SDK `Agent.create`).
    * Bu yüzden ilgili skill'ler görevden ÖNCE etkinleştirilir.
    */
-  readonly preloadSkills?: readonly ActiveSkill[];
+  /** Görev başında (her `send`) etkinleştirilecek skill'ler; işlev verilirse o anki bağlı profillere göre hesaplanır. */
+  readonly preloadSkills?: readonly ActiveSkill[] | (() => readonly ActiveSkill[]);
   readonly options?: { readonly maxCitationRetries?: number };
 }
 
@@ -74,7 +75,8 @@ export class RuntimeOrchestrator {
     if (this.mode === "advisory") {
       yield { type: "warning", code: "advisory_mode", message: "Çalışma zamanı güvenli doğrulanmadı (ADR-0004): TAVSİYE KİPİ — araç çağrısı yok, yalnız redakte özetler paylaşılır" };
     } else {
-      for (const s of this.d.preloadSkills ?? []) if (!session.activeSkills.has(s.name)) session.activateSkill(s);
+      const pre = typeof this.d.preloadSkills === "function" ? this.d.preloadSkills() : (this.d.preloadSkills ?? []);
+      for (const s of pre) if (!session.activeSkills.has(s.name)) session.activateSkill(s);
     }
 
     const executor = new ToolExecutor({

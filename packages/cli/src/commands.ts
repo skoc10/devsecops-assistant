@@ -50,6 +50,9 @@ const USAGE = [
   "  init                               OPS_HOME ve kasayı oluştur",
   "  profile add k8s --id ID --kubeconfig YOL --env dev|stage|prod|sandbox [--context C] [--scope a,b] [--ceiling read]",
   "              [--name AD] [--ambient-env ADLAR] [--ambient-path DİZİN]",
+  "  profile add db --id ID --env E --host H [--port 5432] --database D --user U --scope public,sales [--ca-file PEM]",
+  "              [--default-schema S] [--datasource AD] [--name AD] [--tls verify-full|disable] [--replace]",
+  "              (parola: OPS_DB_PASSWORD_FILE ile 0600 dosya veya yankısız TTY istemi; bağlantı DİZESİ kabul edilmez)",
   "  profile list | rm ID | doctor ID",
   "  profile rbac --sa-namespace NS --namespace a,b [--cluster-read] [--name AD]   (manifest üretir, UYGULAMAZ)",
   "  doctor                             ortam kimlikleri ve sandbox durumu",
@@ -92,6 +95,52 @@ async function engineFor(c: CliEnv, rt: Runtime): Promise<Sender> {
 
 const list = (v: string | undefined): string[] => (v ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
 
+async function addDatabaseProfile(c: CliEnv, args: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args,
+    options: {
+      id: { type: "string" }, env: { type: "string" }, host: { type: "string" }, port: { type: "string" }, database: { type: "string" }, user: { type: "string" },
+      scope: { type: "string" }, "ca-file": { type: "string" }, "default-schema": { type: "string" }, datasource: { type: "string" }, name: { type: "string" },
+      tls: { type: "string" }, ceiling: { type: "string" }, replace: { type: "boolean" },
+    },
+    strict: true,
+  });
+  if (!values.id || !values.env || !values.host || !values.database || !values.user || !values.scope) {
+    throw new OpsError("usage", "--id, --env, --host, --database, --user ve --scope gerekli (bağlantı dizesi kabul edilmez)");
+  }
+  if (!ENVIRONMENTS.includes(values.env as Environment)) throw new OpsError("usage", `--env şunlardan biri olmalı: ${ENVIRONMENTS.join(", ")}`);
+  if (values.tls !== undefined && values.tls !== "verify-full" && values.tls !== "disable") throw new OpsError("usage", "--tls verify-full veya disable olmalı");
+  const port = values.port === undefined ? undefined : Number(values.port);
+  if (port !== undefined && !Number.isInteger(port)) throw new OpsError("usage", "--port tam sayı olmalı");
+  const caPem = values["ca-file"] ? await readFile(values["ca-file"], "utf8") : undefined;
+  const pwBytes = await readPassphrase(c.env, c.io, "Veritabanı parolası: ", "OPS_DB_PASSWORD_FILE");
+  const password = Buffer.from(pwBytes).toString("utf8");
+  pwBytes.fill(0);
+  const res = await withRuntime(c, (rt) =>
+    rt.profiles.addDatabase({
+      id: values.id as string,
+      environment: values.env as Environment,
+      host: values.host as string,
+      database: values.database as string,
+      user: values.user as string,
+      password,
+      allowedScopes: list(values.scope),
+      ...(port !== undefined ? { port } : {}),
+      ...(caPem !== undefined ? { caPem } : {}),
+      ...(values.tls ? { tlsMode: values.tls as "verify-full" | "disable" } : {}),
+      ...(values["default-schema"] ? { defaultSchema: values["default-schema"] } : {}),
+      ...(values.datasource ? { datasource: values.datasource } : {}),
+      ...(values.name ? { displayName: values.name } : {}),
+      ...(values.ceiling ? { classCeiling: values.ceiling as RiskClass } : {}),
+      ...(values.replace ? { replace: true } : {}),
+    }),
+  );
+  out(c, `Profil eklendi: ${res.profile.id} (${res.profile.environment}, reader, şemalar ${res.profile.allowedScopes.join("|")}, çıktı bölgesi ${res.profile.egressClass})`);
+  for (const w of res.warnings) out(c, `⚠ ${w}`);
+  out(c, "Parola yalnız kasada. `ops profile doctor` rolün fiili yetkilerini sınar (yazma/CREATE/süper yetki varsa profil bağlanmaz). Maskeli sütunlar için OPS_HOME/masking.yaml.");
+  return 0;
+}
+
 export async function runCli(c: CliEnv): Promise<number> {
   const [cmd, sub, ...rest] = c.argv;
   try {
@@ -119,7 +168,8 @@ export async function runCli(c: CliEnv): Promise<number> {
         }
         if (sub === "add") {
           const [kind, ...r2] = rest;
-          if (kind !== "k8s") throw new OpsError("usage", "profil türü: yalnız 'k8s' (bu sürümde)");
+          if (kind === "db") return await addDatabaseProfile(c, r2);
+          if (kind !== "k8s") throw new OpsError("usage", "profil türü: 'k8s' veya 'db' (bu sürümde)");
           const { values } = parseArgs({
             args: r2,
             options: { id: { type: "string" }, kubeconfig: { type: "string" }, env: { type: "string" }, context: { type: "string" }, scope: { type: "string" }, ceiling: { type: "string" }, name: { type: "string" }, "ambient-env": { type: "string" }, "ambient-path": { type: "string" }, replace: { type: "boolean" } },

@@ -1,8 +1,10 @@
 import { access, readFile } from "node:fs/promises";
-import { mergeCatalogs, parseCatalog, shellCommandClassifier } from "@ops/classifiers";
+import { initSqlClassifier, mergeCatalogs, parseCatalog, shellCommandClassifier } from "@ops/classifiers";
 import type { CommandCatalog } from "@ops/classifiers";
 import { TerminalAdapter, assertSafeWorkdir } from "@ops/terminal";
 import { KubernetesAdapter } from "@ops/adapter-kubernetes";
+import { EMPTY_MASKING_CONFIG, PostgresAdapter, loadMaskingConfig, maskingRulesFor } from "@ops/adapter-postgres";
+import type { MaskingConfig } from "@ops/adapter-postgres";
 import { AuditLog, FileAuditStorage, FileHeadAnchor } from "@ops/audit";
 import {
   EncryptedFileStore,
@@ -57,6 +59,7 @@ export interface Runtime {
   readonly policy: PolicyEngine;
   readonly skills: SkillRegistry;
   readonly adapter: KubernetesAdapter;
+  readonly postgres: PostgresAdapter;
   readonly sandbox: Sandbox | null;
   /** Profili doktordan geçirir (bağlamaz). */
   diagnose(id: string): Promise<DoctorReport>;
@@ -121,8 +124,14 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const adapter = new KubernetesAdapter(broker.resolver);
   toolRegistry.register(adapter, adapter.definitions);
 
+  // PostgreSQL reader: SQL, PEP öncesi gerçek PostgreSQL ayrıştırıcısıyla AST allowlist'ten geçer.
+  await initSqlClassifier();
+  const masking: MaskingConfig = (await exists(o.paths.maskingFile)) ? await loadMaskingConfig(o.paths.maskingFile) : EMPTY_MASKING_CONFIG;
+  const postgres = new PostgresAdapter(broker.resolver, { masking, ...(o.now ? { now: o.now } : {}) });
+  toolRegistry.register(postgres, postgres.definitions);
+
   // Terminal servisi: yalnız iş alanı verildiyse VE OS sandbox varsa (aksi halde kabuk yok).
-  const availableAdapters = ["kubernetes"];
+  const availableAdapters = ["kubernetes", "postgres"];
   const classifiers: ((tool: string, args: unknown) => ReturnType<ReturnType<typeof shellCommandClassifier>>)[] = [];
   let terminalNote = "kapalı";
   if (o.workdir) {
@@ -153,6 +162,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     broker,
     evidence,
     known,
+    maskingFor: (tool, p) => (tool.profileKind === "db" && p ? maskingRulesFor(masking, p.id) : null),
     ...(classifiers.length ? { classifiers } : {}),
     ...(o.approval ? { approval: o.approval } : {}),
     ...(o.now ? { now: o.now } : {}),
@@ -168,12 +178,13 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const diagnoseProfile = async (id: string): Promise<{ report: DoctorReport; profile: Profile }> => {
     const profile: Profile | undefined = registry.get(id);
     if (!profile) throw new Error(`profil bulunamadı: ${id}`);
-    if (profile.kind !== "k8s") throw new Error(`bu sürümde yalnız 'k8s' profilleri bağlanabilir: ${profile.kind}`);
+    const doctorAdapter = profile.kind === "k8s" ? adapter : profile.kind === "db" ? postgres : null;
+    if (!doctorAdapter) throw new Error(`bu sürümde yalnız 'k8s' ve 'db' profilleri bağlanabilir: ${profile.kind}`);
     await broker.prime?.(profile, known);
     const lease = await broker.acquire({ profile, purpose: "doctor", callId: `doctor-${profile.id}`, ttlSec: 60 }, known);
     let report: DoctorReport;
     try {
-      report = await adapter.doctor!(lease.handle, profile);
+      report = await doctorAdapter.doctor!(lease.handle, profile);
     } finally {
       await lease.release();
     }
@@ -203,6 +214,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     policy,
     skills,
     adapter,
+    postgres,
     sandbox,
     async diagnose(id: string): Promise<DoctorReport> {
       return (await diagnoseProfile(id)).report;
@@ -228,7 +240,18 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     },
     createRuntimeOrchestrator(runtime) {
       // araç listesi görev başında sabitlendiğinden kullanılabilir skill'ler (en çok 2) önceden etkinleşir
-      const preload = skills.all().slice(0, 2).map((sk) => ({ name: sk.name, tier: sk.tier, body: sk.body, tokens: sk.tokens, toolsets: sk.sidecar.requests.toolsets }));
+      // Öncelik: bağlı profil türlerinin adapter'ını gerektiren skill'ler; sonra genel teşhis; en çok 2.
+      // Her görevin başında hesaplanır (profiller sohbet sırasında bağlanır).
+      const adapterOfKind: Record<string, string> = { k8s: "kubernetes", db: "postgres" };
+      const preload = (): { name: string; tier: Parameters<Session["activateSkill"]>[0]["tier"]; body: string; tokens: number; toolsets: string[] }[] => {
+        const bound = new Set(session.boundProfiles().map((p) => adapterOfKind[p.kind]).filter((x): x is string => x !== undefined));
+        const rank = (sk: ReturnType<typeof skills.all>[number]): number =>
+          sk.sidecar.requires.adapters.some((a) => bound.has(a)) ? 0 : sk.name === "generic-diagnosis" ? 1 : 2;
+        return [...skills.all()]
+          .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+          .slice(0, 2)
+          .map((sk) => ({ name: sk.name, tier: sk.tier, body: sk.body, tokens: sk.tokens, toolsets: sk.sidecar.requests.toolsets }));
+      };
       return new RuntimeOrchestrator({ runtime, gateway, registry: toolRegistry, session, evidence, policy, audit, known, skills, preloadSkills: preload });
     },
     async close() {

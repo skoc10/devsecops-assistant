@@ -13,4 +13,6 @@ export { LocalBroker, credentialKey } from "./broker.ts";
 export type { CredentialResolver, KubeCredential, LocalBrokerOptions } from "./broker.ts";
 export { ensureAuditKey, AUDIT_KEY_NAME } from "./audit-key.ts";
 export { ProfileService, defaultEgressFor } from "./service.ts";
-export type { AddKubeconfigRequest, AddResult } from "./service.ts";
+export type { AddDatabaseRequest, AddKubeconfigRequest, AddResult } from "./service.ts";
+export { buildDbCredential, caFingerprintOf, dbEndpoint, isLoopbackHost } from "./db-credential.ts";
+export type { DbCredential, DbCredentialBlob, DbImportInput, DbImportResult } from "./db-credential.ts";

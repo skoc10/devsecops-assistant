@@ -54,11 +54,19 @@ export interface SchemaDescription {
   }[];
 }
 
+export interface DbConnectOptions {
+  /** Profilin pini: kimlik gönderilmeden ÖNCE sunucu adresi (ve varsa CA parmak izi) bununla doğrulanır. */
+  readonly pin: { readonly endpoint: string; readonly caFingerprint?: string };
+  readonly signal?: AbortSignal;
+  /** Nitelendirilmemiş adların çözüleceği şema (`search_path`). */
+  readonly defaultSchema?: string;
+}
+
 /** Veritabanı adapter'ının sürücü yüzü (PostgreSQL ilk; MySQL/SQL Server aynı arayüz). */
 export interface DatabaseDriver {
   readonly dialect: SqlDialect;
   readonly capabilities: DbCapabilities;
-  connect(handle: CredentialHandle, role: DbRole, signal?: AbortSignal): Promise<DbSession>;
+  connect(handle: CredentialHandle, role: DbRole, opts: DbConnectOptions): Promise<DbSession>;
   classify(sql: string): SqlClassification;
 }
 

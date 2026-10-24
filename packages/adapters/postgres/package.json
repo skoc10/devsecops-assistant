@@ -1,0 +1,28 @@
+{
+  "name": "@ops/adapter-postgres",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ops/broker": "workspace:*",
+    "@ops/classifiers": "workspace:*",
+    "@ops/contracts": "workspace:*",
+    "@ops/redaction": "workspace:*",
+    "pg": "^8.23.1",
+    "pg-cursor": "^2.22.1",
+    "yaml": "^2.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@ops/audit": "workspace:*",
+    "@ops/core": "workspace:*",
+    "@ops/policy": "workspace:*",
+    "@ops/testkit": "workspace:*",
+    "@types/pg": "^8.23.1",
+    "@types/pg-cursor": "^2.7.2"
+  }
+}

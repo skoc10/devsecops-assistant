@@ -1,4 +1,4 @@
-import { loadModule, parseSync } from "libpg-query";
+import { loadModule, normalizeSync, parseSync } from "libpg-query";
 import type { SqlClassification } from "@ops/contracts";
 
 /**
@@ -325,4 +325,19 @@ export function maskedViolations(a: SqlAnalysis, masked: ReadonlyMap<string, Rea
     if (cols.has(c.column.toLowerCase()) && c.insideExpression) out.push(`maskeli sütun ifade/koşul içinde: ${c.column}`);
   }
   return [...new Set(out)];
+}
+
+/**
+ * Görüntüleme için sorgu metnini NORMALLEŞTİRİR: değişmezler (`'a@b.com'`, `42`) `$n` olur, böylece
+ * `pg_stat_activity.query` gibi kaynaklardan gelen metin literal (PII/secret) taşımaz. Ayrıştırılamayan
+ * veya çok uzun metin için `null` döner (hiç göstermemek, ham göstermekten iyidir).
+ */
+export function normalizeSqlForDisplay(sql: string, max = 160): string | null {
+  if (!loaded || typeof sql !== "string" || sql.length === 0 || sql.length > MAX_SQL_CHARS || sql.includes("\0")) return null;
+  try {
+    const n = normalizeSync(sql).replace(/\s+/g, " ").trim();
+    return n.length > max ? `${n.slice(0, max)}…` : n;
+  } catch {
+    return null;
+  }
 }

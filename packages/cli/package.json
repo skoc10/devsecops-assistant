@@ -12,19 +12,20 @@
   },
   "dependencies": {
     "@ops/adapter-kubernetes": "workspace:*",
+    "@ops/adapter-postgres": "workspace:*",
     "@ops/audit": "workspace:*",
     "@ops/broker": "workspace:*",
+    "@ops/classifiers": "workspace:*",
     "@ops/contracts": "workspace:*",
     "@ops/core": "workspace:*",
     "@ops/policy": "workspace:*",
+    "@ops/providers": "workspace:*",
     "@ops/redaction": "workspace:*",
+    "@ops/runtime-cursor": "workspace:*",
     "@ops/sandbox": "workspace:*",
     "@ops/skills": "workspace:*",
-    "zod": "^4.0.0",
-    "@ops/providers": "workspace:*",
-    "@ops/runtime-cursor": "workspace:*",
-    "@ops/classifiers": "workspace:*",
-    "@ops/terminal": "workspace:*"
+    "@ops/terminal": "workspace:*",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@ops/testkit": "workspace:*",

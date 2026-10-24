@@ -41,11 +41,15 @@ node packages/cli/src/bin.ts init
 node packages/cli/src/bin.ts profile add k8s --id dev --kubeconfig ~/kube.yaml --env dev --scope default
 node packages/cli/src/bin.ts profile doctor dev        # fiili RBAC ↔ beyan edilen tavan
 node packages/cli/src/bin.ts profile rbac --sa-namespace ops --namespace default   # salt okunur RBAC manifesti ÜRETİR (uygulamaz)
+# PostgreSQL (salt okunur reader rolü; parola 0600 dosyadan, bağlantı dizesi YOK):
+export OPS_DB_PASSWORD_FILE=~/.ops-db-password
+node packages/cli/src/bin.ts profile add db --id shop --env stage --host db.example --database shop --user ops_reader --scope public,sales --ca-file ~/db-ca.pem
+node packages/cli/src/bin.ts profile doctor shop        # fiili rol yetkileri ↔ beyan (yazma/CREATE/süper yetki varsa BAĞLANMAZ)
 node packages/cli/src/bin.ts doctor                    # sandbox + ortam kimlikleri (içerik okunmaz)
 node packages/cli/src/bin.ts audit verify
 ```
 
-`ops chat` için bir model sağlayıcısı gerekir (`OPS_PROVIDER`); sağlayıcılar [docs/STATUS.md](docs/STATUS.md)'da "Planned"dir (WP8). Bu aşamada sohbet döngüsü scripted sağlayıcıyla uçtan uca test edilir (E-01).
+`ops chat` için bir model sağlayıcısı gerekir (`OPS_PROVIDER`: `openai-compatible` veya `cursor`; ayrıntı ve doğrulanmamış kısımlar [docs/STATUS.md](docs/STATUS.md)'da). Sohbet döngüsü scripted sağlayıcıyla uçtan uca test edilir (E-01).
 
 ## Geliştirme
 

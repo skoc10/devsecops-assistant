@@ -107,9 +107,15 @@ export function processOutput(data: unknown, summary: string | undefined, policy
   if (policy.masking) {
     const rules = policy.masking ?? DEFAULT_MASKING;
     const ctx = policy.maskingContext ?? new MaskingContext();
-    value = isTable(value)
-      ? maskTable(value, rules, ctx, counter)
-      : mapStrings(value, (s) => maskByDetectors(s, counter, rules));
+    if (isTable(value)) {
+      // Köken bilgisi yalnız maskeleme için gerekir; kanıta/modele sütun ADLARI gider (token tasarrufu).
+      // Tablo dışındaki üst düzey alanlar (rowCount, note...) korunur.
+      const { columns: _c, rows: _r, ...extras } = value as Table & Record<string, unknown>;
+      const t = maskTable(value, rules, ctx, counter);
+      value = { ...extras, columns: t.columns.map((c) => c.name), rows: t.rows };
+    } else {
+      value = mapStrings(value, (s) => maskByDetectors(s, counter, rules));
+    }
   }
   // M5
   const limited = limitEvidence(value, policy.maxBytes, policy.maxItems);

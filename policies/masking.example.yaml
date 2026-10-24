@@ -1,0 +1,16 @@
+# Maskeli sütun bildirimi. Kullanım: bu dosyayı OPS_HOME/masking.yaml olarak kopyalayıp düzenleyin.
+#
+# İki katmanı besler (ikisi de Best-effort; en güçlü savunma reader rolünü yalnız maskeli VIEW'lara
+# yetkilendirmektir — ürün view betiğini dosya olarak üretir, UYGULAMAZ):
+#  1. AST kuralı: maskeli sütun yalnız DOĞRUDAN seçim öğesi olabilir. İfade/fonksiyon/WHERE/JOIN/
+#     ORDER BY içinde, `SELECT *`, `t.*`, `to_jsonb(t)`/`row_to_json(t)` ve tam-satır başvurusu
+#     sorgu ÇALIŞMADAN reddedilir.
+#  2. Köken kuralı: sonuç sütununun kaynak tablo/sütunu biliniyorsa (takma ad olsa bile) değer
+#     `action` ile maskelenir. Kökeni bilinmeyen sütunlarda hücre içi PII dedektörleri çalışır.
+version: 1
+profiles:
+  "*":                       # profil kimliği veya `*` (hepsi)
+    action: redact           # hash | truncate | drop | redact   (varsayılan: redact)
+    maskedColumns:
+      customers: [email, phone]   # tablo (şemasız ad) -> sütunlar
+      users: [email, phone, national_id]
