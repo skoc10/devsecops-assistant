@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./conformance": "./src/conformance.ts",
     "./postgres": "./src/postgres.ts",
-    "./git-repo": "./src/git-repo.ts"
+    "./git-repo": "./src/git-repo.ts",
+    "./kind": "./src/kind.ts"
   },
   "dependencies": {
     "@ops/contracts": "workspace:*",

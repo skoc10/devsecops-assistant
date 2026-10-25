@@ -41,12 +41,15 @@ export const PATTERN_RULES: readonly PatternRule[] = [
     id: "private-key-block",
     regex: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]{0,6000}/g,
   },
-  // başlık bölümü bir sonraki `-eyJ` başlangıcında durur (`eyJ-`×n karesel taramaz); gerçek başlıkta `-eyJ` yok
-  { id: "jwt", regex: /\beyJ(?:(?!-eyJ)[A-Za-z0-9_-]){8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
+  // başlık bölümü bir sonraki `-eyJ` başlangıcında durur (`eyJ-`×n karesel taramaz); gerçek başlıkta `-eyJ` yok.
+  // Sonda \b DEĞİL, sınıf dışı ileri bakış (google-api-key ile aynı): `-` ile biten imzada \b `-` ile boşluk arasında
+  // eşleşmez, ifade geri izleyip sondaki `-`'leri MASKESİZ bırakıyordu (rastgele JWT'lerin ~1/64'ü; CI'da flake).
+  { id: "jwt", regex: /\beyJ(?:(?!-eyJ)[A-Za-z0-9_-]){8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])/g },
   { id: "aws-access-key-id", regex: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[0-9A-Z]{16}\b/g },
   { id: "github-token", regex: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,})\b/g },
-  { id: "gitlab-token", regex: /\bglpat-[A-Za-z0-9_-]{20,}\b/g },
-  { id: "slack-token", regex: /\bxox[abposr]-[A-Za-z0-9-]{10,}\b/g },
+  // aynı sorun: sınıfta `-` var, açık uçlu tekrar + \b sondaki `-`'yi bırakırdı
+  { id: "gitlab-token", regex: /\bglpat-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])/g },
+  { id: "slack-token", regex: /\bxox[abposr]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9-])/g },
   // sondaki \b DEĞİL: anahtar `-` ile bitebilir (\b yalnız kelime karakterinde sınır sayar) ve {35} geri izleme yapamaz
   { id: "google-api-key", regex: /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g },
   { id: "stripe-key", regex: /\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}\b/g },

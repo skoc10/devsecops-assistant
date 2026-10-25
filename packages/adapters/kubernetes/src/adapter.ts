@@ -27,6 +27,8 @@ import { K8S_READ_TOOLS, K8S_WRITE_TOOLS } from "./tools.ts";
 import { applyDiff, doApply, doDelete, doRestart, doScale, doUndo, parseManifest, previewApply, previewDelete, previewRestart, previewScale, previewUndo } from "./change.ts";
 
 const ALL_TOOLS = [...K8S_READ_TOOLS, ...K8S_WRITE_TOOLS] as const;
+/** `pods/log` için Accept (client-go varsayılanıyla aynı). */
+export const LOG_ACCEPT = "application/json, */*";
 const WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(K8S_WRITE_TOOLS.map((t) => t.descriptor.name));
 
 type Args = Record<string, unknown>;
@@ -519,7 +521,10 @@ export class KubernetesAdapter implements Adapter {
         container: str(a, "container"),
         previous: a["previous"] === true ? true : undefined,
       },
-      "text/plain",
+      // Gerçek API sunucusu Accept'i serileştiriciye (json/yaml/protobuf) göre müzakere eder; `text/plain` tek başına
+      // 406 NotAcceptable alır (kind'da bulundu: pods.logs gerçek kümede HİÇ çalışmıyordu). kubectl/client-go gibi
+      // `*/*` ile istenir; gövde yine düz metindir ve boyut sınırı akışta uygulanır.
+      LOG_ACCEPT,
     );
     if (resp.status < 200 || resp.status >= 300) throw new OpsError("k8s_api_error", apiErrorMessage(resp, `log ${namespace}/${pod}`));
     const text = resp.body;

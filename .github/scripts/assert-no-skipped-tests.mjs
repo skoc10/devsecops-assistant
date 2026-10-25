@@ -1,6 +1,7 @@
 // CI kapısı: vitest JSON raporunda atlanan (skip/todo) test varsa çıkış 1.
-// Sandbox, gerçek PostgreSQL ve IaC testleri ortam eksikse kendini atlar; CI'da bu sessiz kapsam kaybıdır.
-// VM gerektiren testler (*.vm.test.ts) varsayılan yapılandırmanın DIŞINDADIR (vitest.vm.config.ts, `pnpm test:vm`):
+// Sandbox, gerçek PostgreSQL, IaC ve gerçek küme (kind) testleri ortam eksikse kendini atlar; CI'da bu sessiz kapsam kaybıdır.
+// Gerçek küme testleri (*.kind.test.ts) ayrı yapılandırmada (vitest.kind.config.ts) CI'ın `kind` işinde koşar ve bu kapıdan
+// AYRICA geçer. VM gerektiren testler (*.vm.test.ts) varsayılan yapılandırmanın DIŞINDADIR (vitest.vm.config.ts, `pnpm test:vm`):
 // bu rapora hiç girmezler, dolayısıyla "atlanmış" sayılmazlar — VM yolu CI'da doğrulanmaz (ADR-0011).
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
@@ -23,7 +24,7 @@ if (total === 0) {
   process.exit(1);
 }
 if (skipped.length > 0) {
-  console.error(`::error::${skipped.length} test atlandı (CI ortamı eksik: bubblewrap / PostgreSQL / IaC araçları?)`);
+  console.error(`::error::${skipped.length} test atlandı (CI ortamı eksik: bubblewrap / PostgreSQL / IaC araçları / kind kümesi — OPS_TEST_KUBECONFIG?)`);
   for (const s of skipped) console.error(`  - ${s}`);
   process.exit(1);
 }

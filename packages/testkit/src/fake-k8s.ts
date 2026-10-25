@@ -89,6 +89,15 @@ export const READONLY_RULES: FakeRulesStatus = {
   ],
 };
 
+/**
+ * Gerçek kümede `system:basic-user` (system:authenticated grubuna bağlı) her kimliğe öz-inceleme `create`
+ * yetkisi verir; SelfSubjectRulesReview bunları her zaman döndürür. Sahte API de döndürür (kind testinde bulundu).
+ */
+export const BASIC_USER_RULES: readonly FakeRule[] = [
+  { verbs: ["create"], apiGroups: ["authorization.k8s.io"], resources: ["selfsubjectaccessreviews", "selfsubjectrulesreviews"] },
+  { verbs: ["create"], apiGroups: ["authentication.k8s.io"], resources: ["selfsubjectreviews"] },
+];
+
 interface LogEntry {
   readonly ts: Date;
   readonly text: string;
@@ -266,6 +275,12 @@ export class FakeK8sApi {
         : this.handleDelete(url.pathname, query, body, res);
     }
     if (method !== "GET") return this.send(res, 405, statusBody(405, "MethodNotAllowed", "method not allowed"));
+    // Gerçek API sunucusu gibi: Accept bir serileştiriciyle (json/yaml/protobuf) veya */* ile eşleşmeli; `pods/log`
+    // dahil (gövde düz metin olsa bile). Eskiden sahte API `text/plain`'i kabul ediyordu; gerçek küme 406 veriyor.
+    const accept = String(req.headers.accept ?? "");
+    if (accept !== "" && !/(^|,)\s*(\*\/\*|application\/(json|yaml|vnd\.kubernetes\.protobuf))(\s*[;,]|\s*$)/.test(accept)) {
+      return this.send(res, 406, statusBody(406, "NotAcceptable", "only the following media types are accepted: application/json, application/yaml, application/vnd.kubernetes.protobuf"));
+    }
 
     if (url.pathname === "/version") return this.send(res, 200, JSON.stringify({ major: "1", minor: "31", gitVersion: "v1.31.0-fake" }));
 
@@ -460,10 +475,20 @@ export class FakeK8sApi {
     } else if (r.sub !== undefined) {
       return this.send(res, 404, statusBody(404, "NotFound", "unknown subresource"));
     } else {
-      const { resourceVersion: _rv, ...metaRest } = (patch["metadata"] ?? {}) as Record<string, unknown>;
+      const { resourceVersion: _rv, uid: wantedUid, ...metaRest } = (patch["metadata"] ?? {}) as Record<string, unknown>;
+      // Gerçek sunucu gibi (kind'da doğrulandı): SSA'da uid ön koşuldur — nesne YOKKEN uid verilirse 409 "uid mismatch";
+      // var olan nesnede farklı uid değişmez alan hatasıdır (422).
+      if (!cur && isApply && wantedUid !== undefined) {
+        return this.send(res, 409, statusBody(409, "Conflict", `Operation cannot be fulfilled on ${r.res.plural} "${r.name}": uid mismatch: the provided object specified uid ${String(wantedUid)}, and no existing object was found`));
+      }
+      if (cur && wantedUid !== undefined && wantedUid !== cur.metadata["uid"]) {
+        return this.send(res, 422, JSON.stringify({ kind: "Status", apiVersion: "v1", status: "Failure", reason: "Invalid", code: 422, message: `${r.res.kind} "${r.name}" is invalid: metadata.uid: Invalid value: field is immutable`, details: { causes: [{ reason: "FieldValueInvalid", message: "field is immutable", field: "metadata.uid" }] } }));
+      }
       next = this.merge(cur ?? { kind: r.res.kind, apiVersion: r.res.apiVersion, metadata: { name: r.name, ...(r.res.namespaced ? { namespace: r.ns } : {}), uid: `uid-${r.name}` } }, { ...patch, metadata: metaRest }) as K8sObject;
     }
-    next.metadata = { ...next.metadata, resourceVersion: String((cur ? this.rvOf(cur) : 0) + 1), uid: cur?.metadata["uid"] ?? next.metadata["uid"] ?? `uid-${r.name}` };
+    // SSA ile oluşturulan nesne gerçek etcd'deki gibi büyük bir revizyon alır (revizyon 1 kümenin ilk yazımıdır; ürünün
+    // "yalnız yoksa oluştur" ön koşulu buna dayanır — sahte API'de "1" olsaydı ikinci oluşturma var olanı güncellerdi).
+    next.metadata = { ...next.metadata, resourceVersion: String(cur ? this.rvOf(cur) + 1 : 1000 + this.store.size), uid: cur?.metadata["uid"] ?? next.metadata["uid"] ?? `uid-${r.name}` };
     if (!dry) this.store.set(key, next);
     return this.send(res, cur ? 200 : 201, JSON.stringify(r.sub === "scale" ? this.scaleOf(next) : next));
   }
@@ -572,7 +597,7 @@ export class FakeK8sApi {
         JSON.stringify({
           kind: "SelfSubjectRulesReview",
           apiVersion: "authorization.k8s.io/v1",
-          status: { resourceRules: st.resourceRules, nonResourceRules: [{ verbs: ["get"], nonResourceURLs: ["/healthz", "/version"] }], incomplete: st.incomplete ?? false, ...(st.evaluationError ? { evaluationError: st.evaluationError } : {}) },
+          status: { resourceRules: [...BASIC_USER_RULES, ...st.resourceRules], nonResourceRules: [{ verbs: ["get"], nonResourceURLs: ["/healthz", "/version"] }], incomplete: st.incomplete ?? false, ...(st.evaluationError ? { evaluationError: st.evaluationError } : {}) },
         }),
       );
     }

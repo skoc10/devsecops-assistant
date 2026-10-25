@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
@@ -8,9 +8,10 @@ export default defineConfig({
       "packages/runtimes/*/test/**/*.test.ts",
       "test/**/*.test.ts",
     ],
-    // VM gerektiren testler ayrı yapılandırmadadır (vitest.vm.config.ts / `pnpm test:vm`): CI'da koşmaz ve
-    // "atlanan test yok" kapısında görünmez (ADR-0011).
-    exclude: ["**/node_modules/**", "**/*.vm.test.ts"],
+    // Ayrı yapılandırmalarda koşanlar ana koşuya girmez, "atlanan test yok" kapısında görünmez:
+    //  - gerçek küme (kind) testleri: vitest.kind.config.ts / `pnpm test:kind`, CI'da `kind` işi (kendi kapısıyla);
+    //  - VM gerektiren testler: vitest.vm.config.ts / `pnpm test:vm`, CI'da koşmaz (ADR-0011).
+    exclude: [...configDefaults.exclude, "**/*.kind.test.ts", "**/*.vm.test.ts"],
     environment: "node",
     testTimeout: 20_000,
     pool: "forks",

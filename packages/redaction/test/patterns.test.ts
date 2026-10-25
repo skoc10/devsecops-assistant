@@ -37,6 +37,26 @@ describe("M2 desen kuralları", () => {
     expect(run(`AIza${"x".repeat(36)}`).out).not.toContain("‹redacted:google-api-key›");
   });
 
+  it("jwt / gitlab-token / slack-token: '-' ile biten değer TAMAMEN maskelenir (sondaki \\b geri izleyip '-'yi bırakıyordu)", () => {
+    const sig = "AbCdEfGhIjKlMnOp";
+    const cases: [string, string][] = [
+      ["jwt", `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcHMtaXQifQ.${sig}-`],
+      ["jwt", `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcHMtaXQifQ.${sig}--`],
+      ["jwt", `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcHMtaXQifQ.${sig}_`],
+      ["gitlab-token", `glpat-${"a1B2c3D4e5F6g7H8i9J0"}-`],
+      ["slack-token", `xoxb-${"1234567890ab"}-`],
+    ];
+    for (const [rule, secret] of cases) {
+      for (const wrap of [(x: string) => `session-${x} ok`, (x: string) => `${x}`, (x: string) => `"${x}",`]) {
+        const input = wrap(secret);
+        const { out } = run(input);
+        expect(out, `${rule}: ${input}`).toBe(input.replace(secret, `‹redacted:${rule}›`));
+      }
+    }
+    // sınıf içi devam eden karakter hâlâ eşleşmenin parçasıdır (yanlış kısa eşleşme yok)
+    expect(run(`xoxb-1234567890ab-cd ok`).out).toBe("‹redacted:slack-token› ok");
+  });
+
   it("kırpılmış (END'siz) özel anahtar bloğunu da maskeler", () => {
     const block = fake.privateKeyBlock();
     const truncated = block.slice(0, block.indexOf("-----END"));

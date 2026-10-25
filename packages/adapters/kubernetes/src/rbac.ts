@@ -17,6 +17,23 @@ const EXEC_SUBRESOURCES = new Set(["pods/exec", "pods/attach", "pods/portforward
 
 const has = (xs: readonly string[] | undefined, v: string): boolean => !!xs && (xs.includes(v) || xs.includes("*"));
 
+/**
+ * Kimliğin YALNIZ kendi yetkisini/kimliğini soran inceleme kaynakları. Gerçek kümede `system:basic-user`
+ * (her kimliği doğrulanmış kullanıcıya bağlı) bunlara `create` verir; nesne oluşturmaz, yazma sayılmaz.
+ * Sahte API bu kuralları döndürmediği için kind testine kadar fark edilmedi: salt okunur SA bile `write_access`
+ * alıp bağlanamıyordu.
+ */
+const SELF_REVIEW_RESOURCES = new Set(["selfsubjectaccessreviews", "selfsubjectrulesreviews", "selfsubjectreviews"]);
+const REVIEW_GROUPS = new Set(["authorization.k8s.io", "authentication.k8s.io"]);
+
+/** Kuralın kaynakları, yalnız inceleme gruplarına özgü kuralda öz-inceleme kaynakları atılarak (joker grup/kaynak atılmaz). */
+function effectiveResources(r: RbacRule): readonly string[] {
+  const resources = r.resources ?? [];
+  const groups = r.apiGroups ?? [];
+  if (groups.length === 0 || !groups.every((g) => REVIEW_GROUPS.has(g))) return resources;
+  return resources.filter((x) => !SELF_REVIEW_RESOURCES.has(x));
+}
+
 export interface RuleAnalysis {
   readonly effective: RiskClass;
   readonly findings: DoctorFinding[];
@@ -39,9 +56,9 @@ export function analyzeRules(rules: readonly RbacRule[]): RuleAnalysis {
   let secretsReadable = false;
 
   for (const r of rules) {
-    const resources = r.resources ?? [];
+    const resources = effectiveResources(r);
     const verbs = r.verbs;
-    if (resources.length === 0) continue; // nonResourceURLs: sınıf etkisi yok
+    if (resources.length === 0) continue; // nonResourceURLs / yalnız öz-inceleme: sınıf etkisi yok
     const anyRead = verbs.some((v) => READ_VERBS.has(v) || v === "*");
 
     if (verbs.includes("*")) {

@@ -149,6 +149,25 @@ function project(live: unknown, want: unknown): unknown {
     for (const k of Object.keys(want)) if (k in live) out[k] = project(live[k], want[k]);
     return out;
   }
+  // Diziler de öğe öğe izdüşürülür: gerçek API sunucusu öğelere varsayılan alan ekler (kapsayıcıda imagePullPolicy,
+  // terminationMessagePath, resources: {} …). Dizi bütün alınınca bu alanlar her diff'te "silinecek" görünüyor ve
+  // değişmemiş iş yükü bile "değişti" sayılıyordu (kind'da bulundu; sahte API varsayılan eklemez). Anahtarlı listeler
+  // (containers, env, volumes … — her öğede `name`) ada göre, diğerleri sıraya göre eşlenir; istenende olmayan canlı
+  // öğeler KORUNUR (olası silme görünür kalsın).
+  if (Array.isArray(want) && Array.isArray(live)) {
+    const named = (xs: unknown[]): boolean => xs.length > 0 && xs.every((x) => isObj(x) && typeof x["name"] === "string");
+    if (named(want) && named(live)) {
+      const byName = new Map(live.map((l) => [(l as Obj)["name"] as string, l]));
+      const wanted = new Set(want.map((w) => (w as Obj)["name"] as string));
+      const out = want.flatMap((w) => {
+        const l = byName.get((w as Obj)["name"] as string);
+        return l === undefined ? [] : [project(l, w)];
+      });
+      for (const l of live) if (!wanted.has((l as Obj)["name"] as string)) out.push(l);
+      return out;
+    }
+    return live.map((l, i) => (i < want.length ? project(l, want[i]) : l));
+  }
   return live;
 }
 
@@ -252,18 +271,85 @@ export async function previewApply(client: K8sClient, manifest: string): Promise
   };
 }
 
+/** Sunucu kaynaklı alan yolu / yönetici adı: yalnız kısa, boşluksuz tanımlayıcı biçimi geçer (serbest metin değil). */
+const SAFE_FIELD = /^[A-Za-z0-9_.\-[\]="/:{}]{1,160}$/;
+const SAFE_MANAGER = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * Server-side apply 409'u: `reason: Conflict` + `details.causes[].reason: FieldManagerConflict` ise alan sahipliği
+ * çakışmasıdır (başka bir alan yöneticisi — ör. GitOps denetleyicisi, kubectl — bu alanları farklı değerle yönetiyor).
+ * Gerçek kümede (kind) doğrulandı; sahte API bu ayrımı yapmıyordu. `force` hiçbir zaman kullanılmaz.
+ */
+export function fieldManagerConflicts(resp: ApiResponse): { field: string; manager: string }[] {
+  let j: unknown;
+  try {
+    j = JSON.parse(resp.body);
+  } catch {
+    return [];
+  }
+  if (!isObj(j) || j["reason"] !== "Conflict" || !isObj(j["details"]) || !Array.isArray(j["details"]["causes"])) return [];
+  return (j["details"]["causes"] as unknown[])
+    .filter(isObj)
+    .filter((c) => c["reason"] === "FieldManagerConflict")
+    .slice(0, 10)
+    .map((c) => {
+      const field = typeof c["field"] === "string" && SAFE_FIELD.test(c["field"]) ? c["field"] : "?";
+      const m = /conflict with "([^"]{1,128})"/.exec(typeof c["message"] === "string" ? c["message"] : "")?.[1] ?? "";
+      return { field, manager: SAFE_MANAGER.test(m) ? m : "?" };
+    });
+}
+
+/**
+ * "Yalnız yoksa oluştur" ön koşulu için resourceVersion: etcd revizyonu 1 kümenin ilk yazımıdır, bir kullanıcı nesnesinin
+ * güncel sürümü olamaz. Var olan nesnede uyuşmazlık = 409; nesne yokken sunucu oluşturur ve kendi sürümünü atar.
+ */
+export const CREATE_ONLY_RV = "1";
+
+/** Status yanıtındaki `reason` (yalnız kısa tanımlayıcı; sunucu metni taşınmaz). */
+function statusReason(resp: ApiResponse): string {
+  try {
+    const r = (JSON.parse(resp.body) as { reason?: unknown }).reason;
+    return typeof r === "string" && /^[A-Za-z]{1,40}$/.test(r) ? r : "?";
+  } catch {
+    return "?";
+  }
+}
+
 export async function doApply(client: K8sClient, manifest: string, approvedVersion: string | undefined): Promise<RawToolOutput> {
   const parsed = parseManifest(manifest);
   if (approvedVersion === undefined) throw new OpsError("approval_version_missing", "onaylanan hedef sürümü yok; uygulama reddedildi");
   const { kind, namespace, name, obj, ref } = parsed;
   let resp: ApiResponse;
   if (approvedVersion === "yok") {
-    resp = await client.create(resourcePath(kind, namespace), obj, { fieldManager: FIELD_MANAGER });
-    if (resp.status === 409) throw new OpsError("target_changed", `${ref} onaydan sonra başkası tarafından oluşturuldu; yeniden inceleyin`);
+    // Oluşturma da server-side apply ile: POST ile oluşturulan alanlar (operation Update) aynı yöneticinin sonraki
+    // Apply'ıyla ÇAKIŞIYORDU (yönetici kimliği ad + işlemdir; kind'da bulundu). "Yalnız yoksa oluştur" koşulu
+    // resourceVersion ön koşuluyla: hiçbir canlı nesnenin sahip olamayacağı sürüm (`CREATE_ONLY_RV`) — nesne onaydan sonra
+    // başkasınca oluşturulduysa sürüm uyuşmaz (409), var olan nesne DEĞİŞMEZ; oluşturmada sunucu sürümü kendisi atar.
+    // (uid bu iş için KULLANILAMAZ: gerçek sunucu SSA'da uid'i ön koşul sayar ve nesne yokken "uid mismatch … no existing
+    // object was found" ile her oluşturmayı 409'la reddeder — kind'da bulundu.)
+    const body = { ...obj, metadata: { ...(obj["metadata"] as Obj), resourceVersion: CREATE_ONLY_RV } };
+    resp = await client.patch(resourcePath(kind, namespace, name), body, "application/apply-patch+yaml", { fieldManager: FIELD_MANAGER, force: false });
+    if (resp.status === 409) {
+      throw new OpsError("target_changed", `${ref} onaydan sonra başkası tarafından oluşturuldu (409 ${statusReason(resp)}); hiçbir şey uygulanmadı, yeniden inceleyin`);
+    }
+    if (resp.status === 200) {
+      // 201 beklenir; 200 = nesne vardı ve güncellendi (uid koşulu sunucuda uygulanmadı). Sessiz geçilmez.
+      throw new OpsError("target_changed", `${ref} beklenmedik biçimde zaten vardı ve bu çağrıyla GÜNCELLENDİ (onaylanan: yeni nesne); nesneyi inceleyin`);
+    }
   } else {
     const body = { ...obj, metadata: { ...(obj["metadata"] as Obj), resourceVersion: approvedVersion } };
     resp = await client.patch(resourcePath(kind, namespace, name), body, "application/apply-patch+yaml", { fieldManager: FIELD_MANAGER, force: false });
-    if (resp.status === 409) throw new OpsError("target_changed", `${ref} onaydan sonra değişti veya başka bir yönetici alanıyla çakışıyor (409); hiçbir şey uygulanmadı`);
+    if (resp.status === 409) {
+      const conflicts = fieldManagerConflicts(resp);
+      if (conflicts.length > 0) {
+        throw new OpsError(
+          "field_manager_conflict",
+          `${ref}: alan sahipliği çakışması (server-side apply, 409): ${conflicts.map((c) => `${c.field} → '${c.manager}'`).join(", ")}. ` +
+            "Bu alanları başka bir yönetici farklı değerle yönetiyor; hiçbir şey uygulanmadı (zorla devralma yapılmaz). Değişikliği o yöneticinin kaynağında (ör. GitOps deposu) yapın veya alanı manifestten çıkarın",
+        );
+      }
+      throw new OpsError("target_changed", `${ref} onaydan sonra değişti (resourceVersion ön koşulu, 409); hiçbir şey uygulanmadı`);
+    }
   }
   const j = jsonOf(resp, `${ref} uygulama`);
   return {
