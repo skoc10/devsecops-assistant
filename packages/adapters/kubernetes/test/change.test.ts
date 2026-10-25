@@ -338,15 +338,25 @@ describe("k8s.apply", () => {
     const w = writes(h);
     expect(w).toHaveLength(1);
     expect(w[0]).toMatchObject({ method: "PATCH", path: `/apis/apps/v1/namespaces/${NS}/deployments/fresh`, query: { fieldManager: "ops-assistant", force: "false" } });
-    // "yalnız yoksa oluştur" koşulu: gövdede rastgele uid; sunucu kendi uid'ini atar
+    // "yalnız yoksa oluştur" koşulu: hiçbir canlı nesnenin sahip olamayacağı resourceVersion; uid YOK (gerçek sunucu
+    // SSA'da uid'i ön koşul sayar, nesne yokken her oluşturmayı 409 ile reddeder — sahte API de öyle)
     const sent = JSON.parse(w[0]!.body) as { metadata: { uid?: string; resourceVersion?: string } };
-    expect(sent.metadata.uid).toMatch(/^[0-9a-f-]{36}$/);
-    expect(sent.metadata.resourceVersion).toBeUndefined();
-    expect(h.api.peek("Deployment", NS, "fresh")?.metadata["uid"]).not.toBe(sent.metadata.uid);
+    expect(sent.metadata.resourceVersion).toBe("1");
+    expect(sent.metadata.uid).toBeUndefined();
+    expect(h.api.peek("Deployment", NS, "fresh")?.metadata["resourceVersion"]).not.toBe("1");
+    // aynı adla ikinci "yok" oluşturması var olanı GÜNCELLEMEZ
+    const lease = await h.broker.acquire({ profile: h.profile, purpose: "t", callId: "c-twice", ttlSec: 60 }, h.known);
+    try {
+      const again = { tool: "k8s.apply", args: { manifest: m.replace("web:2.0", "web:3.0") }, profile: h.profile, handle: lease.handle, callId: "c-twice", signal: new AbortController().signal, limits: h.adapter.definitions.find((d) => d.descriptor.name === "k8s.apply")!.descriptor.limits, approvedVersion: "yok" };
+      await expect(h.adapter.invoke(again)).rejects.toMatchObject({ code: "target_changed" });
+      expect(JSON.stringify(h.api.peek("Deployment", NS, "fresh"))).toContain("web:2.0");
+    } finally {
+      await lease.release();
+    }
     void ev;
   });
 
-  it("'yok' onayıyla çağrıldığında nesne o arada oluşturulmuşsa var olan nesne DEĞİŞMEZ (uid koşulu → target_changed)", async () => {
+  it("'yok' onayıyla çağrıldığında nesne o arada oluşturulmuşsa var olan nesne DEĞİŞMEZ (resourceVersion koşulu → target_changed)", async () => {
     const { h } = await setup("deploy");
     const lease = await h.broker.acquire({ profile: h.profile, purpose: "t", callId: "c-yok", ttlSec: 60 }, h.known);
     try {

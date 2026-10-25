@@ -476,13 +476,19 @@ export class FakeK8sApi {
       return this.send(res, 404, statusBody(404, "NotFound", "unknown subresource"));
     } else {
       const { resourceVersion: _rv, uid: wantedUid, ...metaRest } = (patch["metadata"] ?? {}) as Record<string, unknown>;
-      // Gerçek sunucu gibi: oluşturmada uid'i sunucu atar; var olan nesnede farklı uid değişmez alan hatasıdır (422).
+      // Gerçek sunucu gibi (kind'da doğrulandı): SSA'da uid ön koşuldur — nesne YOKKEN uid verilirse 409 "uid mismatch";
+      // var olan nesnede farklı uid değişmez alan hatasıdır (422).
+      if (!cur && isApply && wantedUid !== undefined) {
+        return this.send(res, 409, statusBody(409, "Conflict", `Operation cannot be fulfilled on ${r.res.plural} "${r.name}": uid mismatch: the provided object specified uid ${String(wantedUid)}, and no existing object was found`));
+      }
       if (cur && wantedUid !== undefined && wantedUid !== cur.metadata["uid"]) {
         return this.send(res, 422, JSON.stringify({ kind: "Status", apiVersion: "v1", status: "Failure", reason: "Invalid", code: 422, message: `${r.res.kind} "${r.name}" is invalid: metadata.uid: Invalid value: field is immutable`, details: { causes: [{ reason: "FieldValueInvalid", message: "field is immutable", field: "metadata.uid" }] } }));
       }
       next = this.merge(cur ?? { kind: r.res.kind, apiVersion: r.res.apiVersion, metadata: { name: r.name, ...(r.res.namespaced ? { namespace: r.ns } : {}), uid: `uid-${r.name}` } }, { ...patch, metadata: metaRest }) as K8sObject;
     }
-    next.metadata = { ...next.metadata, resourceVersion: String((cur ? this.rvOf(cur) : 0) + 1), uid: cur?.metadata["uid"] ?? next.metadata["uid"] ?? `uid-${r.name}` };
+    // SSA ile oluşturulan nesne gerçek etcd'deki gibi büyük bir revizyon alır (revizyon 1 kümenin ilk yazımıdır; ürünün
+    // "yalnız yoksa oluştur" ön koşulu buna dayanır — sahte API'de "1" olsaydı ikinci oluşturma var olanı güncellerdi).
+    next.metadata = { ...next.metadata, resourceVersion: String(cur ? this.rvOf(cur) + 1 : 1000 + this.store.size), uid: cur?.metadata["uid"] ?? next.metadata["uid"] ?? `uid-${r.name}` };
     if (!dry) this.store.set(key, next);
     return this.send(res, cur ? 200 : 201, JSON.stringify(r.sub === "scale" ? this.scaleOf(next) : next));
   }

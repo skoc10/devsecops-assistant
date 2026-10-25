@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { parseAllDocuments, stringify } from "yaml";
 import { OpsError } from "@ops/contracts";
 import type { ActionPreview, RawToolOutput } from "@ops/contracts";
@@ -281,13 +280,19 @@ export function fieldManagerConflicts(resp: ApiResponse): { field: string; manag
     });
 }
 
-/** 422 Invalid yanıtı `metadata.uid` alanına mı ilişkin? (oluşturma koşulunun reddi; başka doğrulama hatası değil) */
-function touchesUid(resp: ApiResponse): boolean {
+/**
+ * "Yalnız yoksa oluştur" ön koşulu için resourceVersion: etcd revizyonu 1 kümenin ilk yazımıdır, bir kullanıcı nesnesinin
+ * güncel sürümü olamaz. Var olan nesnede uyuşmazlık = 409; nesne yokken sunucu oluşturur ve kendi sürümünü atar.
+ */
+export const CREATE_ONLY_RV = "1";
+
+/** Status yanıtındaki `reason` (yalnız kısa tanımlayıcı; sunucu metni taşınmaz). */
+function statusReason(resp: ApiResponse): string {
   try {
-    const j = JSON.parse(resp.body) as { details?: { causes?: { field?: string }[] } };
-    return (j.details?.causes ?? []).some((c) => c.field === "metadata.uid");
+    const r = (JSON.parse(resp.body) as { reason?: unknown }).reason;
+    return typeof r === "string" && /^[A-Za-z]{1,40}$/.test(r) ? r : "?";
   } catch {
-    return false;
+    return "?";
   }
 }
 
@@ -298,13 +303,15 @@ export async function doApply(client: K8sClient, manifest: string, approvedVersi
   let resp: ApiResponse;
   if (approvedVersion === "yok") {
     // Oluşturma da server-side apply ile: POST ile oluşturulan alanlar (operation Update) aynı yöneticinin sonraki
-    // Apply'ıyla ÇAKIŞIYORDU (yönetici kimliği ad + işlemdir; kind'da bulundu). "Yalnız yoksa oluştur" koşulu: gövdeye
-    // rastgele bir uid konur — sunucu oluşturmada uid'i kendisi atar; nesne onaydan sonra başkasınca oluşturulduysa
-    // değişmez uid alanı (422) veya alan çakışması (409) isteği reddeder, var olan nesne DEĞİŞMEZ.
-    const body = { ...obj, metadata: { ...(obj["metadata"] as Obj), uid: randomUUID() } };
+    // Apply'ıyla ÇAKIŞIYORDU (yönetici kimliği ad + işlemdir; kind'da bulundu). "Yalnız yoksa oluştur" koşulu
+    // resourceVersion ön koşuluyla: hiçbir canlı nesnenin sahip olamayacağı sürüm (`CREATE_ONLY_RV`) — nesne onaydan sonra
+    // başkasınca oluşturulduysa sürüm uyuşmaz (409), var olan nesne DEĞİŞMEZ; oluşturmada sunucu sürümü kendisi atar.
+    // (uid bu iş için KULLANILAMAZ: gerçek sunucu SSA'da uid'i ön koşul sayar ve nesne yokken "uid mismatch … no existing
+    // object was found" ile her oluşturmayı 409'la reddeder — kind'da bulundu.)
+    const body = { ...obj, metadata: { ...(obj["metadata"] as Obj), resourceVersion: CREATE_ONLY_RV } };
     resp = await client.patch(resourcePath(kind, namespace, name), body, "application/apply-patch+yaml", { fieldManager: FIELD_MANAGER, force: false });
-    if (resp.status === 409 || (resp.status === 422 && touchesUid(resp))) {
-      throw new OpsError("target_changed", `${ref} onaydan sonra başkası tarafından oluşturuldu; hiçbir şey uygulanmadı, yeniden inceleyin`);
+    if (resp.status === 409) {
+      throw new OpsError("target_changed", `${ref} onaydan sonra başkası tarafından oluşturuldu (409 ${statusReason(resp)}); hiçbir şey uygulanmadı, yeniden inceleyin`);
     }
     if (resp.status === 200) {
       // 201 beklenir; 200 = nesne vardı ve güncellendi (uid koşulu sunucuda uygulanmadı). Sessiz geçilmez.
