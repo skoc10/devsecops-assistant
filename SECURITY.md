@@ -11,13 +11,16 @@ Ayrıntı: [docs/design/08-threat-model.md](docs/design/08-threat-model.md). Her
 | Tehdit | Ana kontrol |
 |---|---|
 | Model hatalı/enjekte komut üretir | Şema doğrulama, deterministik sınıflayıcı (sınıflanamayan = `destroy` muamelesi), profil sınıf tavanı |
-| Araç çıktısı sonraki tura talimat olur | Bağlam etiketi + taint, karantina özetleyici, taint altında `ask` |
+| Araç çıktısı sonraki tura talimat olur | Bağlam etiketi + taint, taint altında `ask`; opsiyonel karantina: log/olay yerine şema-tipli özet ([ADR-0008](docs/adr/0008-quarantine-typed-digest.md)) |
 | Reader kimliğiyle yazma | Bağımsız katmanlar: araç yüzü, AST allowlist, rol yetkisi; doktor |
 | Yanlış profil / hedef | Her çağrıda açık profil, hedef pini, kapsam, kanıt `subject` eşleşmesi |
 | Secret log/modele gider | Kasa + lease, M1–M4 redaksiyon, bilinen-secret taraması (M3), egress kontrolü |
 | Dış ajanın serbest kabuğu | Araç allowlist'i + OS sandbox + araç köprüsü; bekçi yalnız tespit edicidir |
 | Onay yorgunluğu | Okuma sormaz, dar kurallar, onay bütçesi, artan sürtünme |
 | Denetimsiz break-glass | Denetim kapatılamaz (fail-closed), gerekçe + TTL + banner |
+| Bulut modele hassas bağlam | `egress` bölge sınırı (bağlam etiketi ↔ sağlayıcı bölgesi), `--local-only` kipi (PEP'te fail-closed) |
+| Zararlı / ithal skill veya runbook | Skill linter (görünmez Unicode hata; enjeksiyon/`curl \| sh`/dış URL uyarı), skill yetki veremez, `scripts/` çalışmaz; runbook adımları tam PEP'ten geçer ([ADR-0009](docs/adr/0009-composite-tools-runbooks.md)) |
+| Olay sonrası inceleme | `ops replay`: zincir doğrulama + tutarlılık denetimleri + politika what-if ([ADR-0010](docs/adr/0010-replay-decision-context.md)) |
 
 ## Bilinen sınırlar (özet)
 
@@ -26,3 +29,7 @@ Ayrıntı: [docs/design/08-threat-model.md](docs/design/08-threat-model.md). Her
 - Denetim zinciri **tamper-tespit** sağlar, tamper-önleme değil; kuyruk kesme dış çapa olmadan tespit edilemez.
 - JS bellekte secret silme **en iyi çabadır**.
 - Sütun maskeleme (M4) `Best-effort`tur; en güçlü savunma veritabanında maskeli view'dır.
+- Karantina varsayılan **kapalıdır** ve yalnız log/olay araçlarını kapsar; diğer untrusted araçlar taint ile korunur.
+- Skill/runbook sezgisel taramaları (`injection_phrase`, `external_url`, …) `Best-effort`tir: temiz çıkış güven değildir.
+- Anthropic/OpenAI-uyumlu/Cursor sağlayıcıları ve model kademesi yerel sahte uçlara karşı test edildi; **gerçek servislere karşı doğrulanmadı**.
+- `ops replay` modelin metnini göstermez (denetim bunu saklamaz); yalnız eylem çizelgesini kurar.

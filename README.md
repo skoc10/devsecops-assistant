@@ -9,7 +9,9 @@ Herhangi bir şirketin, herhangi bir ortamında kurulabilen **genel amaçlı Dev
 - Sohbetle soru cevaplar; cevabını **kanıt kimlikleriyle** (`evidence_id`) destekler.
 - Bağlı kaynaklardan salt okunur kanıt toplar ve deterministik anahtarlarla (image digest, commit SHA, workload) tek zaman çizelgesinde birleştirir.
 - Değişikliği önce gösterir (diff, dry-run); öneriyi PR / değişiklik dosyası olarak çıkarır, hedef sistemin kendi onay mekanizmasını atlamaz.
-- Terraform/OpenTofu ve Ansible kodu deponun **anlık kopyasında** yazar ve doğrular (fmt/validate/lint), değişikliği `git apply` ile uygulanabilir **yama** olarak verir; `plan`/`apply` ve PR akışı henüz yok (Faz 2) — uygulama hedefin pipeline'ına bırakılır.
+- Terraform/OpenTofu ve Ansible kodu deponun **anlık kopyasında** yazar ve doğrular (fmt/validate/lint/plan/`--check`), değişikliği `git apply` ile uygulanabilir **yama** olarak (veya `scm.pr.create` ile PR olarak) verir; `iac.apply`/`ansible.run` **bilinçli olarak yoktur** ([ADR-0007](docs/adr/0007-iac-apply-closed.md)) — uygulama hedefin pipeline'ına bırakılır.
+- Kullanıcının **runbook**'unu (markdown) plana çevirir, planı gösterir ve okuma adımlarını her biri tam PEP'ten geçerek koşturur ([ADR-0009](docs/adr/0009-composite-tools-runbooks.md)); runbook yoksa genel teşhis akışını kullandığını söyler.
+- Denetim kaydından oturumu **inceler** (`ops replay`: eylem çizelgesi, tutarlılık denetimleri, politika what-if).
 - Politika izin verdiği sınıfta (`read < mutate < deploy < destroy`), kullanıcı onayıyla dar kapsamlı işlem yapar.
 
 ## Temel ilkeler
@@ -19,6 +21,8 @@ Herhangi bir şirketin, herhangi bir ortamında kurulabilen **genel amaçlı Dev
 3. **Denetim fail-closed:** denetim kaydı yazılamazsa çağrı çalışmaz.
 4. **Token ekonomisi birinci sınıf hedef:** LLM yalnız yorumlar; toplama, süzme, korelasyon, sınıflama ve maskeleme koddur. Skill'ler ve araç setleri tembel yüklenir, büyük sonuçlar referansla (`evidence_id`) taşınır.
 5. **Dürüst güvenlik beyanı:** her kontrol `Enforced` / `Best-effort` / `Planned` etiketiyle yazılır.
+6. **Ham serbest metin ana modele girmeyebilir (opsiyonel karantina):** log/olay yerine şema-tipli özet gider; ham içeriği yalnız kullanıcı `/show` (ekrana) veya `/raw` (modele, denetimli) ile açar ([ADR-0008](docs/adr/0008-quarantine-typed-digest.md)).
+7. **Çevrimdışı/yerel kip:** `--local-only` / `OPS_EGRESS=local-only` — yalnız yerel model, yalnız okuma sınıfı, MCP köprüsü ve break-glass kapalı (PEP'te fail-closed).
 
 ## Depo yapısı
 
@@ -62,7 +66,18 @@ node packages/cli/src/bin.ts policy allow --tool k8s.scale --profile dev --scope
 node packages/cli/src/bin.ts break-glass --profile dev --ceiling mutate --ttl 15m --reason "INC-123 payments api ölçekleme"
 ```
 
-`ops chat` için bir model sağlayıcısı gerekir (`OPS_PROVIDER`: `openai-compatible` veya `cursor`; ayrıntı ve doğrulanmamış kısımlar [docs/STATUS.md](docs/STATUS.md)'da). Sohbet döngüsü scripted sağlayıcıyla uçtan uca test edilir (E-01).
+```sh
+# inceleme ve denetim araçları
+node packages/cli/src/bin.ts replay                       # son oturumun eylem çizelgesi + tutarlılık denetimi (araç/model ÇAĞRILMAZ)
+node packages/cli/src/bin.ts replay --policy current      # kayıtlı kararlar şimdiki politikayla yeniden değerlendirilir (gevşeyen kararlar vurgulanır)
+node packages/cli/src/bin.ts skill lint --builtin          # skill denetimi (görünmez Unicode, enjeksiyon/curl|sh/dış URL sezgileri, hash)
+node packages/cli/src/bin.ts runbook list                  # OPS_HOME/runbooks/<ad>.md
+# sohbet seçenekleri
+OPS_QUARANTINE=digest node packages/cli/src/bin.ts chat --embedded     # ham log/olay modele girmez; sohbette /show ID, /raw ID
+node packages/cli/src/bin.ts chat --embedded --local-only             # yalnız yerel model + yalnız okuma
+```
+
+`ops chat` için bir model sağlayıcısı gerekir (`OPS_PROVIDER`: `anthropic`, `openai-compatible` veya `cursor`; anahtar `ops provider set-key AD` ile kasaya yazılır; ayrıntı ve doğrulanmamış kısımlar [docs/STATUS.md](docs/STATUS.md)'da). Hiçbir sağlayıcı bu ortamda **gerçek servise karşı** denenmedi (yerel sahte uçlara/ScriptedProvider'a karşı test edildi). Sohbet döngüsü scripted sağlayıcıyla uçtan uca test edilir (E-01).
 
 ## Geliştirme
 
