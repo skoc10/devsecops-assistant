@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { estimateTokens } from "@ops/contracts";
 import { findCanary, makeCanary } from "@ops/testkit";
 import type { Canary } from "@ops/testkit";
-import { DEFAULT_MASKING, KnownSecrets, processOutput, registerProfile, scrubText } from "../src/index.ts";
+import { Counter, DEFAULT_MASKING, KnownSecrets, processOutput, registerProfile, scrubText } from "../src/index.ts";
 import type { OutputPolicy } from "../src/index.ts";
 import { fake } from "./helpers.ts";
 
@@ -67,6 +67,28 @@ describe("S-06 çekirdeği: canary çıktı boru hattından sızmaz", () => {
     expect(leakIn([out], [canary])).toEqual([]);
     expect(out).not.toContain("\u001b");
     expect(out).toContain("‹redacted:github-token›");
+  });
+
+  it("extraPatternRules scrubText ve processOutput'ta uygulanır; `g`siz/`y`li kural da her geçişi maskeler", () => {
+    const rules = [
+      { id: "corp-token", regex: /\bCORP-[0-9]{8}\b/ }, // bilerek `g`siz: yalnız ilk geçiş maskelenmemeli
+      { id: "corp-ref", regex: /REF#[A-Z]{6}/y },
+    ];
+    const c = new Counter();
+    expect(scrubText("a CORP-12345678 b CORP-87654321 REF#ABCDEF REF#GHIJKL", new KnownSecrets(), c, { extraPatternRules: rules })).toBe(
+      "a ‹redacted:corp-token› b ‹redacted:corp-token› ‹redacted:corp-ref› ‹redacted:corp-ref›",
+    );
+    expect(c.toSummary()).toEqual([
+      { rule: "corp-ref", count: 2 },
+      { rule: "corp-token", count: 2 },
+    ]);
+    const out = processOutput({ v: "CORP-12345678", list: ["x CORP-87654321 REF#ABCDEF"] }, "özet CORP-11112222", policy({ extraPatternRules: rules }));
+    for (const ch of [out.evidenceText, out.viewText, out.summary]) expect(ch).not.toMatch(/CORP-\d{8}|REF#[A-Z]{6}/);
+    expect(out.redactions.find((r) => r.rule === "corp-token")?.count).toBe(3);
+    expect(out.redactions.find((r) => r.rule === "corp-ref")?.count).toBe(1);
+    // çağıranın RegExp nesnesi değiştirilmez
+    expect(rules[0]?.regex.global).toBe(false);
+    expect(rules[1]?.regex.lastIndex).toBe(0);
   });
 
   it("M1 secret anahtarı ve yapılandırılmış profil kuralı birlikte çalışır", () => {

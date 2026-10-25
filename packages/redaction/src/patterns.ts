@@ -1,8 +1,9 @@
 import { Counter, isRedactedToken, redacted } from "./counter.ts";
+import { globalRegExp } from "./regex.ts";
 
 /**
  * M2: desen + entropi. Kural seti gitleaks tarzı bakımlı listelerden esinlenir ve KASITLI olarak
- * dardır (yanlış pozitif = kanıt kaybı). Genişletme: kullanıcı kuralları `extraRules` ile eklenir.
+ * dardır (yanlış pozitif = kanıt kaybı). Genişletme: kullanıcı kuralları `extraPatternRules` ile eklenir.
  * Sınır (Best-effort): bilinmeyen biçimdeki secret kaçabilir → M3 ve egress kontrolü ikinci hat.
  */
 export interface PatternRule {
@@ -96,7 +97,8 @@ const TOKEN_CANDIDATE = /[A-Za-z0-9+/_=-]{28,512}/g;
 
 export interface PatternOptions {
   readonly entropy?: boolean;
-  readonly extraRules?: readonly PatternRule[];
+  /** Yerleşik kurallardan SONRA uygulanan kullanıcı kuralları (`OutputPolicy`/`scrubText` ile aynı ad). */
+  readonly extraPatternRules?: readonly PatternRule[];
 }
 
 export function applyPatternRules(text: string, counter: Counter, opts: PatternOptions = {}): string {
@@ -107,8 +109,9 @@ export function applyPatternRules(text: string, counter: Counter, opts: PatternO
     return `‹pem:CERTIFICATE ${m.length}B›`;
   });
 
-  for (const rule of [...PATTERN_RULES, ...(opts.extraRules ?? [])]) {
-    out = out.replace(rule.regex, (...args: unknown[]) => {
+  for (const rule of [...PATTERN_RULES, ...(opts.extraPatternRules ?? [])]) {
+    // kullanıcı kuralı `g`siz/`y`li olabilir: her geçiş maskelenmeli (yalnız ilki değil)
+    out = out.replace(globalRegExp(rule.regex), (...args: unknown[]) => {
       const match = args[0] as string;
       if (rule.group === undefined) {
         counter.add(rule.id);
