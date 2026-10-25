@@ -35,7 +35,8 @@ const TASK_KEYWORDS = new Set([
 ]);
 const PLAY_TASK_LISTS: readonly string[] = ["pre_tasks", "tasks", "post_tasks", "handlers"];
 const PLUGIN_DIRS = /(^|\/)(library|action_plugins|callback_plugins|connection_plugins|filter_plugins|lookup_plugins|inventory_plugins|module_utils|vars_plugins|strategy_plugins|become_plugins|cache_plugins|test_plugins|doc_fragments|ansible_collections)\//;
-const LOOKUP_PIPE = /\b(?:lookup|query|q)\s*\(\s*['"](?:ansible\.builtin\.)?pipe['"]/i;
+/** Denetleyicide komut çalıştıran lookup'lar: `pipe` ve `lines` (lookup/query/q çağrısı veya `with_pipe`/`with_lines` döngüsü). */
+const LOOKUP_PIPE = /\b(?:lookup|query|q)\s*\(\s*['"](?:ansible\.(?:builtin|legacy)\.)?(?:pipe|lines)['"]|\bwith_(?:pipe|lines)\s*:/i;
 const CONTROLLER_EXEC = /\blocal_action\b|delegate_to:\s*['"]?(localhost|127\.0\.0\.1)\b|connection:\s*['"]?local\b/;
 const ROLE_TASK_FILE = /(^|\/)roles\/[^/]+\/(tasks|handlers)\//;
 
@@ -53,6 +54,11 @@ const ROLE_FILE_EXTS = ["", ".yml", ".yaml", ".json"] as const;
 const TEMPLATED = /\{\{|\{%|\{#/;
 /** include/rol zinciri derinlik sınırı: aşılırsa fail-closed (döngüler ziyaret kümeleriyle zaten sonlanır). */
 const MAX_INCLUDE_DEPTH = 24;
+/** Toplam görev ziyareti ve iç içe blok sınırı: takma ad (alias) bombası/döngüsü taramayı kilitlemez; aşılırsa ENGEL. */
+const MAX_TASK_VISITS = 20_000;
+const MAX_BLOCK_DEPTH = 64;
+/** Ansible `boolean()` doğru kümesi (kırpılmış, küçük harf). `check_mode` yalnız açıkça doğruysa zararsızdır. */
+const BOOL_TRUE = new Set(["y", "yes", "on", "1", "true", "t"]);
 
 export interface AnsibleTask {
   readonly file: string;
@@ -94,6 +100,41 @@ const isTemplated = (v: unknown): boolean => typeof v === "string" && TEMPLATED.
 const parentOf = (p: string): string => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 const baseOf = (p: string): string => p.slice(p.lastIndexOf("/") + 1);
 const deref = (n: unknown, doc: Document): unknown => (isAlias(n) ? n.resolve(doc) : n);
+const isMergeKey = (v: unknown): boolean => v === "<<" || (typeof v === "symbol" && v.description === "<<");
+
+interface Pair {
+  readonly key: string;
+  readonly value: unknown;
+}
+
+/**
+ * Eşlemenin etkin çiftleri, Ansible'ın (PyYAML) gördüğü gibi: takma ad anahtarlar çözülür, `<<` birleştirme anahtarı
+ * açılır (birleştirilenler önce, kendi çiftleri sonra; dizide önceki eşleme kazanır). Yinelenen anahtarlar KORUNUR:
+ * işaretler herhangi bir geçişten (birleşim), değerler sonuncudan (PyYAML: son kazanır) okunur.
+ */
+function pairsOf(m: YAMLMap, doc: Document, depth = 0): Pair[] {
+  const merged: Pair[] = [];
+  const own: Pair[] = [];
+  for (const p of m.items) {
+    const k = deref(p.key, doc);
+    const kv = isScalar(k) ? k.value : undefined;
+    if (isMergeKey(kv)) {
+      if (depth >= 8) continue;
+      const v = deref(p.value, doc);
+      const sources = isMap(v) ? [v] : isSeq(v) ? v.items.map((i) => deref(i, doc)).filter(isMap) : [];
+      for (const s of sources.reverse()) merged.push(...pairsOf(s, doc, depth + 1));
+    } else {
+      own.push({ key: kv === undefined || kv === null ? "" : String(kv), value: p.value });
+    }
+  }
+  return [...merged, ...own];
+}
+
+/** `check_mode` değeri check modunu KAPATABİLİR mi? Açıkça doğru olmayan her değer (`off`, `NO`, `n`, 0, şablon, null) güvensiz. */
+function checkModeOff(v: unknown): boolean {
+  if (v === true || v === 1) return false;
+  return typeof v === "string" ? !BOOL_TRUE.has(v.trim().toLowerCase()) : true;
+}
 
 function normalizeModule(name: string): string {
   return BUILTIN_NS.test(name) ? name.replace(BUILTIN_NS, "") : name;
@@ -271,7 +312,8 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
     if (typeof text === "string") {
       const lc = new LineCounter();
       try {
-        const doc = parseDocument(text, { lineCounter: lc, uniqueKeys: false });
+        // `merge`: değerler `<<` birleştirmesiyle Ansible'ın (PyYAML) gördüğü gibi çözülür
+        const doc = parseDocument(text, { lineCounter: lc, uniqueKeys: false, merge: true });
         if (doc.errors.length > 0) {
           const e = doc.errors[0];
           add("block", "yaml_error", `YAML hatası: ${(e?.message ?? "").split("\n")[0]?.slice(0, 100)}`, path, e?.linePos?.[0]?.line);
@@ -292,7 +334,7 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
     if (textChecked.has(path)) return;
     textChecked.add(path);
     const text = textOf.get(path) ?? "";
-    if (LOOKUP_PIPE.test(text)) add("warn", "lookup_pipe", "lookup('pipe') denetleyicide komut çalıştırır (çalıştırma araçlarında engel)", path);
+    if (LOOKUP_PIPE.test(text)) add("warn", "lookup_pipe", "lookup('pipe'/'lines') denetleyicide komut çalıştırır (çalıştırma araçlarında engel)", path);
     if (CONTROLLER_EXEC.test(text)) add("warn", "controller_execution", "görev denetleyicide yerelde çalışıyor (local_action/delegate_to localhost/connection: local)", path);
   };
 
@@ -319,7 +361,7 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
     if (p && isSeq(root)) {
       const isPlaybook = root.items.some((x) => {
         const r = deref(x, p.doc);
-        return isMap(r) && r.items.some((pr) => isScalar(pr.key) && PLAYBOOK_KEYS.has(String(pr.key.value)));
+        return isMap(r) && pairsOf(r, p.doc).some((pr) => PLAYBOOK_KEYS.has(pr.key));
       });
       if (isPlaybook) playbooks.push(f.path);
     }
@@ -360,6 +402,19 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
     forceDestroy = true;
     add("warn", "include_unresolved", `${what} çözülemedi (${why}): içerik sınıflanamaz → destroy muamelesi`, site.file, site.line);
   };
+  /** Play/blok/rol düzeyindeki `check_mode` kapsamındaki TÜM görevlere uygulanır (Ansible kalıtımı). */
+  const scopeCheckMode = (pairs: readonly Pair[], ctx: Ctx, scope: string, line: number): void => {
+    if (pairs.some((p) => p.key === "check_mode" && checkModeOff(toJs(p.value, ctx)))) {
+      add("warn", "check_mode_false", `${scope} düzeyinde check_mode kapatılıyor (veya doğrulanamıyor): kapsamdaki görevler check modunda GERÇEKTEN çalışır`, ctx.file, line);
+    }
+  };
+  let taskVisits = 0;
+  let limitHit = false;
+  const overLimit = (file: string): void => {
+    if (limitHit) return;
+    limitHit = true;
+    add("block", "task_limit", `görev genişleme sınırı aşıldı (en çok ${MAX_TASK_VISITS} görev ziyareti, ${MAX_BLOCK_DEPTH} iç içe blok; takma ad bombası/döngüsü?): tarama tamamlanamadı`, file);
+  };
 
   /** Hedefi ağaç içinde (sonek eşleşmesiyle) çözer ve VAR OLAN her adayı `visit` ile tarar; çözülemezse bulgu + false. */
   const follow = (label: string, target: string, site: Site, depth: number, visit: (path: string, depth: number) => boolean, skip?: ReadonlySet<string>): boolean => {
@@ -383,7 +438,7 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
     visitedTaskFiles.add(path);
     checkText(path);
     const p = parse(path);
-    if (p) visitTaskList(p.doc.contents, { file: path, doc: p.doc, lc: p.lc, depth });
+    if (p) visitTaskList(p.doc.contents, { file: path, doc: p.doc, lc: p.lc, depth }, 0);
     return true;
   };
 
@@ -400,14 +455,15 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
       const play = deref(x, p.doc);
       if (!isMap(play)) continue;
       const site: Site = { file: path, line: lineOf(play, ctx) };
-      for (const pair of play.items) {
-        const key = isScalar(pair.key) ? String(pair.key.value) : "";
+      const pairs = pairsOf(play, p.doc);
+      scopeCheckMode(pairs, ctx, "play", site.line ?? 0);
+      for (const { key, value } of pairs) {
         if (PLAY_TASK_LISTS.includes(key)) {
-          visitTaskList(pair.value, ctx);
+          visitTaskList(value, ctx, 0);
         } else if (key === "roles") {
-          visitRoleRefs(pair.value, ctx);
+          visitRoleRefs(value, ctx);
         } else if (PLAYBOOK_IMPORTS.has(normalizeModule(key))) {
-          const target = toJs(pair.value, ctx);
+          const target = toJs(value, ctx);
           if (isTemplated(target)) dynamic(site, "import_playbook");
           else if (typeof target !== "string" || target === "") unresolved(site, "import_playbook", "hedef yok");
           else follow(`import_playbook '${target.slice(0, 80)}'`, target, site, depth + 1, visitPlaybook);
@@ -452,7 +508,7 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
       const p = parse(mf);
       if (!p || !isMap(p.doc.contents)) continue;
       const ctx: Ctx = { file: mf, doc: p.doc, lc: p.lc, depth };
-      for (const pair of p.doc.contents.items) if (isScalar(pair.key) && pair.key.value === "dependencies") visitRoleRefs(pair.value, ctx);
+      for (const pair of pairsOf(p.doc.contents, p.doc)) if (pair.key === "dependencies") visitRoleRefs(pair.value, ctx);
     }
     return r;
   };
@@ -488,58 +544,79 @@ export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
     if (!isSeq(seq)) return;
     for (const raw of seq.items) {
       const item = deref(raw, ctx.doc);
-      const js = toJs(item, ctx);
       const site: Site = { file: ctx.file, line: lineOf(item, ctx) };
-      const name = isObj(js) ? (js["role"] ?? js["name"]) : js;
+      let name: unknown;
+      if (isMap(item)) {
+        const pairs = pairsOf(item, ctx.doc);
+        const last = (k: string): unknown => toJs(pairs.filter((p) => p.key === k).at(-1)?.value, ctx);
+        name = last("role") ?? last("name");
+        scopeCheckMode(pairs, ctx, "rol", site.line ?? 0);
+      } else {
+        name = toJs(item, ctx);
+      }
       if (isTemplated(name)) dynamic(site, "rol");
       else if (typeof name !== "string" || name === "") unresolved(site, "rol", "rol adı yok");
       else followRole(`rol '${name.slice(0, 80)}'`, name, undefined, undefined, site, ctx.depth + 1);
     }
   };
 
-  const visitTaskList = (seq: unknown, ctx: Ctx): void => {
-    if (!isSeq(seq)) return;
-    for (const raw of seq.items) {
+  const visitTaskList = (seq: unknown, ctx: Ctx, nest: number): void => {
+    const s = deref(seq, ctx.doc); // `tasks: *ortak` / `block: *ortak` (Ansible takma adı çözer)
+    if (!isSeq(s)) return;
+    for (const raw of s.items) {
       const item = deref(raw, ctx.doc);
-      if (isMap(item)) visitTask(item, ctx);
+      if (isMap(item)) visitTask(item, ctx, nest);
     }
   };
-  const visitTask = (m: YAMLMap, ctx: Ctx): void => {
-    const keys = m.items.map((p) => (isScalar(p.key) ? String(p.key.value) : ""));
-    for (const nested of ["block", "rescue", "always"]) {
-      const idx = keys.indexOf(nested);
-      if (idx >= 0) visitTaskList(m.items[idx]?.value, ctx);
+  const visitTask = (m: YAMLMap, ctx: Ctx, nest: number): void => {
+    if (++taskVisits > MAX_TASK_VISITS || nest > MAX_BLOCK_DEPTH) {
+      overLimit(ctx.file);
+      return;
     }
+    const pairs = pairsOf(m, ctx.doc);
+    const keys = pairs.map((p) => p.key);
+    const nodes = (k: string): unknown[] => pairs.filter((p) => p.key === k).map((p) => p.value);
+    /** Değer: yinelenen anahtarda SON geçiş (PyYAML/Ansible gibi). */
+    const get = (k: string): unknown => toJs(nodes(k).at(-1), ctx);
+    /** İşaret: anahtarın HERHANGİ bir geçişi koşulu sağlıyor mu (birleşim; güvenli yön)? */
+    const any = (k: string, pred: (v: unknown) => boolean): boolean => nodes(k).some((n) => pred(toJs(n, ctx)));
+    const line = lineOf(m, ctx);
+    let isBlock = false;
+    for (const nested of ["block", "rescue", "always"]) {
+      for (const n of nodes(nested)) {
+        isBlock = true;
+        visitTaskList(n, ctx, nest + 1);
+      }
+    }
+    if (isBlock) scopeCheckMode(pairs, ctx, "blok", line);
     const flags: string[] = [];
     let module: string;
     let args: unknown;
-    const get = (k: string): unknown => {
-      const i = keys.indexOf(k);
-      return i >= 0 ? m.items[i]?.value : undefined;
-    };
     const local = keys.includes("local_action");
     if (local || keys.includes("action")) {
-      ({ module, args } = actionForm(toJs(get(local ? "local_action" : "action"), ctx)));
+      ({ module, args } = actionForm(get(local ? "local_action" : "action")));
       if (local) flags.push("local_action");
     } else {
       const k = keys.find((x) => x !== "" && !TASK_KEYWORDS.has(x) && !x.startsWith("with_"));
       if (k === undefined) return; // görev değil (block vb.)
       module = k;
-      args = toJs(get(k), ctx);
+      args = get(k);
     }
     // `args:` anahtar sözcüğü modül argümanlarına eklenir (Ansible gibi)
-    const kw = toJs(get("args"), ctx);
+    const kw = get("args");
     if (isObj(kw) && (args === undefined || args === null || isObj(args))) args = { ...(isObj(args) ? args : {}), ...kw };
     const norm = normalizeModule(module);
     let cls = classOf(norm, args);
     if (local && cls !== "unclassified" && riskRank(cls) < riskRank("deploy")) cls = "deploy"; // denetleyicide yürütme en az deploy
-    const chk = toJs(get("check_mode"), ctx);
-    if (chk === false || chk === "no" || chk === "false") flags.push("check_mode_false");
-    const del = toJs(get("delegate_to"), ctx);
-    if (typeof del === "string" && /^(localhost|127\.0\.0\.1)$/.test(del)) flags.push("delegate_localhost");
-    if (toJs(get("become"), ctx) === true || toJs(get("become"), ctx) === "yes") flags.push("become");
+    if (any("check_mode", checkModeOff)) flags.push("check_mode_false");
+    // include_tasks/include_role `apply:` anahtar sözcükleri yüklenen görevlere uygulanır
+    const apply = isObj(args) ? args["apply"] : undefined;
+    if ((TASK_INCLUDES.has(norm) || ROLE_INCLUDES.has(norm)) && apply !== undefined && apply !== null && (!isObj(apply) || ("check_mode" in apply && checkModeOff(apply["check_mode"])))) {
+      if (!flags.includes("check_mode_false")) flags.push("check_mode_false");
+    }
+    if (any("delegate_to", (v) => typeof v === "string" && /^(localhost|127\.0\.0\.1)$/.test(v))) flags.push("delegate_localhost");
+    if (any("become", (v) => v === true || v === "yes")) flags.push("become");
     if (["command", "shell", "raw", "script"].includes(norm)) flags.push("arbitrary_command");
-    const line = lineOf(m, ctx);
     const site: Site = { file: ctx.file, line };
     let resolved: RiskClass = cls === "unclassified" ? "destroy" : cls;
     if (cls === "unclassified") {

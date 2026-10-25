@@ -110,6 +110,8 @@ describe.skipIf(!ok)("Ansible araçları (gerçek ansible + gerçek bubblewrap, 
       ["lookup_pipe", "- name: pipe\n  ansible.builtin.debug:\n    msg: \"{{ lookup('pipe', 'id') }}\"", "lookup_pipe"],
       ["unclassified", "- name: weird\n  community.unknown.thing:\n    a: 1", "module_unclassified"],
       ["dynamic_include", "- name: inc\n  ansible.builtin.include_tasks: \"{{ which }}.yml\"", "dynamic_include"],
+      ["block_check_mode", "- block:\n    - name: real\n      ansible.builtin.file:\n        path: /tmp/ops-should-not-exist\n        state: touch\n  check_mode: off", "check_mode_false"],
+      ["dup_check_mode", "- name: real\n  ansible.builtin.file:\n    path: /tmp/ops-should-not-exist\n    state: touch\n  check_mode: true\n  check_mode: false", "check_mode_false"],
     ];
     for (const [name, task, code] of cases) {
       const h = await makeIacHarness({ engine: "ansible", files: { "p.yml": mk(task) } });

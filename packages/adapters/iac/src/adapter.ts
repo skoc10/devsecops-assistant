@@ -589,7 +589,8 @@ export class IacAdapter implements Adapter {
     if (!an.model.playbooks.includes(playbook)) throw new OpsError("playbook_not_found", `'${playbook.slice(0, 120)}' bir playbook olarak bulunamadı (iac.project.inspect ile listeleyin)`);
     if (inventory !== undefined && !an.model.inventories.includes(inventory)) throw new OpsError("inventory_not_found", `'${inventory.slice(0, 120)}' statik bir envanter dosyası olarak bulunamadı (ansible.inventory.list ile listeleyin)`);
     const unsafe: { code: string; message: string; file?: string; line?: number }[] = [];
-    for (const f of an.findings) if (["lookup_pipe", "module_unclassified", "dynamic_include", "include_unresolved"].includes(f.code)) unsafe.push({ code: f.code, message: f.message, file: f.file, ...(f.line !== undefined ? { line: f.line } : {}) });
+    // görev düzeyi check_mode işarettir (aşağıda); play/blok/rol düzeyi kapsam bulgusu olarak gelir
+    for (const f of an.findings) if (["lookup_pipe", "module_unclassified", "dynamic_include", "include_unresolved", "check_mode_false"].includes(f.code)) unsafe.push({ code: f.code, message: f.message, file: f.file, ...(f.line !== undefined ? { line: f.line } : {}) });
     for (const t of an.tasks) if (t.flags.includes("check_mode_false")) unsafe.push({ code: "check_mode_false", message: `görev check modunda da GERÇEKTEN çalışır (${t.module})`, file: t.file, line: t.line });
     if (unsafe.length > 0) {
       return {

@@ -296,6 +296,73 @@ describe("scanAnsible: çözülemeyen veya şablonlu include/rol hedefi fail-clo
   });
 });
 
+describe("scanAnsible: check_mode kapsamı ve ayrıştırıcı farkları (Ansible/PyYAML ne görürse o)", () => {
+  it("check_mode değeri: açıkça doğru olmayan her yazım (off, NO, n, 0, f, şablon, null) güvensiz; doğru yazımlar zararsız", () => {
+    for (const v of ["false", "no", "NO", "off", "Off", "n", "N", "0", "f", "False", "'{{ ansible_check_mode and false }}'", "~", "''"]) {
+      expect(scan(`    - stat: { path: /x }\n      check_mode: ${v}`).tasks[0]?.flags, v).toContain("check_mode_false");
+    }
+    for (const v of ["true", "yes", "on", "1", "True", "'y'", "' YES '"]) {
+      expect(scan(`    - stat: { path: /x }\n      check_mode: ${v}`).tasks[0]?.flags, v).not.toContain("check_mode_false");
+    }
+  });
+
+  it("play, blok (iç içe dahil), rol girdisi ve meta bağımlılığı düzeyinde check_mode kapatma bulgu üretir; include apply görevi işaretler", () => {
+    const cases: [string, Record<string, string>][] = [
+      ["play", { "site.yml": "- hosts: all\n  check_mode: false\n  tasks:\n    - shell: id\n" }],
+      ["blok", { "site.yml": play("block:\n        - shell: id\n      check_mode: no") }],
+      ["iç içe blok", { "site.yml": play("block:\n        - block:\n            - shell: id\n          check_mode: off") }],
+      ["play rolü", { "site.yml": "- hosts: all\n  roles:\n    - { role: web, check_mode: false }\n", "roles/web/tasks/main.yml": "- shell: id\n" }],
+      ["meta bağımlılığı", { "roles/web/meta/main.yml": "dependencies:\n  - { role: db, check_mode: false }\n", "roles/db/tasks/main.yml": "- shell: id\n" }],
+    ];
+    for (const [label, files] of cases) {
+      expect(scanFiles(files).findings, label).toContainEqual(expect.objectContaining({ code: "check_mode_false", severity: "warn" }));
+    }
+    for (const task of ["include_tasks: { file: x.yml, apply: { check_mode: false } }", "include_role: { name: web, apply: { check_mode: no } }", 'include_tasks: { file: x.yml, apply: "{{ a }}" }']) {
+      const r = scanFiles({ "site.yml": play(task), "x.yml": "- debug: {}\n", "roles/web/tasks/main.yml": "- debug: {}\n" });
+      expect(r.tasks[0]?.flags, task).toContain("check_mode_false");
+    }
+    expect(scanFiles({ "site.yml": play("include_tasks: { file: x.yml, apply: { tags: [a] } }"), "x.yml": "- debug: {}\n" }).tasks[0]?.flags).toEqual([]);
+  });
+
+  it("yinelenen anahtar (PyYAML: son kazanır), birleştirme anahtarı (<<) ve takma ad anahtarı check_mode'u gizleyemez", () => {
+    expect(scan("    - shell: id\n      check_mode: true\n      check_mode: false").tasks[0]?.flags).toContain("check_mode_false");
+    const merge = scanFiles({ "site.yml": "- hosts: all\n  vars:\n    base: &base { check_mode: false, become: true }\n  tasks:\n    - shell: id\n      <<: *base\n" });
+    expect(merge.tasks[0]?.flags).toEqual(expect.arrayContaining(["check_mode_false", "become"]));
+    const mergedModule = scanFiles({ "site.yml": "- hosts: all\n  vars:\n    t: &t { shell: id, check_mode: false }\n  tasks:\n    - name: birleştirilmiş görev\n      <<: *t\n" });
+    expect(mergedModule.tasks[0]).toMatchObject({ module: "shell", class: "deploy" });
+    expect(mergedModule.tasks[0]?.flags).toContain("check_mode_false");
+    expect(mergedModule.findings.map((f) => f.code)).not.toContain("module_unclassified");
+    const aliasKey = scanFiles({ "site.yml": "- hosts: all\n  vars:\n    k: &k check_mode\n  tasks:\n    - shell: id\n      *k : false\n" });
+    expect(aliasKey.tasks[0]?.flags).toContain("check_mode_false");
+    const dupTasks = scanFiles({ "site.yml": "- hosts: all\n  tasks:\n    - debug: {}\n  tasks:\n    - shell: id\n      check_mode: false\n" });
+    expect(dupTasks.tasks.map((t) => [t.module, t.flags.includes("check_mode_false")])).toEqual([["debug", false], ["shell", true]]);
+  });
+
+  it("takma adlı görev listesi (tasks: *x, block: *x) taranır", () => {
+    const r = scanFiles({ "site.yml": "- hosts: all\n  vars:\n    evil: &evil\n      - shell: touch /tmp/pwned\n        check_mode: false\n  tasks: *evil\n  post_tasks:\n    - block: *evil\n" });
+    expect(r.tasks.map((t) => [t.module, t.flags.includes("check_mode_false")])).toEqual([["shell", true], ["shell", true]]);
+  });
+
+  it("görev listesinde takma ad bombası ve kendine başvuran blok taramayı kilitlemez: sınır aşılınca ENGEL (fail-closed)", () => {
+    const chr = (i: number): string => String.fromCharCode(97 + i);
+    const levels = ["a: &a {block: [{debug: {msg: x}}]}", ...Array.from({ length: 8 }, (_, i) => `${chr(i + 1)}: &${chr(i + 1)} {block: [${Array(9).fill(`*${chr(i)}`).join(", ")}]}`)];
+    const t0 = Date.now();
+    const bomb = scanFiles({ "site.yml": `- hosts: all\n  vars:\n${levels.map((l) => `    ${l}`).join("\n")}\n  tasks:\n    - *i\n` });
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(bomb.blocked).toBe(true);
+    expect(bomb.findings.map((f) => f.code)).toContain("task_limit");
+    const self = scanFiles({ "site.yml": "- hosts: all\n  tasks:\n    - &x\n      block:\n        - *x\n" });
+    expect(self.blocked).toBe(true);
+    expect(self.findings.map((f) => f.code)).toContain("task_limit");
+  });
+
+  it("lookup('lines'), query('ansible.legacy.pipe'), with_pipe ve with_lines da denetleyicide komut çalıştırır", () => {
+    for (const t of ["    - debug: { msg: \"{{ lookup('lines', 'id') }}\" }", "    - debug: { msg: \"{{ query('ansible.legacy.pipe', 'id') }}\" }", '    - debug: { msg: "{{ item }}" }\n      with_pipe: [id]', '    - debug: { msg: "{{ item }}" }\n      with_lines: cat /etc/passwd']) {
+      expect(codes(t), t).toContain("lookup_pipe");
+    }
+  });
+});
+
 describe("ansible.check güvenlik kapısı (adapter): yüklenen dosyalardaki yapı da çalıştırmayı engeller", () => {
   async function gate(files: Record<string, string>) {
     const dir = await mkdtemp(join(tmpdir(), "ops-iac-gate-"));
@@ -353,6 +420,24 @@ describe("ansible.check güvenlik kapısı (adapter): yüklenen dosyalardaki yap
       for (const pbName of ["clean.yml", "inc.yml"]) await expect(ok.check(pbName), pbName).rejects.toMatchObject({ code: expect.stringMatching(/^(tool_missing|sandbox_reached)$/) });
     } finally {
       await ok.cleanup();
+    }
+  });
+
+  it("blok/play düzeyinde check_mode kapatma ve yinelenen anahtarla gizlenen check_mode: false da ÇALIŞTIRMAYI ENGELLER", async () => {
+    const cases: Record<string, string>[] = [
+      { "site.yml": play("block:\n        - shell: id\n      check_mode: false") },
+      { "site.yml": "- hosts: all\n  check_mode: off\n  tasks:\n    - shell: id\n" },
+      { "site.yml": play("shell: id\n      check_mode: true\n      check_mode: false") },
+    ];
+    for (const files of cases) {
+      const g = await gate(files);
+      try {
+        const out = await g.check("site.yml");
+        expect(out.data, JSON.stringify(files)).toMatchObject({ executed: false, unsafe: true });
+        expect((out.data as { findings: { code: string }[] }).findings.map((f) => f.code)).toContain("check_mode_false");
+      } finally {
+        await g.cleanup();
+      }
     }
   });
 });
