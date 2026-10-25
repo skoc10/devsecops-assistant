@@ -4,15 +4,16 @@ import { parseArgs } from "node:util";
 import type { Readable, Writable } from "node:stream";
 import { generateReadOnlyRbac } from "@ops/adapter-kubernetes";
 import { FileAuditStorage, FileHeadAnchor, verifyAudit } from "@ops/audit";
-import { scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
+import { ensureAuditKey, scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
 import { ENVIRONMENTS, OpsError, RISK_CLASSES } from "@ops/contracts";
 import type { Environment, ModelProvider, RiskClass, SecretStore } from "@ops/contracts";
-import { ChangeStore, breakGlassBanner, formatUsage, renderBreakGlassReview, usageFromAudit } from "@ops/core";
+import { ChangeStore, breakGlassBanner, buildReplay, formatUsage, lastSessionId, renderBreakGlassReview, renderReplay, usageFromAudit } from "@ops/core";
+import type { WhatIfDeps } from "@ops/core";
 import { McpBridgeAdapter, parseMcpManifest } from "@ops/mcp-bridge";
 import { stripControlChars } from "@ops/redaction";
 import { WORKSPACE_ENGINES, WorkspaceManager, WorkspaceRegistry } from "@ops/workspace";
 import type { WorkspaceEngine } from "@ops/workspace";
-import { explainReason, parsePolicy } from "@ops/policy";
+import { PolicyEngine, explainReason, loadPolicyFile, parsePolicy } from "@ops/policy";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { readAuditRecords, LocalBackend } from "./backend.ts";
@@ -78,6 +79,7 @@ const USAGE = [
   "  doctor                             ortam kimlikleri ve sandbox durumu",
   "  audit verify                       denetim zincirini doğrula",
   "  usage                              token kullanım raporu (denetimden)",
+  "  replay [--session ID] [--policy DOSYA|current] [--verbose] [--json]   denetimden oturum incelemesi: eylem zaman çizelgesi + tutarlılık denetimi; --policy ile kayıtlı kararlar aday politikayla yeniden değerlendirilir (araç/model ÇAĞRILMAZ)",
   "  explain-policy [--last N | --code KOD]   reddedilen/sorulan çağrıları açıkla",
   "  provider list | set-key AD         sağlayıcıları listele / API anahtarını kasaya yaz (OPS_PROVIDER_KEY_FILE veya TTY)",
   "  workspace add --id ID --path DİZİN --engine terraform|opentofu|ansible [--write-paths g1,g2] [--deny-paths g1,g2] [--replace]",
@@ -665,6 +667,38 @@ export async function runCli(c: CliEnv): Promise<number> {
       case "usage": {
         out(c, formatUsage(usageFromAudit(await readAuditRecords(c.paths.auditLog))));
         return 0;
+      }
+
+      case "replay": {
+        const { values: rv } = parseArgs({ args: c.argv.slice(1), options: { session: { type: "string" }, policy: { type: "string" }, json: { type: "boolean" }, verbose: { type: "boolean" } }, strict: true });
+        return await withRuntime(c, async (rt) => {
+          // Bu komutun kendi oturumu hedef olamaz: kayıtlar çalışma zamanı açıldıktan sonra okunur
+          const all = await readAuditRecords(c.paths.auditLog);
+          const prior = all.filter((r) => r.sessionId !== rt.session.id);
+          const sessionId = rv.session && rv.session !== "last" ? rv.session : lastSessionId(prior, true);
+          if (!sessionId || !prior.some((r) => r.sessionId === sessionId)) throw new OpsError("usage", rv.session ? `oturum bulunamadı: ${rv.session.slice(0, 60)}` : "denetimde incelenecek önceki oturum yok");
+          let whatIf: WhatIfDeps | undefined;
+          if (rv.policy) {
+            const file = rv.policy === "current" ? ((await stat(c.paths.policyFile).then(() => true, () => false)) ? c.paths.policyFile : BUILTIN_POLICY_FILE) : resolve(rv.policy);
+            const engine = new PolicyEngine(await loadPolicyFile(file), { now: () => at });
+            let at = new Date();
+            whatIf = {
+              policyHash: engine.versionHash,
+              decide: (input, when) => {
+                at = when;
+                return engine.decide(input);
+              },
+              tool: (name) => rt.toolRegistry.get(name)?.def.descriptor,
+              profile: (id) => rt.registry.get(id),
+            };
+          }
+          const report = buildReplay(prior, { sessionId, ...(whatIf ? { whatIf } : {}) });
+          const key = await ensureAuditKey(rt.store);
+          const chain = await verifyAudit(new FileAuditStorage(c.paths.auditLog), key, new FileHeadAnchor(c.paths.auditAnchor));
+          const chainText = chain.ok ? `DOĞRU (${chain.records} kayıt)` : `BOZUK (${chain.problems.length} sorun: ${[...new Set(chain.problems.map((p) => p.code))].join(", ")}) — aşağıdaki zaman çizelgesine GÜVENMEYİN`;
+          out(c, rv.json ? JSON.stringify({ chain: { ok: chain.ok, records: chain.records }, ...report }, null, 2) : renderReplay(report, { verbose: rv.verbose === true, chain: chainText }));
+          return !chain.ok || report.anomalies.some((a) => a.severity === "high") ? 1 : 0;
+        });
       }
 
       case "workspace":

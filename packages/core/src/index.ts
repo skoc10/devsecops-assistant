@@ -35,3 +35,6 @@ export type { BreakGlassGrant } from "./session.ts";
 
 export { Quarantine, digestEvents, digestLog, parseModelSummary, quarantinedTools, KNOWN_EVENT_REASONS, LOG_SIGNALS } from "./quarantine.ts";
 export type { Digest, EventsDigest, LogDigest, LogSignal, ModelQuarantineDeps, ModelSummary, QuarantineInput, QuarantineMode, QuarantineOptions, QuarantineResult } from "./quarantine.ts";
+
+export { buildReplay, lastSessionId, renderReplay } from "./replay.ts";
+export type { ReplayAnomaly, ReplayEvent, ReplayReport, ReplayStats, WhatIfChange, WhatIfDeps } from "./replay.ts";

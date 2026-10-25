@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EnvironmentSchema, RiskClassSchema, TrustZoneSchema } from "./classes.ts";
+import { EnvironmentSchema, RiskClassSchema, SensitivitySchema, TrustZoneSchema } from "./classes.ts";
 import { POLICY_EFFECTS, REASON_CODES } from "./policy.ts";
 
 export const AUDIT_EVENTS = [
@@ -16,6 +16,23 @@ export const AUDIT_EVENTS = [
   "evidence_release",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
+
+/**
+ * Politika kararının GİRDİSİ (yeniden oynatma: `ops replay --policy`). Yalnız karar için gereken, hassas olmayan
+ * alanlar: bayraklar, hassasiyet sınıfları, profil kimlikleri ve kapsam adları. Araç, profil, ortam ve sınıf
+ * zaten kaydın kendi alanlarındadır.
+ */
+export const DecisionContextSchema = z.strictObject({
+  unclassified: z.boolean(),
+  sensitivity: SensitivitySchema,
+  tainted: z.boolean(),
+  maxSensitivity: SensitivitySchema,
+  profilesTouched: z.array(z.string().max(100)).max(16),
+  scopes: z.array(z.string().max(200)).max(16),
+  /** Karar anındaki profil sınıf tavanı (profil yoksa yok). */
+  ceiling: RiskClassSchema.optional(),
+});
+export type DecisionContext = z.infer<typeof DecisionContextSchema>;
 
 /**
  * Denetim kaydı alanları. Hiçbir alan ham secret veya ham çıktı taşımaz: `argsRedacted` ve
@@ -56,6 +73,7 @@ export const AuditBodySchema = z.strictObject({
     })
     .optional(),
   resultTokensEstimate: z.number().int().nonnegative().optional(),
+  decisionContext: DecisionContextSchema.optional(),
   message: z.string().optional(),
 });
 export type AuditBody = z.infer<typeof AuditBodySchema>;

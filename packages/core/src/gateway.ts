@@ -16,6 +16,7 @@ import type {
   AuditSink,
   CanonicalActionSummary,
   CredentialBroker,
+  DecisionContext,
   Lease,
   Profile,
   RawToolOutput,
@@ -102,6 +103,8 @@ interface CallState {
   target?: Target;
   cls?: RiskClass;
   breakGlass?: string;
+  /** Politika kararının girdisi (denetime yazılır; `ops replay --policy` yeniden değerlendirir). */
+  dctx?: DecisionContext;
 }
 
 /**
@@ -246,7 +249,16 @@ export class ToolGateway {
     // 5-6. Politika (bağlam etiketi/taint dahil)
     const effSens: Sensitivity = maxSensitivity(desc.sensitivity, reg.adapter.sensitivityOf?.(desc.name, args) ?? "none");
     const decision = policy.decide({ tool: desc, effectiveClass: cls, unclassified, profile, target, context: session.context, effectiveSensitivity: effSens });
-    if (decision.effect === "deny") return this.deny(st, decision.reasonCode, decision.detail);
+    st.dctx = {
+      unclassified,
+      sensitivity: effSens,
+      tainted: session.context.tainted,
+      maxSensitivity: session.context.maxSensitivity,
+      profilesTouched: session.context.profilesTouched.slice(0, 16),
+      scopes: (target?.scopes ?? []).slice(0, 16),
+      ...(profile ? { ceiling: profile.classCeiling } : {}),
+    };
+    if (decision.effect === "deny") return this.deny(st, decision.reasonCode, decision.detail, { policyDecision: true });
 
     // Egress ön denetimi: veri o sağlayıcıya gidemeyecekse çağrıyı hiç çalıştırma
     const futureCap = this.zoneCapFor(effSens, profile);
@@ -385,6 +397,7 @@ export class ToolGateway {
         ...(target ? { target: `${target.endpoint} [${target.scopes.join(",")}]` } : {}),
         decision: decision.effect,
         reasonCode: decision.reasonCode,
+        ...(st.dctx ? { decisionContext: st.dctx } : {}),
         ...(approvalId ? { approvalId } : {}),
         ...(req.citedEvidence?.length ? { message: `atıf: ${req.citedEvidence.slice(0, 10).join(",")}` } : {}),
         actionHash,
@@ -656,7 +669,7 @@ export class ToolGateway {
     return this.resultShell(st, "error", code, message);
   }
 
-  private async deny(st: CallState, code: ReasonCode, detail?: string, opts: { skipAudit?: boolean } = {}): Promise<ToolResult> {
+  private async deny(st: CallState, code: ReasonCode, detail?: string, opts: { skipAudit?: boolean; policyDecision?: boolean } = {}): Promise<ToolResult> {
     const { audit, session, policy } = this.d;
     const message = detail ? scrubText(detail, this.d.known) : code;
     if (!opts.skipAudit) {
@@ -672,6 +685,8 @@ export class ToolGateway {
           reasonCode: code,
           exitStatus: "denied",
           message,
+          // yalnız POLİTİKA motorunun reddi karar girdisini taşır (sonraki reddler — egress, atıf, onay — politika dışıdır)
+          ...(st.dctx && opts.policyDecision ? { decisionContext: st.dctx } : {}),
           policyVersionHash: policy.versionHash,
           trustZone: st.req.providerZone,
         });
