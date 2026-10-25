@@ -95,7 +95,7 @@ describe("opsd (UDS)", () => {
     c.close();
   });
 
-  it("onay/araç çağırma yöntemi bu soketten sunulmaz (yalnız sohbet ve yönetim)", async () => {
+  it("S-16: onay/araç çağırma yöntemi bu soketten sunulmaz (yalnız sohbet ve yönetim)", async () => {
     const c = await start(new ScriptedProvider([say("x")]));
     await expect(c.call("tool.invoke", { tool: "k8s.resources.list" })).rejects.toThrow(/bad_request/);
     await expect(c.call("approval.grant", { id: "x" })).rejects.toThrow(/bad_request/);
