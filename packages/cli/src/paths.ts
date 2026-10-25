@@ -12,6 +12,8 @@ export interface OpsPaths {
   readonly runDir: string;
   readonly socket: string;
   readonly userSkillsDir: string;
+  /** Kullanıcının runbook'ları (`<ad>.md`); yoksa `runbook.*` araçları kayıtlı olmaz. */
+  readonly runbooksDir: string;
   readonly policyFile: string;
   /** Kullanıcı komut kataloğu (yerleşiği GENİŞLETİR, geçersiz kılamaz). */
   readonly userCatalogFile: string;
@@ -40,6 +42,7 @@ export function resolvePaths(home: string = process.env["OPS_HOME"] ?? join(home
     runDir: join(home, "run"),
     socket: join(home, "run", "opsd.sock"),
     userSkillsDir: join(home, "skills"),
+    runbooksDir: join(home, "runbooks"),
     policyFile: join(home, "policy.yaml"),
     userCatalogFile: join(home, "command-catalog.yaml"),
     maskingFile: join(home, "masking.yaml"),

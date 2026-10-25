@@ -54,6 +54,11 @@ const ToolDescriptorBase = z.strictObject({
   typicalOutputTokens: z.number().int().nonnegative(),
   /** Bu aracın çalışabilmesi için profilde gereken asgari sınıf tavanı (ör. sunucu tarafı dry-run). */
   requiresCeiling: RiskClassSchema.optional(),
+  /**
+   * Aracın kendisi başka araçları çağırır (ör. `runbook.run`). Her iç çağrı yine TAM PEP boru hattından geçer
+   * (şema → ... → denetim); yalnız bu bayrağı taşıyan araçlara `AdapterCall.nested` verilir ve iç içe bileşik araç yoktur.
+   */
+  composite: z.boolean().optional(),
 });
 
 export const ToolDescriptorSchema = ToolDescriptorBase.superRefine((d, ctx) => {

@@ -44,7 +44,7 @@ export class ToolExecutor {
     this.d = deps;
   }
 
-  async execute(call: { id: string; name: string; args: unknown }, signal?: AbortSignal): Promise<ToolResult> {
+  async execute(call: { id: string; name: string; args: unknown }, signal?: AbortSignal, nested?: { parentCallId: string }): Promise<ToolResult> {
     const { gateway, registry, session, audit } = this.d;
     const reg = registry.get(call.name);
     let profileId: string | undefined;
@@ -86,6 +86,7 @@ export class ToolExecutor {
       providerZone: this.d.zone,
       provider: this.d.provider,
       ...(signal ? { signal } : {}),
+      ...(nested ? { parentCallId: nested.parentCallId } : {}),
     });
   }
 }

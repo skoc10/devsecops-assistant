@@ -3,3 +3,8 @@ export type { LoadOptions, Skill, SkillIssue, SkillTier } from "./registry.ts";
 export { createSkillAdapter } from "./adapter.ts";
 export { parseSkillMd, parseSidecar, SidecarSchema, SKILL_NAME } from "./parse.ts";
 export type { ParsedSkillMd, Sidecar } from "./parse.ts";
+export { lintSkillDir, lintSkillRoot, renderLint } from "./lint.ts";
+export type { LintContext, LintFinding, LintSeverity, LintedSkill, ScriptFile, SkillLint } from "./lint.ts";
+export { RUNBOOK_LIMITS, RunbookRegistry, parseRunbook, substituteArgs } from "./runbook.ts";
+export type { Runbook, RunbookIssue, RunbookStepDef } from "./runbook.ts";
+export { MAX_RUN_STEPS, buildPlan, createRunbookAdapter } from "./runbook-adapter.ts";

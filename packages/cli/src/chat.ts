@@ -52,6 +52,8 @@ export function renderEvent(e: OrchestratorEvent): string | null {
       if (e.status === "ok") return `  ✓ ${e.evidenceId ?? ""} ${safe(clip(e.summary, 160))} (${e.tokens} tok${e.byReference ? ", referansla" : ""})`.replace("  ✓  ", "  ✓ ");
       if (e.status === "denied") return `  ✗ REDDEDİLDİ [${safe(e.reasonCode ?? "policy_deny")}] ${safe(clip(e.summary, 200))}`;
       return `  ✗ HATA [${safe(e.reasonCode ?? "adapter_error")}] ${safe(clip(e.summary, 200))}`;
+    case "plan":
+      return safe(e.text);
     case "warning":
       return `⚠ ${safe(e.message)}`;
     case "text":

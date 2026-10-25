@@ -75,7 +75,7 @@ export function createSkillAdapter(
         const known = new Set(toolRegistry().all().map((t) => t.def.descriptor.toolset));
         const granted = s.sidecar.requests.toolsets.filter((t) => known.has(t));
         const missing = s.sidecar.requests.toolsets.filter((t) => !known.has(t));
-        const evicted = session.activateSkill({ name: s.name, tier: s.tier, body: s.body, tokens: s.tokens, toolsets: granted }, opts.maxActive ?? 2);
+        const evicted = session.activateSkill({ name: s.name, tier: s.tier, body: s.body, tokens: s.tokens, toolsets: granted, ...(s.sidecar.model_hint ? { modelHint: s.sidecar.model_hint } : {}) }, opts.maxActive ?? 2);
         return {
           data: { loaded: s.name, tier: s.tier, tokens: s.tokens, toolsets: granted, ...(missing.length ? { toolsetsMissing: missing } : {}), ...(evicted.length ? { evicted } : {}) },
           summary: `skill '${s.name}' yüklendi (${s.tokens} token)`,

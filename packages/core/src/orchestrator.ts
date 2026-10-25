@@ -11,6 +11,8 @@ import { formatForModel } from "./format.ts";
 import type { ToolGateway } from "./gateway.ts";
 import { DEFAULT_COMPACT, Ledger, compactMessages } from "./ledger.ts";
 import type { CompactOptions } from "./ledger.ts";
+import { renderRunbookPlan } from "./runbook.ts";
+import type { RunbookPlan } from "./runbook.ts";
 import { buildSystem } from "./prompt.ts";
 import type { SkillCatalog } from "./prompt.ts";
 import type { ToolRegistry } from "./registry.ts";
@@ -31,6 +33,7 @@ export type OrchestratorEvent =
       readonly reasonCode?: string;
     }
   | { readonly type: "usage"; readonly inputTokens: number; readonly outputTokens: number; readonly cacheReadTokens: number; readonly sessionTokens: number }
+  | { readonly type: "plan"; readonly text: string }
   | { readonly type: "warning"; readonly code: string; readonly message: string }
   | { readonly type: "text"; readonly text: string }
   | { readonly type: "final"; readonly text: string; readonly citations: CitationCheck; readonly toolCalls: number }
@@ -38,6 +41,12 @@ export type OrchestratorEvent =
 
 export interface OrchestratorDeps {
   readonly provider: ModelProvider;
+  /**
+   * İsteğe bağlı KÜÇÜK kademe sağlayıcı (token ekonomisi, D15 #7): etkin skill'lerin HEPSİ `model_hint: small`
+   * diyorsa tur bu sağlayıcıyla yürütülür; aksi halde `provider`. Egress aynı kuralla (bölge ≤ bağlamın sınırı)
+   * denetlenir; uygun değilse büyük kademe kullanılır.
+   */
+  readonly smallProvider?: ModelProvider;
   readonly gateway: ToolGateway;
   readonly registry: ToolRegistry;
   readonly session: Session;
@@ -71,19 +80,41 @@ export class Orchestrator {
     this.d = deps;
   }
 
-  private executor(zone: TrustZone): ToolExecutor {
+  private executor(zone: TrustZone, provider: ModelProvider = this.d.provider): ToolExecutor {
     return new ToolExecutor({
       gateway: this.d.gateway,
       registry: this.d.registry,
       session: this.d.session,
       audit: this.d.audit,
-      provider: { id: this.d.provider.id, model: this.d.provider.model },
+      provider: { id: provider.id, model: provider.model },
       zone,
     });
   }
 
+  private lastProviderKey: string | undefined;
+
+  /** Bu tur için sağlayıcı: yalnız küçük kademe yapılandırıldıysa VE etkin skill'lerin hepsi `small` diyorsa. */
+  private route(): ModelProvider {
+    const small = this.d.smallProvider;
+    if (!small) return this.d.provider;
+    const active = [...this.d.session.activeSkills.values()];
+    const wantSmall = active.length > 0 && active.every((s) => s.modelHint === "small");
+    return wantSmall && zoneAllows(small.capabilities.trustZone, this.d.session.context.zoneCap) ? small : this.d.provider;
+  }
+
   get history(): readonly Message[] {
     return this.messages;
+  }
+
+  private readPlan(evidenceId: string): RunbookPlan | null {
+    const e = this.d.evidence.get(evidenceId);
+    if (!e) return null;
+    try {
+      const j = JSON.parse(e.text) as Partial<RunbookPlan>;
+      return j && typeof j.name === "string" && Array.isArray(j.steps) ? (j as RunbookPlan) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Bir sonraki kullanıcı iletisine eklenecek sistem notları (ör. kullanıcı karantinadaki ham içeriği açtı). */
@@ -95,11 +126,12 @@ export class Orchestrator {
   }
 
   async *send(userText: string, signal?: AbortSignal): AsyncGenerator<OrchestratorEvent> {
-    const { provider, session, policy, audit, evidence, known, registry } = this.d;
+    const { session, policy, audit, evidence, known, registry } = this.d;
+    let provider = this.d.provider;
     const opts = this.d.options ?? {};
     const maxIter = opts.maxIterations ?? 12;
     const maxCite = opts.maxCitationRetries ?? 1;
-    const zone: TrustZone = provider.capabilities.trustZone;
+    let zone: TrustZone = provider.capabilities.trustZone;
 
     // Kullanıcı girdisi de M2/M3'ten geçer: yapıştırılan token modele/denetime gitmez.
     const text = scrubText(userText, known);
@@ -134,6 +166,16 @@ export class Orchestrator {
         yield { type: "warning", code: "budget_soft", message: "oturum token bütçesinin yumuşak eşiğine ulaşıldı" };
       }
 
+      // Model kademesi: bu tur için sağlayıcı (skill `model_hint`); değişirse sağlayıcıya özgü opak veri düşürülür.
+      provider = this.route();
+      zone = provider.capabilities.trustZone;
+      const key = `${provider.id}/${provider.model}`;
+      if (this.lastProviderKey !== undefined && this.lastProviderKey !== key) {
+        this.messages = this.messages.map((m) => (m.role === "assistant" && m.providerData !== undefined ? { role: "assistant" as const, content: m.content, ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}) } : m));
+        yield { type: "warning", code: "model_tier", message: `model kademesi değişti: ${key}` };
+      }
+      this.lastProviderKey = key;
+
       // Egress: bağlam bu sağlayıcıya gidemiyorsa model çağrılmaz (fail-closed).
       if (!zoneAllows(zone, session.context.zoneCap)) {
         const msg = `bağlam hassas veri içeriyor: sağlayıcı bölgesi '${zone}', verinin gidebileceği en uzak bölge '${session.context.zoneCap}'. Yerel sağlayıcı kullanın veya temiz bir oturum başlatın`;
@@ -148,6 +190,7 @@ export class Orchestrator {
         yield { type: "warning", code: "context_compacted", message: "eski turlar defter özetiyle değiştirildi" };
       }
       const system = buildSystem({
+        runbooks: registry.get("runbook.list") !== undefined,
         skills: this.d.skills?.metadata() ?? [],
         profiles: session.boundProfiles(),
         active: [...session.activeSkills.values()],
@@ -230,10 +273,10 @@ export class Orchestrator {
       const allRead = toolCalls.every((c) => registry.get(c.name)?.def.descriptor.class === "read");
       let results: ToolResult[];
       if (allRead) {
-        results = await Promise.all(toolCalls.map((c) => this.executor(zone).execute(c, signal)));
+        results = await Promise.all(toolCalls.map((c) => this.executor(zone, provider).execute(c, signal)));
       } else {
         results = [];
-        for (const c of toolCalls) results.push(await this.executor(zone).execute(c, signal));
+        for (const c of toolCalls) results.push(await this.executor(zone, provider).execute(c, signal));
       }
       for (let i = 0; i < toolCalls.length; i++) {
         const c = toolCalls[i] as ToolCall;
@@ -244,6 +287,11 @@ export class Orchestrator {
         if (r.evidenceId) {
           const e = evidence.get(r.evidenceId);
           if (e) this.ledger.noteEvidence({ id: e.id, tool: e.tool, summary: e.summary, subjects: e.subjects });
+        }
+        // Runbook planı KULLANICIYA gösterilir (yalnız araç sonucu özeti değil): ne çalışacağı çalışmadan önce görünür
+        if (c.name === "runbook.plan" && r.status === "ok" && r.evidenceId) {
+          const plan = this.readPlan(r.evidenceId);
+          if (plan) yield { type: "plan", text: renderRunbookPlan(plan) };
         }
         yield {
           type: "tool_result",

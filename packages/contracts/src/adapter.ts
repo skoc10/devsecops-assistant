@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RiskClass, Sensitivity } from "./classes.ts";
-import type { Taint } from "./result.ts";
+import type { Taint, ToolResult } from "./result.ts";
 import { CREDENTIAL_SOURCE_KINDS, ProfileKindSchema } from "./profile.ts";
 import type { Profile, Target } from "./profile.ts";
 import type { DoctorReport } from "./doctor.ts";
@@ -73,6 +73,12 @@ export interface AdapterCall {
   readonly limits: ToolLimits;
   /** Onaylanan hedef sürümü: adapter bunu yazma ön koşulu yapar (ör. `resourceVersion`); uyuşmazsa yazmaz. */
   readonly approvedVersion?: string;
+  /**
+   * YALNIZ `composite` araçlara verilir: başka bir aracı AYNI oturumda, AYNI sağlayıcı bölgesiyle ve tam PEP
+   * boru hattından geçirerek çağırır (etkin araç seti, profil enjeksiyonu, politika, onay, denetim, çıktı hattı).
+   * Sonuç, tek başına çağrılmış gibi `ToolResult`'tır (kanıt kimliği dahil).
+   */
+  readonly nested?: (call: { readonly tool: string; readonly args: unknown }) => Promise<ToolResult>;
 }
 
 /** Adapter'ın ham çıktısı; redaksiyon/kompaktlaştırma PEP çıktı hattında yapılır. */

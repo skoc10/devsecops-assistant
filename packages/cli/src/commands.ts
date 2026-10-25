@@ -16,6 +16,7 @@ import type { WorkspaceEngine } from "@ops/workspace";
 import { PolicyEngine, explainReason, loadPolicyFile, parsePolicy } from "@ops/policy";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
+import { RunbookRegistry, lintSkillRoot, renderLint } from "@ops/skills";
 import { readAuditRecords, LocalBackend } from "./backend.ts";
 import type { Sender } from "./backend.ts";
 import { OpsdClient } from "./client.ts";
@@ -25,7 +26,7 @@ import type { TtyIo } from "./approval.ts";
 import { parseDurationSec, reauthVaultPassphrase } from "./reauth.ts";
 import { DEFAULT_ALLOW_TTL_SEC, addRuleToText, buildAllowRule, parseTtlSec, policyHash, removeRuleFromText, renderPolicyDiff, renderRuleList } from "./policy-edit.ts";
 import { Opsd } from "./opsd.ts";
-import { BUILTIN_POLICY_FILE, ensureHome } from "./paths.ts";
+import { BUILTIN_POLICY_FILE, BUILTIN_SKILLS_DIR, ensureHome } from "./paths.ts";
 import type { OpsPaths } from "./paths.ts";
 import { readPassphrase } from "./prompt.ts";
 import { registerBuiltinProviders } from "./builtin-providers.ts";
@@ -87,12 +88,15 @@ const USAGE = [
   "  workspace diff ID [--session S] [--path P]      ajanın değişiklikleri (anlık kopya ↔ özgün HEAD)",
   "  workspace export ID --out DOSYA [--session S]   değişiklikleri `git apply` ile uygulanabilir yama olarak yaz (depoya YAZMAZ)",
   "  change list | show ID | export ID --out DOSYA   ajanın önerdiği değişiklikler (ChangeSet); uygulamak size aittir",
+  "  skill lint [DİZİN...] [--builtin] [--strict] [--json]   skill denetimi (B-02): ad/boyut/ön bilgi, görünmez Unicode, enjeksiyon/curl|sh/dış URL sezgileri, scripts/ hash'leri, pin için skill hash'i (varsayılan: OPS_HOME/skills)",
+  "  runbook list | lint               OPS_HOME/runbooks/<ad>.md runbook'ları (numaralı adımlar, `araç {json}` çağrıları) ve geçersiz olanların sebebi",
   "  mcp check [SUNUCU]                 OPS_HOME/mcp-servers.yaml sunucularını sandbox'ta başlatıp manifestle karşılaştır (araç çağırmaz)",
   "  break-glass --profile ID --ceiling mutate|deploy|destroy --ttl 30m --reason \"…\"   çalışan opsd oturumunda GEÇİCİ tavan yükseltme (yeniden kimlik doğrulama; sohbette /breakglass da olur)",
   "  break-glass end --profile ID | status | review [--session S]",
   "  policy list | allow --tool T --profile P [--scope a,b] [--ttl 8h] | add --effect ask|deny --id ID [--tool T --profile P --environment e,.. --class c,..] | rm ID   politika düzenleme (diff + TTY onayı + denetim)",
   "  daemon [--workspace ID] [--local-only] [--quarantine digest|model]   opsd'yi başlat (UDS)",
   "  chat [--embedded] [--workspace ID] [--local-only] [--quarantine digest|model]   sohbet (opsd'ye bağlanır; --embedded süreç içi). --local-only / OPS_EGRESS=local-only: yalnız yerel model + yalnız okuma",
+  "  (ortam) OPS_PROVIDER_SMALL_MODEL=MODEL  küçük kademe: tüm etkin skill'ler `model_hint: small` diyorsa tur bu modelle yürür (aksi halde ana model)",
   "  (ortam) OPS_QUARANTINE=digest|model  ham log/olay modele GİRMEZ, tipli özet gider (ham: sohbette /show, /raw); model: ek olarak araçsız şemalı model sınıflaması (OPS_QUARANTINE_MODEL=küçük model)",
   "  (ortam) OPS_WORKDIR=DİZİN          shell.run iş alanı (salt-okunur; OS sandbox gerekir; ev dizini olamaz)",
   "  (ortam) OPS_WORKSPACE=ID           etkin IaC çalışma alanı; OPS_TOOL_DIRS=d1:d2 terraform/tofu/ansible dizinleri; OPS_IAC_PROVIDER_MIRROR=DİZİN yerel sağlayıcı aynası",
@@ -159,7 +163,18 @@ async function engineFor(c: CliEnv, rt: Runtime, localOnly?: boolean, quarantine
     if (lo && qp.capabilities.trustZone !== "local") throw new OpsError("local_only", "egress: local-only kipinde karantina özetleyicisi de yerel olmalı");
     rt.attachQuarantineProvider(qp);
   }
-  return isAgentRuntime(sel) ? rt.createRuntimeOrchestrator(sel) : rt.createOrchestrator(sel);
+  if (isAgentRuntime(sel)) return rt.createRuntimeOrchestrator(sel);
+  // Küçük kademe (opt-in): OPS_PROVIDER_SMALL_MODEL ile aynı sağlayıcının ucuz modeli; yalnız tüm etkin skill'ler
+  // `model_hint: small` diyorsa kullanılır (yerleşik skill'lerin hepsi `large`).
+  let small: ModelProvider | undefined;
+  const sm = c.env["OPS_PROVIDER_SMALL_MODEL"];
+  if (sm && !c.provider) {
+    const made = await (c.providerFactory ?? createProvider)({ ...ctx, env: { ...c.env, OPS_PROVIDER_MODEL: sm, OPS_PROVIDER_TIER: "small" } });
+    if (isAgentRuntime(made)) throw new OpsError("usage", "OPS_PROVIDER_SMALL_MODEL ana model döngülü bir sağlayıcıyla kullanılamaz");
+    if (lo && made.capabilities.trustZone !== "local") throw new OpsError("local_only", "egress: local-only kipinde küçük kademe sağlayıcı da yerel olmalı");
+    small = made;
+  }
+  return rt.createOrchestrator(sel, undefined, small);
 }
 
 const list = (v: string | undefined): string[] => (v ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
@@ -308,6 +323,30 @@ async function workspaceCommand(c: CliEnv, sub: string | undefined, rest: string
     default:
       throw new OpsError("usage", "workspace alt komutu: add | list | rm | snapshots | diff | export");
   }
+}
+
+/** `ops skill lint [DİZİN...] [--builtin] [--strict] [--json]`: dosya sistemi denetimi; kasa/oturum GEREKTİRMEZ. */
+async function skillCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
+  if (sub !== "lint") throw new OpsError("usage", "skill alt komutu: lint [DİZİN...] [--builtin] [--strict] [--json]");
+  const { values, positionals } = parseArgs({ args: rest, options: { builtin: { type: "boolean" }, strict: { type: "boolean" }, json: { type: "boolean" } }, allowPositionals: true, strict: true });
+  const roots = [...positionals.map((p) => resolve(p)), ...(values.builtin ? [BUILTIN_SKILLS_DIR] : []), ...(positionals.length === 0 && !values.builtin ? [c.paths.userSkillsDir] : [])];
+  const results = (await Promise.all(roots.map((r) => lintSkillRoot(r)))).flat();
+  if (values.json) out(c, JSON.stringify(results, null, 2));
+  else out(c, results.length === 0 ? `(skill bulunamadı: ${roots.join(", ")})` : stripControlChars(renderLint(results)));
+  const bad = results.some((r) => !r.ok) || (values.strict === true && results.some((r) => r.findings.some((f) => f.severity === "warn")));
+  return bad ? 1 : 0;
+}
+
+/** `ops runbook list`: OPS_HOME/runbooks altındaki runbook'lar ve geçersiz olanların sebebi (kasa/oturum gerektirmez). */
+async function runbookCommand(c: CliEnv, sub: string | undefined): Promise<number> {
+  if (sub !== "list" && sub !== "lint") throw new OpsError("usage", "runbook alt komutu: list | lint");
+  const reg = await RunbookRegistry.load(c.paths.runbooksDir);
+  for (const r of reg.all()) {
+    out(c, `${r.name}\t${r.steps.length} adım (${r.steps.filter((s) => s.tool).length} araç)\t${stripControlChars(r.title).slice(0, 80)}`);
+  }
+  for (const i of reg.issues) out(c, `✗ ${stripControlChars(i.file)}: ${stripControlChars(i.problem)}`);
+  if (reg.count === 0 && reg.issues.length === 0) out(c, `(runbook yok: ${c.paths.runbooksDir}/<ad>.md)`);
+  return reg.issues.length > 0 ? 1 : 0;
 }
 
 async function changeCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
@@ -703,6 +742,12 @@ export async function runCli(c: CliEnv): Promise<number> {
 
       case "workspace":
         return await workspaceCommand(c, sub, rest);
+
+      case "skill":
+        return await skillCommand(c, sub, rest);
+
+      case "runbook":
+        return await runbookCommand(c, sub);
 
       case "change":
         return await changeCommand(c, sub, rest);

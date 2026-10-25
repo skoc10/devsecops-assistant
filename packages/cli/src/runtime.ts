@@ -28,7 +28,7 @@ import type { PolicyDocument } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
-import { SkillRegistry, createSkillAdapter } from "@ops/skills";
+import { RunbookRegistry, SkillRegistry, createRunbookAdapter, createSkillAdapter } from "@ops/skills";
 import { readAuditRecords } from "./backend.ts";
 import { BUILTIN_CATALOG_FILE, BUILTIN_POLICY_FILE, BUILTIN_SKILLS_DIR, ensureHome } from "./paths.ts";
 import type { OpsPaths } from "./paths.ts";
@@ -79,6 +79,8 @@ export interface Runtime {
   readonly gateway: ToolGateway;
   readonly policy: PolicyEngine;
   readonly skills: SkillRegistry;
+  /** Kullanıcının runbook'ları (boşsa `runbook.*` araçları kayıtlı değildir). */
+  readonly runbooks: RunbookRegistry;
   readonly adapter: KubernetesAdapter;
   readonly postgres: PostgresAdapter;
   readonly githubActions: GithubActionsAdapter;
@@ -100,7 +102,7 @@ export interface Runtime {
   diagnose(id: string): Promise<DoctorReport>;
   /** Profili doktordan geçirip oturuma bağlar; `bindable=false` ise BAĞLAMAZ. */
   bindProfile(id: string): Promise<DoctorReport>;
-  createOrchestrator(provider: ModelProvider, options?: ConstructorParameters<typeof Orchestrator>[0]["options"]): Orchestrator;
+  createOrchestrator(provider: ModelProvider, options?: ConstructorParameters<typeof Orchestrator>[0]["options"], smallProvider?: ModelProvider): Orchestrator;
   /** Sağlayıcı-döngülü çalışma zamanı (Cursor): araçlar yalnız PEP köprüsünden. */
   createRuntimeOrchestrator(runtime: AgentRuntime): RuntimeOrchestrator;
   close(): Promise<void>;
@@ -214,6 +216,13 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const skillAdapter = createSkillAdapter(skills, session, () => toolRegistry);
   toolRegistry.register(skillAdapter.adapter, skillAdapter.definitions);
 
+  // Runbook'lar: yalnız kullanıcının runbook'u varsa araçlar kaydedilir (yoksa sabit önekte tek token harcanmaz).
+  const runbooks = await RunbookRegistry.load(o.paths.runbooksDir);
+  if (runbooks.count > 0) {
+    const rb = createRunbookAdapter(runbooks, session, () => toolRegistry);
+    toolRegistry.register(rb.adapter, rb.definitions);
+  }
+
   // Etkin çalışma alanı: oturum kimliğiyle anlık kopya çıkarılır (yoksa/başarısızsa oturum BAŞLAMAZ).
   let workspaceNote = "yok";
   if (o.workspace) {
@@ -250,7 +259,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     event: "session_start",
     sessionId: session.id,
     policyVersionHash: policy.versionHash,
-    message: `egress=${o.localOnly ? "local-only" : "normal"} quarantine=${o.quarantine?.mode ?? "off"} sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
+    message: `egress=${o.localOnly ? "local-only" : "normal"} quarantine=${o.quarantine?.mode ?? "off"} runbooks=${runbooks.count} sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
   });
 
   const diagnoseWith = async (profile: Profile): Promise<{ report: DoctorReport; profile: Profile }> => {
@@ -300,6 +309,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     gateway,
     policy,
     skills,
+    runbooks,
     adapter,
     postgres,
     githubActions,
@@ -350,9 +360,10 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
       }
       return report;
     },
-    createOrchestrator(provider, options) {
+    createOrchestrator(provider, options, smallProvider) {
       return new Orchestrator({
         provider,
+        ...(smallProvider ? { smallProvider } : {}),
         gateway,
         registry: toolRegistry,
         session,

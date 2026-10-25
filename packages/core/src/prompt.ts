@@ -28,6 +28,9 @@ export const BASE_SYSTEM = [
   "7. İlgili skill'i skill.load ile yükle; runbook yoksa 'runbook bulunamadı, genel teşhis akışını kullanıyorum' de.",
 ].join("\n");
 
+const RUNBOOK_HINT =
+  "\n\nRunbook'lar var: soruya uyan olup olmadığını runbook.list ile bak; varsa runbook.plan ile planı çıkar (kullanıcıya gösterilir), okuma adımlarını runbook.run ile koştur, sonucu yorumla. Eşleşen yoksa 'runbook bulunamadı, genel teşhis akışını kullanıyorum' de.";
+
 export function skillMetadataBlock(skills: readonly SkillMeta[]): string {
   if (skills.length === 0) return "";
   const lines = [...skills]
@@ -37,6 +40,8 @@ export function skillMetadataBlock(skills: readonly SkillMeta[]): string {
 }
 
 export interface SystemInput {
+  /** Kullanıcının runbook'ları var mı (`runbook.list` kayıtlı)? Yoksa istem değişmez (token ekonomisi). */
+  readonly runbooks?: boolean;
   readonly skills: readonly SkillMeta[];
   readonly profiles: readonly Profile[];
   readonly active: readonly ActiveSkill[];
@@ -47,7 +52,7 @@ export interface SystemInput {
  * profiller, etkin skill gövdeleri). Değişken içerik hep sona eklenir: önek kararlı kalır.
  */
 export function buildSystem(inp: SystemInput): string {
-  const prefix = BASE_SYSTEM + skillMetadataBlock(inp.skills);
+  const prefix = BASE_SYSTEM + skillMetadataBlock(inp.skills) + (inp.runbooks ? RUNBOOK_HINT : "");
   const profiles =
     inp.profiles.length === 0
       ? "\n\nBağlı profil yok: kullanıcı /use ile bağlayana kadar kimlik gerektiren araçlar çalışmaz."

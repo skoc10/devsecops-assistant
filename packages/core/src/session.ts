@@ -15,6 +15,8 @@ export interface ActiveSkill {
   readonly tokens: number;
   /** Skill'in talep ettiği araç setleri (PEP yine her çağrıyı ayrıca karara bağlar). */
   readonly toolsets: readonly string[];
+  /** Sidecar `model_hint`: tüm etkin skill'ler `small` diyorsa ve küçük kademe sağlayıcı yapılandırıldıysa o tur küçük modele gider. */
+  readonly modelHint?: "small" | "large";
 }
 
 /** Geçici tavan yükseltmesi (break-glass): oturuma özgü, süreli, gerekçeli. */

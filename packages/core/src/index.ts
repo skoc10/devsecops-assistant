@@ -9,6 +9,8 @@ export type { RegisteredTool } from "./registry.ts";
 export { createLocalAdapter } from "./local-tools.ts";
 export { formatForModel } from "./format.ts";
 export { normalizeEndpoint } from "./url.ts";
+export { renderRunbookPlan } from "./runbook.ts";
+export type { RunbookPlan, RunbookPlanStep, RunbookStepStatus } from "./runbook.ts";
 export { Orchestrator } from "./orchestrator.ts";
 export type { OrchestratorDeps, OrchestratorEvent } from "./orchestrator.ts";
 export { Ledger, compactMessages, messagesTokens, DEFAULT_COMPACT } from "./ledger.ts";

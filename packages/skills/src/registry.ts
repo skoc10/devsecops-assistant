@@ -1,8 +1,8 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { estimateTokens } from "@ops/contracts";
 import type { SkillCatalog, SkillMeta } from "@ops/core";
-import { SKILL_NAME, parseSidecar, parseSkillMd } from "./parse.ts";
+import { LIMITS, lintSkillDir } from "./lint.ts";
 import type { Sidecar } from "./parse.ts";
 
 export type SkillTier = "builtin" | "user" | "imported";
@@ -24,7 +24,7 @@ export interface SkillIssue {
   readonly problem: string;
 }
 
-export const LIMITS = { bodyLines: 500, bodyTokens: 5_000, description: 1_024 } as const;
+export { LIMITS };
 
 export interface LoadOptions {
   readonly builtinDir?: string;
@@ -86,48 +86,26 @@ export class SkillRegistry implements SkillCatalog {
       } catch {
         continue;
       }
-      let md: string;
-      try {
-        md = await readFile(join(dir, "SKILL.md"), "utf8");
-      } catch {
-        continue; // SKILL.md yoksa skill değil
-      }
-      const problems: string[] = [];
-      let parsed;
-      try {
-        parsed = parseSkillMd(md);
-      } catch (e) {
-        this.issues.push({ dir, problem: (e as Error).message });
-        continue;
-      }
-      let sidecarText: string | undefined;
-      try {
-        sidecarText = await readFile(join(dir, "ops.skill.yaml"), "utf8");
-      } catch {
-        sidecarText = undefined;
-      }
-      const { sidecar, problems: sp } = parseSidecar(sidecarText);
-      problems.push(...sp);
-      if (!SKILL_NAME.test(parsed.name) || parsed.name.length > 64) problems.push("name küçük harf-rakam-tire olmalı (≤64)");
-      if (parsed.name !== dirName) problems.push(`name ('${parsed.name}') dizin adıyla ('${dirName}') aynı olmalı`);
-      if (!parsed.description) problems.push("description boş");
-      if (parsed.description.length > LIMITS.description) problems.push(`description ${LIMITS.description} karakteri aşıyor`);
-      const lines = parsed.body.split("\n").length;
-      const tokens = estimateTokens(parsed.body);
-      if (lines > LIMITS.bodyLines) problems.push(`gövde ${LIMITS.bodyLines} satırı aşıyor (${lines})`);
-      if (tokens > LIMITS.bodyTokens) problems.push(`gövde ${LIMITS.bodyTokens} token tahminini aşıyor (${tokens})`);
-      if (this.skills.has(parsed.name)) problems.push(`'${parsed.name}' adı zaten kayıtlı (${this.skills.get(parsed.name)?.tier}); yerleşik/önceki skill kazanır`);
-      if (problems.length > 0) {
+      // Denetim `ops skill lint` ile AYNI koddur (lint.ts): hata bulgusu olan skill yüklenmez, uyarılar yüklemeyi engellemez.
+      const linted = await lintSkillDir(dir, dirName);
+      if (!linted) continue; // SKILL.md yoksa skill değil
+      const problems = linted.lint.findings.filter((f) => f.severity === "error").map((f) => f.message);
+      const parsed = linted.parsed;
+      if (parsed && this.skills.has(parsed.name)) problems.push(`'${parsed.name}' adı zaten kayıtlı (${this.skills.get(parsed.name)?.tier}); yerleşik/önceki skill kazanır`);
+      if (problems.length > 0 || !parsed || !linted.sidecar) {
         for (const p of problems) this.issues.push({ dir, problem: p });
         continue;
       }
-      let hasScripts = false;
-      try {
-        hasScripts = (await stat(join(dir, "scripts"))).isDirectory();
-      } catch {
-        hasScripts = false;
-      }
-      this.skills.set(parsed.name, { name: parsed.name, description: parsed.description, body: parsed.body, tokens, tier, sidecar, hasScripts, dir });
+      this.skills.set(parsed.name, {
+        name: parsed.name,
+        description: parsed.description,
+        body: parsed.body,
+        tokens: linted.lint.tokens ?? estimateTokens(parsed.body),
+        tier,
+        sidecar: linted.sidecar,
+        hasScripts: linted.hasScripts,
+        dir,
+      });
     }
   }
 

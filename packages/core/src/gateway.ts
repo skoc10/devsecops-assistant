@@ -32,6 +32,7 @@ import type { PolicyEngine } from "@ops/policy";
 import { Counter, mapStrings, processOutput, scrubText } from "@ops/redaction";
 import type { KnownSecrets, MaskingRules } from "@ops/redaction";
 import type { EvidenceStore } from "./evidence.ts";
+import { ToolExecutor } from "./executor.ts";
 import type { Quarantine, QuarantineResult } from "./quarantine.ts";
 import type { ToolRegistry } from "./registry.ts";
 import type { Session } from "./session.ts";
@@ -80,6 +81,8 @@ export interface InvokeRequest {
   readonly providerZone: TrustZone;
   readonly provider?: { readonly id: string; readonly model: string };
   readonly signal?: AbortSignal;
+  /** Bu çağrı bir `composite` aracın iç çağrısıdır (üst çağrı kimliği); iç içe bileşik araç çağrılamaz. */
+  readonly parentCallId?: string;
 }
 
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
@@ -152,6 +155,9 @@ export class ToolGateway {
     const desc = reg.def.descriptor;
     st.desc = desc;
 
+    if (desc.composite && req.parentCallId !== undefined) {
+      return this.deny(st, "policy_deny", "iç içe bileşik araç çağrılamaz (bileşik araç yalnız doğrudan modelden gelir)");
+    }
     if (this.d.localOnly && req.providerZone !== "local") {
       return this.deny(st, "local_only", `egress: local-only kipinde yalnız yerel sağlayıcı kullanılır (sağlayıcı bölgesi '${req.providerZone}')`);
     }
@@ -399,7 +405,9 @@ export class ToolGateway {
         reasonCode: decision.reasonCode,
         ...(st.dctx ? { decisionContext: st.dctx } : {}),
         ...(approvalId ? { approvalId } : {}),
-        ...(req.citedEvidence?.length ? { message: `atıf: ${req.citedEvidence.slice(0, 10).join(",")}` } : {}),
+        ...(req.citedEvidence?.length || req.parentCallId
+          ? { message: [req.citedEvidence?.length ? `atıf: ${req.citedEvidence.slice(0, 10).join(",")}` : "", req.parentCallId ? `iç çağrı (üst: ${req.parentCallId})` : ""].filter(Boolean).join("; ") }
+          : {}),
         actionHash,
         argsRedacted,
         policyVersionHash: policy.versionHash,
@@ -447,7 +455,7 @@ export class ToolGateway {
     const timer = setTimeout(() => ac.abort(), desc.limits.timeoutMs);
     try {
       raw = await Promise.race([
-        reg.adapter.invoke({ tool: desc.name, args, profile: profile ?? (undefined as never), handle: lease?.handle ?? null, callId: st.callId, signal: ac.signal, limits: desc.limits, ...(preview?.targetVersion !== undefined ? { approvedVersion: preview.targetVersion } : {}) }),
+        reg.adapter.invoke({ tool: desc.name, args, profile: profile ?? (undefined as never), handle: lease?.handle ?? null, callId: st.callId, signal: ac.signal, limits: desc.limits, ...(preview?.targetVersion !== undefined ? { approvedVersion: preview.targetVersion } : {}), ...(desc.composite ? { nested: (c) => this.invokeNested(req, st.callId, c, ac.signal) } : {}) }),
         new Promise<never>((_, reject) => {
           ac.signal.addEventListener("abort", () => reject(new OpsError("timeout", "araç zaman aşımına uğradı veya iptal edildi")), { once: true });
         }),
@@ -572,6 +580,22 @@ export class ToolGateway {
       subjects,
       tokens: { estimate: quarantined ? viewTokens : processed.byReference ? processed.fullTokens : processed.tokens },
     };
+  }
+
+  /**
+   * Bileşik aracın iç çağrısı: AYNI oturum, AYNI sağlayıcı bölgesi/etiketi, tam PEP (etkin araç seti ve profil
+   * enjeksiyonu dahil — ToolExecutor). İç çağrılar kendi denetim kayıtlarını yazar ve üst çağrıya `parentCallId` ile bağlanır.
+   */
+  private invokeNested(parent: InvokeRequest, parentCallId: string, call: { readonly tool: string; readonly args: unknown }, signal: AbortSignal): Promise<ToolResult> {
+    const ex = new ToolExecutor({
+      gateway: this,
+      registry: this.d.registry,
+      session: this.d.session,
+      audit: this.d.audit,
+      provider: parent.provider ?? { id: "-", model: "-" },
+      zone: parent.providerZone,
+    });
+    return ex.execute({ id: `${parentCallId}/${call.tool}`, name: call.tool, args: call.args }, signal, { parentCallId });
   }
 
   /** Tek önizleme çağrısı (zaman aşımı + iptal). Hata mesajı döner, atmaz. */
