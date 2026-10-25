@@ -105,9 +105,10 @@ export class PolicyEngine {
       baseAskFromClass = true;
     }
 
-    // 4. Ask kuralları sıkılaştırır
+    // 4. Ask kuralları sıkılaştırır (deny > ask > allow). Taban zaten `ask` olsa da kural kayda geçer:
+    // aşağıdaki dar allow onu gevşetemez, oturum yazma izni (`approval_required`'a bağlı) onu atlayamaz.
     const askRule = matching.find((r) => r.effect === "ask");
-    if (askRule && effect === "allow") {
+    if (askRule) {
       effect = "ask";
       reason = "policy_ask";
       detail = `kural: ${askRule.id}`;
@@ -119,7 +120,7 @@ export class PolicyEngine {
 
     // 6. Dar allow kuralı yalnız sınıf kaynaklı taban `ask`'ı gevşetebilir (yalnız mutate, taint dışı)
     // prod'da "hep izin" YOK: kural eşleşse bile (şema yalnız when.environment'ı yasaklar) mutasyon her zaman sorar.
-    if (effect === "ask" && baseAskFromClass && cls === "mutate" && tool.scope === "target" && !escalation && profile?.environment !== "prod") {
+    if (effect === "ask" && baseAskFromClass && !askRule && cls === "mutate" && tool.scope === "target" && !escalation && profile?.environment !== "prod") {
       const allowRule = matching.find((r) => r.effect === "allow");
       if (allowRule) return mk("allow", "allowed", `kural: ${allowRule.id}`);
     }
