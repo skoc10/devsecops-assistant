@@ -3,7 +3,13 @@ import { runCli } from "./commands.ts";
 import { resolvePaths } from "./paths.ts";
 
 const abort = new AbortController();
-process.on("SIGINT", () => abort.abort());
+// İlk Ctrl-C: süren iş (sohbet turu / daemon) düzgünce durdurulur. İkincisi: takılmış istem ne olursa olsun çık.
+let interrupts = 0;
+process.on("SIGINT", () => {
+  interrupts += 1;
+  if (interrupts > 1) process.exit(130);
+  abort.abort();
+});
 process.on("SIGTERM", () => abort.abort());
 
 const code = await runCli({

@@ -792,7 +792,7 @@ export async function runCli(c: CliEnv): Promise<number> {
         if (embedded) {
           const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
           await withRuntime(c, async (rt) => {
-            await runChat(new LocalBackend(rt, await engineFor(c, rt, cv["local-only"], cq)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events, reauth: makeReauth(c) });
+            await runChat(new LocalBackend(rt, await engineFor(c, rt, cv["local-only"], cq)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events, reauth: makeReauth(c), ...(c.stop ? { stop: c.stop } : {}) });
             out(c, gate.summaryLine());
           }, gate, cv.workspace, cv["local-only"], cq);
           return 0;
@@ -806,7 +806,7 @@ export async function runCli(c: CliEnv): Promise<number> {
           const info = await client.ping();
           if (isLocalOnly(c, cv["local-only"]) && !info.localOnly) throw new OpsError("local_only", "istenen `local-only` kipi çalışan opsd'de KAPALI: `ops daemon --local-only` ile yeniden başlatın");
           if (cq && info.quarantine !== cq && !(cq === "digest" && info.quarantine === "model")) throw new OpsError("usage", `istenen karantina kipi '${cq}' ama çalışan opsd '${info.quarantine}': \`ops daemon --quarantine ${cq}\` ile yeniden başlatın`);
-          await runChat(client, { input: c.io.input, output: c.io.output }, { reauth: makeReauth(c) });
+          await runChat(client, { input: c.io.input, output: c.io.output }, { reauth: makeReauth(c), ...(c.stop ? { stop: c.stop } : {}) });
         } finally {
           client.close();
         }
