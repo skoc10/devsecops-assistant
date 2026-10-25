@@ -154,7 +154,7 @@ async function engineFor(c: CliEnv, rt: Runtime, localOnly?: boolean, quarantine
   if (lo) {
     // Sağlayıcı seçimi sırasında erken ret (PEP ayrıca her çağrıda zorlar): bağlam bulut modele HİÇ gitmez.
     if (isAgentRuntime(sel)) throw new OpsError("local_only", "egress: local-only kipinde sağlayıcı-döngülü çalışma zamanı (Cursor) kullanılamaz: model barındırması dış");
-    if (sel.capabilities.trustZone !== "local") throw new OpsError("local_only", `egress: local-only kipinde yalnız yerel (local) sağlayıcı kullanılır; '${sel.id}' bölgesi '${sel.capabilities.trustZone}'. Yerel uç için OPS_PROVIDER_URL=http://127.0.0.1:… ayarlayın`);
+    if (sel.capabilities.trustZone !== "local") throw new OpsError("local_only", `egress: local-only kipinde yalnız yerel (local) sağlayıcı kullanılır; '${sel.id}' bölgesi '${sel.capabilities.trustZone}'. Yerel uç için OPS_PROVIDER_BASE_URL=http://127.0.0.1:… ayarlayın`);
   }
   if (quarantine === "model" && !isAgentRuntime(sel)) {
     // Karantina özetleyicisi: AYRI bir sağlayıcı örneği (ana örneğin konuşma durumu — ör. Anthropic'in düşünme bloğu

@@ -28,6 +28,7 @@ describe("egress: local-only (CLI)", () => {
       const a = await chat(zone, ["--local-only"]);
       expect(a.code, zone).toBe(1);
       expect(a.err).toMatch(/local_only: egress: local-only kipinde yalnız yerel/);
+      expect(a.err).toContain("OPS_PROVIDER_BASE_URL=http://127.0.0.1"); // ipucu gerçekten okunan değişkeni söyler
       const b = await chat(zone, [], { OPS_EGRESS: "local-only" });
       expect(b.code).toBe(1);
       expect(b.err).toMatch(/local_only/);
