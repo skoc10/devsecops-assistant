@@ -14,10 +14,16 @@ concurrency:
 
 jobs:
   test:
+    name: test (node ${{ matrix.node }})
     # Etiket sabit: `ubuntu-latest` Ubuntu 26'ya taşınıyor (AppArmor/bubblewrap/PostgreSQL sürümleri değişir).
     # Geçiş bilinçli yapılmalı; aşağıdaki "atlanan test yok" adımı sessiz kapsam kaybını yakalar.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # package.json `engines`: ^22.18.0 || >=24 → iki ana sürüm de koşar (22 = .nvmrc). Biri düşerse diğeri iptal edilmez.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
     steps:
       # Eylemler tam commit SHA'sıyla sabitlendi (etiket taşınabilir); güncellemeleri Dependabot önerir.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,8 +32,9 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .nvmrc
+          node-version: ${{ matrix.node }}
           cache: pnpm
+      - run: node --version
       # Bağımlılık yaşam-döngüsü scriptleri kapalı (pnpm-workspace.yaml: onlyBuiltDependencies: [], strictDepBuilds)
       - run: pnpm install --frozen-lockfile
       # Gerçek OS sandbox testleri (S-15) için bubblewrap. Ubuntu 24.04 runner'larında AppArmor
@@ -66,6 +73,57 @@ jobs:
       # doğrulanmamış bir "Enforced" iddiası demektir → iş başarısız olur.
       - name: Atlanan test yok
         run: node .github/scripts/assert-no-skipped-tests.mjs "$RUNNER_TEMP/vitest-report.json"
+
+  # Gerçek Kubernetes kümesi (kind): k8s adapter'ının sahte API'nin göremediği davranışları — gerçek RBAC
+  # (SelfSubjectRulesReview), server-side apply alan sahipliği, resourceVersion/uid ön koşulları, json-patch `test`,
+  # Pod Security admission, Table biçimi, olay/log uçları — `packages/**/test/*.kind.test.ts` sınar. Ürün kimliği
+  # ServiceAccount token'lı kubeconfig'ten `ops profile add k8s` ile izole OPS_HOME'a alınır; yönetici kubeconfig'i
+  # yalnız test kurulumu içindir. Küme yoksa testler atlanır → aşağıdaki kapı işi düşürür.
+  kind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # kind ikilisi sürüm + sha256 pinli (yayıncının kind-linux-amd64.sha256sum dosyasıyla eşleştirildi; imza doğrulaması yok).
+      KIND_VERSION: v0.33.0
+      KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+      # Düğüm imajı özetle pinli (kind v0.33.0 sürüm notlarındaki varsayılan imaj; Docker Hub etiket özetiyle aynı).
+      KIND_NODE_IMAGE: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: kind (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/kind-bin"; mkdir -p "$T"
+          curl -fsSL -o "$T/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  $T/kind" | sha256sum -c -
+          chmod +x "$T/kind"
+          echo "$T" >> "$GITHUB_PATH"
+      - name: Küme oluştur
+        run: |
+          set -euo pipefail
+          KC="$RUNNER_TEMP/kind-admin.kubeconfig"
+          kind create cluster --name ops-it --image "$KIND_NODE_IMAGE" --wait 180s --kubeconfig "$KC"
+          chmod 600 "$KC"
+          kind version
+          echo "OPS_TEST_KUBECONFIG=$KC" >> "$GITHUB_ENV"
+      - run: pnpm exec vitest run --config vitest.kind.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-kind-report.json"
+      # Küme kurulamazsa veya OPS_TEST_KUBECONFIG kaybolursa testler atlanır: gerçek küme iddiası doğrulanmamış olur → iş düşer.
+      - name: Atlanan test yok
+        run: node .github/scripts/assert-no-skipped-tests.mjs "$RUNNER_TEMP/vitest-kind-report.json"
+      - name: Küme tanılama (yalnız hata durumunda)
+        if: failure()
+        run: |
+          kubectl --kubeconfig "$OPS_TEST_KUBECONFIG" get nodes,namespaces -o wide || true
+          kubectl --kubeconfig "$OPS_TEST_KUBECONFIG" get events -A --sort-by=.metadata.creationTimestamp | tail -n 100 || true
+          kubectl --kubeconfig "$OPS_TEST_KUBECONFIG" get deploy,rs,pods -A -o wide | grep -v kube-system || true
 
   audit:
     runs-on: ubuntu-24.04

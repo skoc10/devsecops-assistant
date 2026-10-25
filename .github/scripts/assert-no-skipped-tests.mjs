@@ -1,5 +1,5 @@
 // CI kapısı: vitest JSON raporunda atlanan (skip/todo) test varsa çıkış 1.
-// Sandbox, gerçek PostgreSQL ve IaC testleri ortam eksikse kendini atlar; CI'da bu sessiz kapsam kaybıdır.
+// Sandbox, gerçek PostgreSQL, IaC ve gerçek küme (kind) testleri ortam eksikse kendini atlar; CI'da bu sessiz kapsam kaybıdır.
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
 
@@ -21,7 +21,7 @@ if (total === 0) {
   process.exit(1);
 }
 if (skipped.length > 0) {
-  console.error(`::error::${skipped.length} test atlandı (CI ortamı eksik: bubblewrap / PostgreSQL / IaC araçları?)`);
+  console.error(`::error::${skipped.length} test atlandı (CI ortamı eksik: bubblewrap / PostgreSQL / IaC araçları / kind kümesi — OPS_TEST_KUBECONFIG?)`);
   for (const s of skipped) console.error(`  - ${s}`);
   process.exit(1);
 }
