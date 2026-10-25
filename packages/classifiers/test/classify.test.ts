@@ -227,7 +227,9 @@ describe("özellik testleri (fast-check)", () => {
       fc.property(anyChar, (s) => {
         const r = parseShell(s);
         if (!r.ok) return true;
-        const stripped = s.replace(/'[^']*'/g, "").replace(/"[^"$`\\!]*"/g, "");
+        // Tırnaklar soldan sağa TEK geçişte atılır (kabuk gibi): önce tümüyle tek, sonra çift tırnak atmak, çift tırnak
+        // içindeki `'`'yi sonraki `'` ile eşleyip doğru ayrıştırmayı yanlış "tehlikeli" sayıyordu (`")'"''` → argv [")'"]).
+        const stripped = s.replace(/'[^']*'|"[^"$`\\!]*"/g, "");
         const noConnectors = stripped.replace(/&&/g, "").replace(/\|\|/g, "");
         return !DANGEROUS.some((d) => noConnectors.includes(d));
       }),
