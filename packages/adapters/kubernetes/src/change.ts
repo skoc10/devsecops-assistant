@@ -149,6 +149,25 @@ function project(live: unknown, want: unknown): unknown {
     for (const k of Object.keys(want)) if (k in live) out[k] = project(live[k], want[k]);
     return out;
   }
+  // Diziler de öğe öğe izdüşürülür: gerçek API sunucusu öğelere varsayılan alan ekler (kapsayıcıda imagePullPolicy,
+  // terminationMessagePath, resources: {} …). Dizi bütün alınınca bu alanlar her diff'te "silinecek" görünüyor ve
+  // değişmemiş iş yükü bile "değişti" sayılıyordu (kind'da bulundu; sahte API varsayılan eklemez). Anahtarlı listeler
+  // (containers, env, volumes … — her öğede `name`) ada göre, diğerleri sıraya göre eşlenir; istenende olmayan canlı
+  // öğeler KORUNUR (olası silme görünür kalsın).
+  if (Array.isArray(want) && Array.isArray(live)) {
+    const named = (xs: unknown[]): boolean => xs.length > 0 && xs.every((x) => isObj(x) && typeof x["name"] === "string");
+    if (named(want) && named(live)) {
+      const byName = new Map(live.map((l) => [(l as Obj)["name"] as string, l]));
+      const wanted = new Set(want.map((w) => (w as Obj)["name"] as string));
+      const out = want.flatMap((w) => {
+        const l = byName.get((w as Obj)["name"] as string);
+        return l === undefined ? [] : [project(l, w)];
+      });
+      for (const l of live) if (!wanted.has((l as Obj)["name"] as string)) out.push(l);
+      return out;
+    }
+    return live.map((l, i) => (i < want.length ? project(l, want[i]) : l));
+  }
   return live;
 }
 

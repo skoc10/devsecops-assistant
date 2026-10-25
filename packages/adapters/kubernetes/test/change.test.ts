@@ -68,8 +68,9 @@ describe("k8s.apply.diff (yalnız okuma)", () => {
     expect(j.diff).toContain("+  replicas: 3");
     expect(j.diff).toContain("registry.test.invalid/web:2.0");
     expect(j.impact).toContain("replika 2 → 3");
-    expect(JSON.stringify(j)).not.toContain("plaintext-live-pw"); // canlı env düz değeri maskelenir
-    expect(JSON.stringify(j)).toContain("redacted:env");
+    expect(JSON.stringify(j)).not.toContain("plaintext-live-pw"); // canlı env düz değeri diff'e girmez
+    // manifestin değinmediği canlı alanlar (başka yöneticinin env'i) diff'te "silinecek" diye GÖSTERİLMEZ
+    expect(j.diff).not.toContain("DB_PASSWORD");
     expect(writes(h)).toEqual([]);
     expect(gate.requests).toHaveLength(0);
   });
@@ -91,6 +92,44 @@ describe("k8s.apply.diff (yalnız okuma)", () => {
     expect(exact).toMatchObject({ exists: true, changed: false });
     expect(exact.impact[0]).toMatch(/değişiklik yok/);
     void same;
+  });
+
+  it("sunucunun öğelere eklediği varsayılan alanlar diff'te 'silinecek' görünmez; değişmemiş iş yükü 'değişiklik yok' (kind'da bulundu)", async () => {
+    const { h } = await setup("read");
+    // gerçek API sunucusunun kapsayıcı/şablon varsayılanları
+    h.api.add({
+      kind: "Deployment",
+      metadata: { name: "defaulted", namespace: NS, resourceVersion: "11", uid: "u-def", labels: { app: "web" } },
+      spec: {
+        replicas: 3,
+        revisionHistoryLimit: 10,
+        progressDeadlineSeconds: 600,
+        strategy: { type: "RollingUpdate", rollingUpdate: { maxSurge: "25%", maxUnavailable: "25%" } },
+        selector: { matchLabels: { app: "web" } },
+        template: {
+          metadata: { labels: { app: "web" } },
+          spec: {
+            restartPolicy: "Always",
+            dnsPolicy: "ClusterFirst",
+            containers: [{ name: "web", image: "registry.test.invalid/web:2.0", imagePullPolicy: "IfNotPresent", terminationMessagePath: "/dev/termination-log", terminationMessagePolicy: "File", resources: {} }],
+          },
+        },
+      },
+    } as K8sObject);
+    const same = h.evidenceJson(await h.call("k8s.apply.diff", { manifest: MANIFEST().replace("name: web\n  namespace", "name: defaulted\n  namespace") }));
+    expect(same, same.diff).toMatchObject({ exists: true, changed: false });
+    // gerçek değişiklik yine görünür; ikinci kapsayıcı (manifestte yok) silinecek olarak gösterilir
+    const changed = h.evidenceJson(await h.call("k8s.apply.diff", { manifest: MANIFEST("registry.test.invalid/web:3.0").replace("name: web\n  namespace", "name: defaulted\n  namespace") }));
+    expect(changed.diff).toContain("-        - image: registry.test.invalid/web:2.0");
+    expect(changed.diff).toContain("+        - image: registry.test.invalid/web:3.0");
+    expect(changed.diff).not.toMatch(/imagePullPolicy|terminationMessage|restartPolicy/);
+    h.api.mutate("Deployment", NS, "defaulted", (o) => {
+      const c = ((o["spec"] as any).template.spec.containers as any[]);
+      c.push({ name: "sidecar", image: "registry.test.invalid/side:1" });
+    });
+    const extra = h.evidenceJson(await h.call("k8s.apply.diff", { manifest: MANIFEST().replace("name: web\n  namespace", "name: defaulted\n  namespace") }));
+    expect(extra.changed).toBe(true);
+    expect(extra.diff).toContain("-        - image: registry.test.invalid/side:1");
   });
 
   it("riskli pod ayarları etki satırlarında işaretlenir", async () => {
@@ -420,7 +459,8 @@ describe("k8s.apply", () => {
     expect(r.status, JSON.stringify(r)).toBe("ok");
     const shown = JSON.stringify(gate.requests[0]!.summary);
     expect(shown).not.toContain("plaintext-live-pw");
-    expect(shown).toContain("redacted:env");
+    // istenen DB_PASSWORD (valueFrom) canlıdaki aynı adlı öğeyle eşlenir; canlı düz değer izdüşüme girmez
+    expect(gate.requests[0]!.summary.preview?.diff).toContain("secretKeyRef");
     const sink = await h.sinkFor([r]);
     expect(sink.text()).not.toContain("plaintext-live-pw");
   });
