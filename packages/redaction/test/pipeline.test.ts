@@ -161,6 +161,16 @@ describe("B-03: referansla taşıma ve token tavanı", () => {
     expect(out.viewText).not.toContain("example.invalid");
     expect(out.redactions.some((r) => r.rule === "m4:column:hash")).toBe(true);
   });
+
+  it("tablodaki jsonb/dizi hücrelerinde PII kanıta ve görünüme gitmez", () => {
+    const table = {
+      columns: [{ name: "id" }, { name: "meta" }, { name: "tags" }],
+      rows: [[1, { iletisim: { eposta: "ayse.yilmaz@example.invalid", tel: "+90 532 123 45 67" } }, ["kart 4111 1111 1111 1111"]]],
+    };
+    const out = processOutput(table, undefined, policy({ masking: DEFAULT_MASKING }));
+    for (const ch of [out.evidenceText, out.viewText]) expect(ch).not.toMatch(/ayse\.yilmaz|532 123|4111/);
+    expect(out.redactions.map((r) => r.rule)).toEqual(expect.arrayContaining(["m4:email", "m4:phone", "m4:card"]));
+  });
 });
 
 describe("ReDoS: tek satırlık saldırgan girdi olay döngüsünü kilitlemez", () => {

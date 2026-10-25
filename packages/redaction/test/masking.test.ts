@@ -92,6 +92,43 @@ describe("M4 tablo maskeleme", () => {
     }
   });
 
+  it("jsonb/dizi hücrelerinde (iç içe, anahtar dahil) dedektörler çalışır; sayı/boolean/null/Date olduğu gibi kalır", () => {
+    const when = new Date(0);
+    const t = {
+      columns: [{ name: "id" }, { name: "contacts" }, { name: "profile" }],
+      rows: [
+        [
+          1,
+          ["ayse.yilmaz@example.com", { tel: "+90 532 123 45 67" }],
+          { phone: "+90 532 123 45 67", mail: "a@b.co", kart: { no: "4111 1111 1111 1111" }, n: 5, ok: true, x: null, when, "veli@example.com": "anahtar" },
+        ],
+      ],
+    };
+    const c = new Counter();
+    const out = maskTable(t, { columns: [], detectors: true }, new MaskingContext(), c);
+    const [row] = out.rows as unknown[][];
+    expect(JSON.stringify(out.rows)).not.toMatch(/ayse|532|a@b\.co|4111|veli@/);
+    expect(row?.[1]).toEqual(["‹redacted:email›", { tel: "‹redacted:phone›" }]);
+    const profile = row?.[2] as Record<string, unknown>;
+    expect(profile).toMatchObject({ n: 5, ok: true, x: null, "‹redacted:email›": "anahtar", kart: { no: "‹redacted:card›" } });
+    expect(profile["when"]).toBe(when);
+    expect(c.toSummary()).toEqual(expect.arrayContaining([{ rule: "m4:email", count: 3 }, { rule: "m4:phone", count: 2 }, { rule: "m4:card", count: 1 }]));
+  });
+
+  it("hücre nesnesindeki `__proto__` anahtarı prototip atamaz ve içi maskelenir; aşırı derin hücre kesilir", () => {
+    const cell = JSON.parse('{"__proto__": {"mail": "x@example.invalid"}, "ok": 1}') as unknown;
+    let deep: unknown = "derin@example.invalid";
+    for (let i = 0; i < 100; i++) deep = [deep];
+    const c = new Counter();
+    const out = maskTable({ columns: [{ name: "doc" }, { name: "deep" }], rows: [[cell, deep]] }, DEFAULT_MASKING, new MaskingContext(), c);
+    const [doc, d] = out.rows[0] as unknown[];
+    expect(Object.getPrototypeOf(doc)).toBe(Object.prototype);
+    expect(JSON.stringify(doc)).toBe('{"__proto__":{"mail":"‹redacted:email›"},"ok":1}');
+    expect(JSON.stringify(d)).not.toContain("derin@");
+    expect(JSON.stringify(d)).toContain("‹dropped:max-depth›");
+    expect(c.toSummary().some((s) => s.rule === "m4:max-depth")).toBe(true);
+  });
+
   it("drop eylemi sütunu kaldırır", () => {
     const rules = { columns: [{ match: /^note$/, action: "drop" as const }] };
     const out = maskTable(table, rules, new MaskingContext(), new Counter());

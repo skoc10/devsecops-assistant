@@ -135,6 +135,30 @@ export interface Table {
   readonly rows: readonly (readonly unknown[])[];
 }
 
+/** Hücre içi iç içelik sınırı (M1 tüm değeri 48'de keser; doğrudan `maskTable` çağrısında yığın koruması). */
+const MAX_CELL_DEPTH = 32;
+
+/**
+ * Kural eşleşmeyen hücre: dizge değilse de (jsonb nesnesi, dizi) içindeki dizgelere ve nesne anahtarlarına
+ * dedektörler uygulanır (`processOutput`'un tablo dışı yolundaki `mapStrings` ile aynı kapsam). Sayı,
+ * boolean, null ve düz olmayan nesneler (Date, Buffer) olduğu gibi kalır.
+ */
+function maskCell(v: unknown, counter: Counter, rules: MaskingRules, depth = 0): unknown {
+  if (typeof v === "string") return maskByDetectors(v, counter, rules);
+  if (v === null || typeof v !== "object" || rules.detectors === false) return v;
+  if (depth >= MAX_CELL_DEPTH) {
+    counter.add("m4:max-depth");
+    return "‹dropped:max-depth›";
+  }
+  if (Array.isArray(v)) return v.map((x) => maskCell(x, counter, rules, depth + 1));
+  const proto: unknown = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v;
+  // `Object.fromEntries`: `__proto__` anahtarı prototip atamaz, düz özellik olarak kalır
+  return Object.fromEntries(
+    Object.entries(v).map(([k, x]) => [maskByDetectors(k, counter, rules), maskCell(x, counter, rules, depth + 1)]),
+  );
+}
+
 /**
  * Tabloya sütun kuralları + (kural eşleşmeyen veya kökeni bilinmeyen sütunlar için) değer
  * dedektörleri uygulanır. `drop` eylemi sütunu tümüyle kaldırır.
@@ -152,8 +176,7 @@ export function maskTable(table: Table, rules: MaskingRules, ctx: MaskingContext
     keepIdx.map(({ p, i }) => {
       const v = row[i];
       if (p.rule) return applyAction(p.rule, v, ctx, counter, p.col.name);
-      if (typeof v === "string") return maskByDetectors(v, counter, rules);
-      return v;
+      return maskCell(v, counter, rules);
     }),
   );
   for (const p of plan) if (p.rule?.action === "drop") counter.add("m4:column:drop");
