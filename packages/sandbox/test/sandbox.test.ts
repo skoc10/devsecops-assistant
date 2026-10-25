@@ -20,6 +20,7 @@ const layout: HostLayout = {
   async entry(p) {
     if (p === "/bin" || p === "/lib" || p === "/lib64") return { type: "symlink", target: `usr${p}` };
     if (p === "/etc/ssl") return { type: "dir" };
+    if (p === "/etc/resolv.conf" || p === "/etc/hosts") return { type: "file" };
     return undefined;
   },
 };
@@ -103,9 +104,10 @@ describe("seatbelt profil kurucusu (macOS'ta ELLE doğrulanmalı)", () => {
 
 describe("detectSandbox", () => {
   it("bwrap yoksa veya yoklama başarısızsa null (çağıran fail-closed olur)", async () => {
-    expect(await detectSandbox({ platform: "linux", pathEnv: "/yok" })).toBeNull();
-    expect(await detectSandbox({ platform: "win32" })).toBeNull();
-    expect(await detectSandbox({ platform: "linux", probe: async () => false })).toBeNull();
+    // ortamdan bağımsız (OPS_SANDBOX/OPS_VM_DIR ile koşan VM takımında da): env boş
+    expect(await detectSandbox({ platform: "linux", pathEnv: "/yok", env: {} })).toBeNull();
+    expect(await detectSandbox({ platform: "win32", env: {} })).toBeNull();
+    expect(await detectSandbox({ platform: "linux", probe: async () => false, env: {} })).toBeNull();
   });
 });
 
@@ -149,7 +151,7 @@ describe("bwrap ile gerçek izolasyon (S-15)", () => {
 
   it("bu ortamda bwrap tespit edilir (yoksa aşağıdaki gerçek testler atlanır)", () => {
     if (real === null) console.warn("UYARI: bwrap yok/çalışmıyor — gerçek izolasyon testleri atlandı");
-    expect(real === null || real.kind === "bwrap").toBe(true);
+    expect(real === null || real.kind === "bwrap" || real.kind === "vm").toBe(true);
   });
 
   itReal("host ortamı sızmaz: yalnız verilen env görünür", async () => {
@@ -214,7 +216,8 @@ describe("bwrap ile gerçek izolasyon (S-15)", () => {
       const none = await need().run({ ...sh(probe), argv: ["/bin/bash", "-c", probe] });
       expect(none.stdout.toString()).toContain("baglanamadi");
       const host = await need().run({ ...sh(probe), argv: ["/bin/bash", "-c", probe], network: "host" });
-      expect(host.stdout.toString()).toContain("bagli");
+      // VM'de "host ağı" KONUĞUN ağıdır: host makinenin loopback'i görülmez (ADR-0011 §7)
+      expect(host.stdout.toString()).toContain(need().kind === "vm" ? "baglanamadi" : "bagli");
     } finally {
       server.close();
     }

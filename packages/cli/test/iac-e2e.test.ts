@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MemorySecretStore } from "@ops/broker";
 import type { ApprovalGate, ApprovalRequest } from "@ops/contracts";
 import type { OrchestratorEvent } from "@ops/core";
-import { detectSandbox } from "@ops/sandbox";
+import { GUEST_NODE, detectSandbox, fsOf } from "@ops/sandbox";
 import { CaptureSink, ScriptedProvider, makeCanary, say, toolUse } from "@ops/testkit";
 import { makeRepo } from "@ops/testkit/git-repo";
 import type { TestRepo } from "@ops/testkit/git-repo";
@@ -21,8 +21,22 @@ import { idsIn } from "./fixture.ts";
 const run = promisify(execFile);
 const sandbox = await detectSandbox();
 const TOOL_DIRS = [...(process.env["OPS_TOOL_DIRS"]?.split(":") ?? []), "/opt/ops-tools/bin", "/opt/ops-tools/venv/bin", "/usr/local/bin", "/usr/bin"];
-const hasTool = (n: string): boolean => TOOL_DIRS.some((d) => existsSync(join(d, n)));
-const ok = !!sandbox && hasTool("tofu") && hasTool("git");
+// araçlar sandbox'ın gördüğü dosya sisteminde aranır (VM kipinde konuk; ADR-0011 §6)
+const hasTool = async (n: string): Promise<boolean> => {
+  for (const d of TOOL_DIRS) if (await fsOf(sandbox).executable(join(d, n))) return true;
+  return false;
+};
+const ok = !!sandbox && (await hasTool("tofu")) && (await hasTool("git"));
+// MCP köprüsü: VM kipinde sunucu konuk Node'uyla ve paylaşım (TMPDIR) altına kopyalanan betikle çalışır (ADR-0011)
+const mockServer = await (async () => {
+  const src = fileURLToPath(new URL("../../mcp-bridge/test/mock-server.mjs", import.meta.url));
+  if (sandbox?.kind !== "vm") return src;
+  const d = await mkdtemp(join(tmpdir(), "ops-mcpe2e-share-"));
+  await copyFile(src, join(d, basename(src)));
+  return join(d, basename(src));
+})();
+const nodeBin = sandbox?.kind === "vm" ? GUEST_NODE : process.execPath;
+const nodeSha = sandbox ? ((await fsOf(sandbox).sha256(nodeBin)) ?? "") : "";
 
 const io = () => ({ input: new PassThrough(), output: new PassThrough(), error: new PassThrough() });
 const text = (s: PassThrough): string => (s.read() as Buffer | null)?.toString("utf8") ?? "";
@@ -242,7 +256,6 @@ describe.skipIf(!ok)("Faz 1b: IaC — CLI + runtime uçtan uca (gerçek git, ger
 });
 
 describe.skipIf(!sandbox)("Faz 1b: MCP köprüsü — CLI + runtime", () => {
-  const mockServer = fileURLToPath(new URL("../../mcp-bridge/test/mock-server.mjs", import.meta.url));
   const sha = (p: string): string => createHash("sha256").update(readFileSync(p)).digest("hex");
   const paths = resolvePaths(join(tmpdir(), `ops-mcpe2e-home-${process.pid}`));
   const store = new MemorySecretStore();
@@ -251,7 +264,7 @@ describe.skipIf(!sandbox)("Faz 1b: MCP köprüsü — CLI + runtime", () => {
     [
       "servers:",
       "  - id: mock",
-      `    command: ${process.execPath}`,
+      `    command: ${nodeBin}`,
       `    sha256: ${nodeSha}`,
       `    args: [${mockServer}]`,
       "    files:",
@@ -273,7 +286,7 @@ describe.skipIf(!sandbox)("Faz 1b: MCP köprüsü — CLI + runtime", () => {
   it("ops mcp check: manifest yok → açık hata; geçerli manifest → ✓; yanlış pin → ✗ ve sunucu başlamaz", async () => {
     expect((await cli(["mcp", "check"])).err).toMatch(/mcp_manifest_missing/);
     await createRuntime({ paths, store, sandbox: null }).then((r) => r.close()); // OPS_HOME oluştur
-    await writeFile(paths.mcpManifestFile, manifest(sha(process.execPath)), { mode: 0o600 });
+    await writeFile(paths.mcpManifestFile, manifest(nodeSha), { mode: 0o600 });
     const good = await cli(["mcp", "check"]);
     expect(good.code, good.out + good.err).toBe(0);
     expect(good.out).toMatch(/✓ mock \(mock-server, protokol 2025-06-18\)/);
@@ -287,7 +300,7 @@ describe.skipIf(!sandbox)("Faz 1b: MCP köprüsü — CLI + runtime", () => {
   });
 
   it("runtime: manifest varsa araçlar kayıtlı ve PEP altında çağrılır; geçersiz manifest oturumu BAŞLATMAZ; toolset 'iac' ile skill'e bağlanabilir", async () => {
-    await writeFile(paths.mcpManifestFile, manifest(sha(process.execPath)), { mode: 0o600 });
+    await writeFile(paths.mcpManifestFile, manifest(nodeSha), { mode: 0o600 });
     const rt = await createRuntime({ paths, store, sandbox: "detect" });
     try {
       expect(rt.mcp?.definitions.map((d) => d.descriptor.name)).toEqual(["mcp.mock.echo", "mcp.mock.danger"]);

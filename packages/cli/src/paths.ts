@@ -30,6 +30,8 @@ export interface OpsPaths {
   readonly mcpManifestFile: string;
   /** Break-glass inceleme dosyaları: `<oturum>.md` (denetim kayıtlarından üretilir). */
   readonly breakGlassDir: string;
+  /** macOS sandbox VM'i (ADR-0011): `state.json`, `ssh_config`, `known_hosts`, Vagrant `.vagrant/`. */
+  readonly vmDir: string;
 }
 
 /** `OPS_HOME` (varsayılan `~/.ops-assistant`). Tüm durum burada: tek kullanıcı, yerel. */
@@ -52,6 +54,7 @@ export function resolvePaths(home: string = process.env["OPS_HOME"] ?? join(home
     changesDir: join(home, "changes"),
     mcpManifestFile: join(home, "mcp-servers.yaml"),
     breakGlassDir: join(home, "breakglass-review"),
+    vmDir: join(home, "vm"),
   };
 }
 
@@ -113,3 +116,5 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."
 export const BUILTIN_SKILLS_DIR = join(REPO_ROOT, "skills");
 export const BUILTIN_POLICY_FILE = join(REPO_ROOT, "policies", "policy.yaml");
 export const BUILTIN_CATALOG_FILE = join(REPO_ROOT, "policies", "command-catalog", "core.yaml");
+/** Sandbox VM'inin Vagrant dizini (`Vagrantfile` + `provision.sh`); makine durumu OPS_HOME/vm altındadır. */
+export const VM_VAGRANT_DIR = join(REPO_ROOT, "vm");

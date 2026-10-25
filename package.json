@@ -13,8 +13,9 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "ops": "node packages/cli/src/bin.ts",
-    "test:kind": "vitest run --config vitest.kind.config.ts"
+    "test:kind": "vitest run --config vitest.kind.config.ts",
+    "test:vm": "vm/run-vm-tests.sh",
+    "ops": "node packages/cli/src/bin.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

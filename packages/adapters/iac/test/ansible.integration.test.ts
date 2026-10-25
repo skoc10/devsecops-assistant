@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import { makeIacHarness, sandbox } from "./harness.ts";
 import { findTool } from "./tools.ts";
 
-const playbook = findTool("ansible-playbook");
-const lint = findTool("ansible-lint");
+const playbook = await findTool("ansible-playbook", sandbox);
+const lint = await findTool("ansible-lint", sandbox);
 const ok = !!sandbox && !!playbook;
 
 const SITE = [

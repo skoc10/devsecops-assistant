@@ -1,12 +1,18 @@
 import { lstat, readlink } from "node:fs/promises";
+import { localSandboxFs } from "./fs.ts";
 import { DEFAULT_PATH, validateSpec } from "./types.ts";
 import type { Sandbox, SandboxProcess, SandboxResult, SandboxSpec } from "./types.ts";
 import { spawnLimited, spawnStreaming } from "./spawn.ts";
 
-/** Host dizin düzeni (merged-usr symlink'leri vb.). Test için enjekte edilebilir. */
+export type LayoutEntry = { type: "symlink"; target: string } | { type: "dir" } | { type: "file" };
+
+/**
+ * Sandbox'ın KOŞTUĞU makinenin dizin düzeni (merged-usr symlink'leri vb.). Yerelde host dosya sistemi; VM'de konuk
+ * (ADR-0011 §3: argümanlar host'ta kurulur, düzen konuktan okunur). Test için enjekte edilebilir.
+ */
 export interface HostLayout {
-  /** `/bin` gibi yol → `usr/bin` (symlink hedefi) veya `dir` ya da yok (undefined). */
-  entry(path: string): Promise<{ type: "symlink"; target: string } | { type: "dir" } | undefined>;
+  /** `/bin` gibi yol → `usr/bin` (symlink hedefi), `dir`, `file` ya da yok (undefined). */
+  entry(path: string): Promise<LayoutEntry | undefined>;
 }
 
 export const fsLayout: HostLayout = {
@@ -15,6 +21,7 @@ export const fsLayout: HostLayout = {
       const st = await lstat(path);
       if (st.isSymbolicLink()) return { type: "symlink", target: await readlink(path) };
       if (st.isDirectory()) return { type: "dir" };
+      return { type: "file" };
     } catch {
       /* yok */
     }
@@ -26,6 +33,8 @@ const SYSTEM_DIRS = ["/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"] as 
 /** Ağ KAPALIYKEN bile TLS doğrulaması için gereken sertifika deposu (kimlik değil). */
 const ETC_COMMON = ["/etc/ssl", "/etc/ca-certificates", "/etc/pki", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/localtime"] as const;
 const ETC_NET = ["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/host.conf"] as const;
+/** `buildBwrapArgs`'ın düzenini sorduğu TÜM yollar (VM konuğundan tek seferde okunur). */
+export const LAYOUT_PATHS: readonly string[] = [...SYSTEM_DIRS, ...ETC_COMMON, ...ETC_NET];
 
 /**
  * `bwrap` argümanlarını kurar. Tasarım:
@@ -56,9 +65,8 @@ export async function buildBwrapArgs(spec: SandboxSpec, layout: HostLayout = fsL
   }
   const etc = [...ETC_COMMON, ...(spec.network === "host" ? ETC_NET : [])];
   for (const p of etc) {
-    const e = await layout.entry(p);
-    // dosyalar `lstat`ta "dir" değil: yalnız varlığını sormak için sabit liste deneriz
-    if (e || (await existsFile(p))) a.push("--ro-bind-try", p, p);
+    // yalnız VAR OLAN girdiler (dosya, dizin ya da sembolik bağ) bağlanır; liste sabittir
+    if (await layout.entry(p)) a.push("--ro-bind-try", p, p);
   }
   for (const p of spec.roBinds ?? []) a.push("--ro-bind", p, p);
   for (const p of spec.rwBinds ?? []) a.push("--bind", p, p);
@@ -67,17 +75,9 @@ export async function buildBwrapArgs(spec: SandboxSpec, layout: HostLayout = fsL
   return a;
 }
 
-async function existsFile(p: string): Promise<boolean> {
-  try {
-    await lstat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export class BwrapSandbox implements Sandbox {
   readonly kind = "bwrap" as const;
+  readonly fs = localSandboxFs;
   private readonly bwrap: string;
   private readonly layout: HostLayout;
 

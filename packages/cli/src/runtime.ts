@@ -142,7 +142,9 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     scrub: (s) => scrubText(s, known),
   });
 
-  const sandbox = o.sandbox === "detect" || o.sandbox === undefined ? await detectSandbox() : o.sandbox;
+  const sandbox = o.sandbox === "detect" || o.sandbox === undefined ? await detectSandbox({ vmStateDir: o.paths.vmDir }) : o.sandbox;
+  // IaC ikili dizinleri: kullanıcı vermediyse sandbox'ın kendi dizinleri (VM kipinde konuk `/opt/ops-tools`; ADR-0011 §6)
+  const toolDirs = o.toolDirs ?? sandbox?.toolDirs;
   const broker = new LocalBroker({ store, exec: new ExecCredentialRunner({ sandbox, ...(o.now ? { now: o.now } : {}) }), ...(o.now ? { now: o.now } : {}) });
   const registry = await ProfileRegistry.open({ path: o.paths.profilesFile, testMode: false, ...(o.registryOptions ?? {}) });
   const profiles = new ProfileService({ store, registry });
@@ -185,7 +187,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const workspaces = new WorkspaceManager({ registry: workspaceRegistry, worktreesDir: o.paths.worktreesDir, sandbox, known });
   const workspaceAdapter = new WorkspaceAdapter(workspaces);
   toolRegistry.register(workspaceAdapter, workspaceAdapter.definitions);
-  const iac = new IacAdapter({ manager: workspaces, sandbox, ...(o.toolDirs ? { toolDirs: o.toolDirs } : {}), ...(o.providerMirror ? { providerMirror: o.providerMirror } : {}) });
+  const iac = new IacAdapter({ manager: workspaces, sandbox, ...(toolDirs ? { toolDirs } : {}), ...(o.providerMirror ? { providerMirror: o.providerMirror } : {}) });
   toolRegistry.register(iac, iac.definitions);
 
   // MCP istemci köprüsü v0: yalnız kullanıcı manifesti varsa. Geçersiz manifest = başlangıç hatası (fail-closed).

@@ -1,7 +1,8 @@
-import { access, constants, mkdir, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { OpsError } from "@ops/contracts";
-import type { Sandbox, SandboxResult } from "@ops/sandbox";
+import { localSandboxFs } from "@ops/sandbox";
+import type { Sandbox, SandboxFs, SandboxResult } from "@ops/sandbox";
 
 export interface ResolvedTool {
   readonly path: string;
@@ -11,62 +12,43 @@ export interface ResolvedTool {
 
 const SYSTEM_DIRS = ["/usr/local/bin", "/usr/bin", "/bin"];
 
-async function exists(p: string): Promise<boolean> {
-  try {
-    await access(p, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Venv yorumlayıcısının sembolik bağ zinciri sandbox'ta da çözülmeli: Debian/Ubuntu'da
  * `python3 -> /usr/bin/python3 -> /etc/alternatives/python3 -> /usr/bin/python3.13`. `/etc` sandbox'ta
  * boştur; yalnız `/etc/alternatives` (yalnızca sembolik bağlar) salt-okunur eklenir. `/usr` dışındaki
  * yorumlayıcı kurulumunun (pyenv, /opt) öneki de bağlanır.
  */
-async function interpreterBinds(venvRoot: string): Promise<string[]> {
+async function interpreterBinds(venvRoot: string, fs: SandboxFs): Promise<string[]> {
   const out = new Set<string>();
   let cur = join(venvRoot, "bin", "python3");
   for (let i = 0; i < 8; i++) {
-    let target: string;
-    try {
-      target = await readlink(cur);
-    } catch {
-      break;
-    }
+    const target = await fs.readlink(cur);
+    if (target === null) break;
     cur = isAbsolute(target) ? target : join(dirname(cur), target);
     if (cur.startsWith("/etc/alternatives/")) out.add("/etc/alternatives");
   }
-  try {
-    const real = await realpath(cur);
-    if (!real.startsWith("/usr/") && !real.startsWith(venvRoot + "/")) out.add(dirname(dirname(real)));
-  } catch {
-    /* yorumlayıcı yok: araç zaten çalışmaz */
-  }
+  const real = await fs.realpath(cur);
+  // yorumlayıcı yoksa araç zaten çalışmaz
+  if (real !== null && !real.startsWith("/usr/") && !real.startsWith(venvRoot + "/")) out.add(dirname(dirname(real)));
   return [...out];
 }
 
 /**
  * IaC ikililerini YALNIZ yapılandırılmış dizinlerde (kullanıcı `toolDirs` + sistem dizinleri) arar;
- * `PATH`'e güvenilmez. Python venv'lerinin (ansible) kökü de bağlanır.
+ * `PATH`'e güvenilmez. Python venv'lerinin (ansible) kökü de bağlanır. Aramalar sandbox'ın İKİLİ dosya
+ * sisteminde yapılır (`fs`: VM'de konuk, yerelde host).
  */
-export async function resolveTool(name: string, toolDirs: readonly string[]): Promise<ResolvedTool | null> {
+export async function resolveTool(name: string, toolDirs: readonly string[], fs: SandboxFs = localSandboxFs): Promise<ResolvedTool | null> {
   for (const d of [...toolDirs, ...SYSTEM_DIRS]) {
     const p = join(d, name);
-    try {
-      await access(p, constants.X_OK);
-    } catch {
-      continue;
-    }
-    const real = await realpath(p);
+    if (!(await fs.executable(p))) continue;
+    const real = (await fs.realpath(p)) ?? p;
     const binds = new Set<string>();
     // venv kökünü bul: .../bin/<ad> ile aynı üst dizinde pyvenv.cfg
     const lexicalRoot = dirname(dirname(p));
-    if (await exists(join(lexicalRoot, "pyvenv.cfg"))) {
+    if (await fs.exists(join(lexicalRoot, "pyvenv.cfg"))) {
       binds.add(lexicalRoot);
-      for (const b of await interpreterBinds(lexicalRoot)) binds.add(b);
+      for (const b of await interpreterBinds(lexicalRoot, fs)) binds.add(b);
     } else binds.add(dirname(real));
     return { path: p, binds: [...binds].filter((b) => !b.startsWith("/usr/") && b !== "/usr") };
   }

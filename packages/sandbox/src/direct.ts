@@ -1,3 +1,4 @@
+import { localSandboxFs } from "./fs.ts";
 import { DEFAULT_PATH, validateSpec } from "./types.ts";
 import type { Sandbox, SandboxProcess, SandboxResult, SandboxSpec } from "./types.ts";
 import { spawnLimited, spawnStreaming } from "./spawn.ts";
@@ -9,6 +10,7 @@ import { spawnLimited, spawnStreaming } from "./spawn.ts";
  */
 export class UnsafeDirectRunner implements Sandbox {
   readonly kind = "none" as const;
+  readonly fs = localSandboxFs;
 
   constructor(opts: { acknowledgeNoIsolation: true }) {
     if (opts.acknowledgeNoIsolation !== true) throw new Error("izolasyonsuz çalıştırıcı açık onay ister");

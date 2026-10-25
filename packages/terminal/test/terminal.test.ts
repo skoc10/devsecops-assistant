@@ -153,7 +153,9 @@ describe("TerminalAdapter", () => {
     const big = await call(adapter(real), "cat big.txt");
     expect(big.truncated).toBe(true);
     await rm(join(ws, "big.txt"));
-    // FIFO'dan okuyan cat sonsuza dek bloklanır: aşama zaman aşımı süreci öldürmeli
+    // FIFO'dan okuyan cat sonsuza dek bloklanır: aşama zaman aşımı süreci öldürmeli.
+    // VM kipinde paylaşım (hgfs) FIFO taşımaz — konukta düz dosya görünür; zaman aşımı/kill yolu `vm.vm.test.ts`te sınanır.
+    if (real?.kind === "vm") return;
     execFileSync("mkfifo", [join(ws, "boru")]);
     const t0 = Date.now();
     const slow = new TerminalAdapter({ sandbox: real, catalog, workdir: ws, stageTimeoutMs: 400 });

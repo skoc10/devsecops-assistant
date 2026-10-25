@@ -77,6 +77,26 @@ OPS_QUARANTINE=digest node packages/cli/src/bin.ts chat --embedded     # ham log
 node packages/cli/src/bin.ts chat --embedded --local-only             # yalnız yerel model + yalnız okuma
 ```
 
+### macOS
+
+macOS'ta `sandbox-exec` çalışmadığı için kod çalıştıran araçlar (kabuk, çalışma alanı/IaC, MCP köprüsü) bir **Linux VM** içinde
+bubblewrap altında koşar ([ADR-0011](docs/adr/0011-macos-vm-sandbox.md)). Gerekenler: [Vagrant](https://developer.hashicorp.com/vagrant/install)
+ve bir hipervizör (varsayılan VMware Fusion + `vagrant-vmware-desktop` eklentisi; `OPS_VM_PROVIDER=parallels|virtualbox|utm` denenmedi).
+
+```sh
+node packages/cli/src/bin.ts vm up            # kutuyu indirir, araçları pinli sürümlerle kurar, bwrap'ı yoklar (~2 dk; ilk kez kutu indirme ek)
+node packages/cli/src/bin.ts vm status        # Vagrant durumu, konuk yoklaması (gecikme), konuk araç sürümleri
+node packages/cli/src/bin.ts doctor           # "OS sandbox: vm — …" görünmeli
+node packages/cli/src/bin.ts workspace add --id infra --path ~/src/infra --engine opentofu
+node packages/cli/src/bin.ts vm reload        # yeni çalışma alanı deposunu konuğa SALT OKUNUR paylaşır (paylaşımlar açılışta bağlanır)
+node packages/cli/src/bin.ts chat --embedded --workspace infra
+node packages/cli/src/bin.ts vm halt          # VM kapalıyken bu araçlar fail-closed kapalıdır; `vm destroy` siler
+```
+
+VM hiçbir araç çağrısından kendiliğinden başlamaz. `OPS_TOOL_DIRS` vermeyin: VM kipinde konuk dizinleri (`/opt/ops-tools/...`)
+kullanılır. `shell.run` iş alanı (`OPS_WORKDIR`) paylaşılan bir dizin (kayıtlı depo veya anlık kopya) olmalıdır. VM'e karşı test
+takımı: `pnpm test:vm` (CI'da koşmaz). Cursor çalışma zamanı ve exec kimlik eklentileri VM kipinde desteklenmez.
+
 `ops chat` için bir model sağlayıcısı gerekir (`OPS_PROVIDER`: `anthropic`, `openai-compatible` veya `cursor`; anahtar `ops provider set-key AD` ile kasaya yazılır; ayrıntı ve doğrulanmamış kısımlar [docs/STATUS.md](docs/STATUS.md)'da). Hiçbir sağlayıcı bu ortamda **gerçek servise karşı** denenmedi (yerel sahte uçlara/ScriptedProvider'a karşı test edildi). Sohbet döngüsü scripted sağlayıcıyla uçtan uca test edilir (E-01).
 
 ## Geliştirme
