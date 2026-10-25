@@ -8,6 +8,7 @@
     "packages/runtimes/*/src/**/*.ts",
     "packages/runtimes/*/test/**/*.ts",
     "test/**/*.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.kind.config.ts"
   ]
 }

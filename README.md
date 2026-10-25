@@ -89,4 +89,11 @@ pnpm typecheck
 pnpm test
 ```
 
+Gerçek Kubernetes kümesine karşı entegrasyon testleri (CI'da `kind` işi): yönetici kubeconfig'i verilmezse atlanır.
+
+```sh
+kind create cluster --name ops-it --kubeconfig /tmp/ops-it.kubeconfig
+OPS_TEST_KUBECONFIG=/tmp/ops-it.kubeconfig pnpm test:kind
+```
+
 Testler **gerçek üretim sistemine hiçbir zaman yazmaz**: sahte profiller ve canary değerleri çalışma anında rastgele üretilir, izole bir `OPS_HOME` dizininde koşar ve depoya commit edilmez.
