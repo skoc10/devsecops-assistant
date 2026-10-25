@@ -104,7 +104,7 @@ describe("terraform ön-tarama: kod çalıştıran yapılar", () => {
     }
     expect(codes('module "m" {\n  source = var.src\n}\n')).toContain("module_source_dynamic");
     expect(codes('module "m" {\n  source = "./local"\n}\n')).toEqual([]);
-    expect(codes('module "m" {\n  source = "../up/mod"\n}\n')).toEqual([]);
+    expect(scan('module "m" {\n  source = "../up/mod"\n}\n', "envs/prod/main.tf").findings).toEqual([]);
     const reg = scan('module "m" {\n  source = "terraform-aws-modules/vpc/aws"\n  version = "5.0.0"\n}\n');
     expect(reg.findings.map((f) => f.code)).toEqual(["registry_module"]);
     expect(reg.blocked).toBe(false);
@@ -127,6 +127,34 @@ describe("terraform ön-tarama: kod çalıştıran yapılar", () => {
     const bad = scan('resource "a" "b" {\n  x = "unterminated\n}\n');
     expect(bad.findings[0]).toMatchObject({ severity: "block", code: "parse_error", line: 2 });
     expect(bad.blocked).toBe(true);
+  });
+
+  it("yerel modül kaynağı çalışma alanı kökünün dışına çıkarsa ENGEL; kök içinde kalan ../ yolları serbest", () => {
+    const mod = (src: string): string => `module "m" {\n  source = "${src}"\n}\n`;
+    const outside: [string, string][] = [
+      ["main.tf", "./../.."],
+      ["main.tf", "../up/mod"],
+      ["main.tf", "./.."],
+      ["envs/prod/main.tf", "../../../outside"],
+      ["a/main.tf", "./x/../../../y"],
+      ["a/main.tf", "../..//b"],
+    ];
+    for (const [path, src] of outside) {
+      const s = scan(mod(src), path);
+      expect(s.findings.map((f) => f.code), `${path}: ${src}`).toEqual(["local_module_outside"]);
+      expect(s.findings[0], `${path}: ${src}`).toMatchObject({ severity: "block", file: path, line: 1 });
+      expect(s.blocked).toBe(true);
+      expect(s.model.modules[0]).toMatchObject({ kind: "local", source: src });
+    }
+    const inside: [string, string][] = [
+      ["envs/prod/main.tf", "../../modules/vpc"],
+      ["main.tf", "./modules/vpc"],
+      ["modules/a/main.tf", "../b"],
+      ["main.tf", "./"],
+      ["a/main.tf", "./.."],
+      ["a/b/main.tf", "./x/../../c//d"],
+    ];
+    for (const [path, src] of inside) expect(scan(mod(src), path).findings, `${path}: ${src}`).toEqual([]);
   });
 
   it("zararsız yapılar engel doğurmaz; model çıkarılır (değişkenler, çıktılar, kaynaklar, sağlayıcılar, backend)", () => {

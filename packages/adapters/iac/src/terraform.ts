@@ -49,6 +49,20 @@ function moduleKind(src: string): "local" | "registry" | "remote" {
   return "remote";
 }
 
+/**
+ * Yerel modül kaynağının (`./`, `../`) çalışma alanı köküne göre sözcüksel normalleştirilmiş dizini (kök = `""`);
+ * kökün dışına çıkıyorsa undefined. Kaynak, modül bloğunun bulunduğu dosyanın dizinine görelidir.
+ */
+function localModuleDir(file: string, src: string): string | undefined {
+  const segs = file.includes("/") ? file.slice(0, file.lastIndexOf("/")).split("/") : [];
+  for (const s of src.split("/")) {
+    if (s === "" || s === ".") continue;
+    if (s !== "..") segs.push(s);
+    else if (segs.pop() === undefined) return undefined;
+  }
+  return segs.join("/");
+}
+
 const str = (b: HclBlock, k: string): string | undefined => b.attrs[k]?.literal;
 
 /** `{ source = "x", version = "y" }` biçimli nesne ifadesinden alan çıkarır. */
@@ -150,6 +164,9 @@ export function scanTerraform(files: readonly { path: string; text: string }[]):
               if (!versionPinned) add("warn", "module_unpinned", `module '${name}' sürümü sabitlenmemiş`, f.path, b.line);
             } else if (kind === "remote") {
               add("block", "remote_module", `module '${name}' uzak kaynaktan (${src.slice(0, 60)}): ağ ve üçüncü taraf kod`, f.path, b.line);
+            } else if (localModuleDir(f.path, src) === undefined) {
+              // kök dışındaki dizin ön-taramaya hiç girmez (provisioner/external içerebilir) ama init onu yükler
+              add("block", "local_module_outside", `module '${name}' yerel kaynağı çalışma alanı dışına çıkıyor (${src.slice(0, 60)}): içeriği ön-taramadan geçemez`, f.path, b.line);
             }
           }
           break;
