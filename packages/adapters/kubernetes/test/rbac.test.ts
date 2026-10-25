@@ -51,6 +51,19 @@ describe("analyzeRules / ruleAllows", () => {
     expect(cls({ verbs: ["get"], apiGroups: [""], resources: [], nonResourceURLs: ["/healthz"] })).toBe("read");
   });
 
+  it("öz-inceleme create (gerçek kümede system:basic-user) yazma sayılmaz; joker grup/kaynakla gizlenemez", () => {
+    // kind kümesinde bulundu: her kimliğin SSRR çıktısında bu kurallar vardır; eskiden salt okunur SA 'write_access' alıyordu
+    const basic = [
+      { verbs: ["create"], apiGroups: ["authorization.k8s.io"], resources: ["selfsubjectaccessreviews", "selfsubjectrulesreviews"] },
+      { verbs: ["create"], apiGroups: ["authentication.k8s.io"], resources: ["selfsubjectreviews"] },
+    ];
+    expect(analyzeRules([...basic, ...READONLY_NAMESPACED_RULES])).toMatchObject({ effective: "read", findings: [] });
+    // aynı grupta başka kaynak ya da joker hâlâ sayılır
+    expect(analyzeRules([{ verbs: ["create"], apiGroups: ["authorization.k8s.io"], resources: ["subjectaccessreviews"] }]).effective).toBe("mutate");
+    expect(analyzeRules([{ verbs: ["create"], apiGroups: ["*"], resources: ["selfsubjectreviews"] }]).effective).toBe("mutate");
+    expect(analyzeRules([{ verbs: ["*"], apiGroups: ["authorization.k8s.io"], resources: ["*"] }]).effective).toBe("destroy");
+  });
+
   it("Secret okuma: yalnız çekirdek grupta 'secrets'; joker kaynak da sayılır", () => {
     expect(analyzeRules([{ verbs: ["list"], apiGroups: [""], resources: ["secrets"] }]).secretsReadable).toBe(true);
     expect(analyzeRules([{ verbs: ["get"], apiGroups: ["*"], resources: ["*"] }]).secretsReadable).toBe(true);

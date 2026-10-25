@@ -89,6 +89,15 @@ export const READONLY_RULES: FakeRulesStatus = {
   ],
 };
 
+/**
+ * Gerçek kümede `system:basic-user` (system:authenticated grubuna bağlı) her kimliğe öz-inceleme `create`
+ * yetkisi verir; SelfSubjectRulesReview bunları her zaman döndürür. Sahte API de döndürür (kind testinde bulundu).
+ */
+export const BASIC_USER_RULES: readonly FakeRule[] = [
+  { verbs: ["create"], apiGroups: ["authorization.k8s.io"], resources: ["selfsubjectaccessreviews", "selfsubjectrulesreviews"] },
+  { verbs: ["create"], apiGroups: ["authentication.k8s.io"], resources: ["selfsubjectreviews"] },
+];
+
 interface LogEntry {
   readonly ts: Date;
   readonly text: string;
@@ -572,7 +581,7 @@ export class FakeK8sApi {
         JSON.stringify({
           kind: "SelfSubjectRulesReview",
           apiVersion: "authorization.k8s.io/v1",
-          status: { resourceRules: st.resourceRules, nonResourceRules: [{ verbs: ["get"], nonResourceURLs: ["/healthz", "/version"] }], incomplete: st.incomplete ?? false, ...(st.evaluationError ? { evaluationError: st.evaluationError } : {}) },
+          status: { resourceRules: [...BASIC_USER_RULES, ...st.resourceRules], nonResourceRules: [{ verbs: ["get"], nonResourceURLs: ["/healthz", "/version"] }], incomplete: st.incomplete ?? false, ...(st.evaluationError ? { evaluationError: st.evaluationError } : {}) },
         }),
       );
     }
