@@ -121,6 +121,32 @@ describe("TtyApprovalGate (v0)", () => {
     expect(g.summaryLine()).toBe("Bu oturumda 4 onay verdiniz.");
   });
 
+  it("eşzamanlı istekler SIRAYLA sorulur: aynı anda tek TTY istemi, bütçe paralel isteklerle atlanamaz", async () => {
+    let open = 0;
+    let maxOpen = 0;
+    const ttys: ReturnType<typeof fakeTty>[] = [];
+    const g = new TtyApprovalGate({
+      openTty: async () => {
+        open += 1;
+        maxOpen = Math.max(maxOpen, open);
+        const t = fakeTty(["evet"]);
+        ttys.push(t);
+        return { ...t.io, close: () => void (open -= 1) };
+      },
+      budget: { maxPerWindow: 1, windowMs: 60_000, cooldownMs: 0 },
+      sleep: async () => undefined,
+    });
+    const [a, b] = await Promise.all([g.request(req()), g.request(req())]);
+    expect(maxOpen).toBe(1);
+    expect(a.approved).toBe(true);
+    // ikinci istek ilki bittikten sonra sorulur ve bütçe aşımını görür: 'evet' doğrulama ifadesi değildir → ret
+    expect(b).toMatchObject({ approved: false });
+    expect(ttys[1]?.shown()).toContain(CONFIRM_PHRASE);
+    // reddedilen/hatalı istek kuyruğu kilitlemez
+    ttys.length = 0;
+    expect((await gateWith(fakeTty(["evet"])).request(req())).approved).toBe(true);
+  });
+
   it("özet: model/argüman kaynaklı kontrol karakterleri ve ANSI temizlenir; taint uyarısı görünür", () => {
     const evil = summary({ argsRedacted: { x: "\u001b[2J\u001b]8;;http://evil.invalid\u0007gizli\u001b]8;;\u0007 \u202Eters" }, taintedContext: true, citedEvidence: [{ id: "ev-9", summary: "\u001b[31mkırmızı" }] });
     const text = renderSummary(evil, { index: 1, expiresInSec: 300 });

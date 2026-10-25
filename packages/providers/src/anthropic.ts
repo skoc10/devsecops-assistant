@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { OpsError, TRUST_ZONES, estimateTokens } from "@ops/contracts";
+import { LOCAL_ZONE_NEEDS_LOOPBACK } from "./openai-compatible.ts";
 import { decodeToolName, encodeToolName } from "./tool-names.ts";
 import type { GenerateRequest, GenerateResult, Message, ModelProvider, ModelTier, ProviderCapabilities, ToolCall, TrustZone } from "@ops/contracts";
 
@@ -94,6 +95,7 @@ export class AnthropicProvider implements ModelProvider {
   constructor(cfg: AnthropicProviderConfig) {
     if (!cfg.apiKey || cfg.apiKey.length < 8) throw new OpsError("provider_config", "Anthropic API anahtarı gerekli (`ops provider set-key anthropic`)");
     let zone: TrustZone = "third-party-cloud";
+    let loopbackEndpoint = false;
     if (cfg.baseUrl !== undefined) {
       let url: URL;
       try {
@@ -105,9 +107,11 @@ export class AnthropicProvider implements ModelProvider {
       if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new OpsError("provider_config", "uzak sağlayıcı uçları yalnız https olmalı (düz http yalnız loopback)");
       if (url.username || url.password) throw new OpsError("provider_config", "baseUrl kimlik bilgisi içeremez");
       if (loopback) zone = "local";
+      loopbackEndpoint = loopback;
     }
     zone = cfg.trustZone ?? zone;
     if (!TRUST_ZONES.includes(zone)) throw new OpsError("provider_config", "trustZone geçersiz");
+    if (zone === "local" && !loopbackEndpoint) throw new OpsError("provider_config", LOCAL_ZONE_NEEDS_LOOPBACK);
     this.cfg = cfg;
     this.model = cfg.model ?? DEFAULT_MODEL;
     this.capabilities = {

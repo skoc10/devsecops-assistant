@@ -64,6 +64,15 @@ describe("M2 desen kuralları", () => {
     expect((out.match(/‹redacted:kv-secret›/g) ?? []).length).toBe(3);
   });
 
+  it("değer anahtarda/şemada/kullanıcı adında da geçse DEĞERİN kendisi maskelenir", () => {
+    expect(run("password: password", false).out).toBe("password: ‹redacted:kv-secret›");
+    expect(run("secret_key=secret", false).out).toBe("secret_key=‹redacted:kv-secret›");
+    expect(run("postgres://postgres:postgres@db.example.invalid:5432/app", false).out).toBe(
+      "postgres://postgres:‹redacted:url-credentials›@db.example.invalid:5432/app",
+    );
+    expect(run("redis://app:app@cache.invalid", false).out).toBe("redis://app:‹redacted:url-credentials›@cache.invalid");
+  });
+
   it("şablon/referans/sayaç değerlerini maskelemez (yanlış pozitif)", () => {
     const benign = [
       "token: ${TOKEN}",
@@ -103,6 +112,21 @@ describe("M2 desen kuralları", () => {
     const text = `${fake.awsKeyId()} password=${fake.password()} Bearer ${fake.highEntropy()}`;
     const once = run(text).out;
     expect(run(once).out).toBe(once);
+  });
+
+  it("ReDoS sınırları normal girdide tespiti daraltmaz (uzun anahtar soneki, şema, '-' sonrası JWT, kırpılmış blok)", () => {
+    const pw = fake.password();
+    const longKey = `DB_PASSWORD_FOR_THE_PRIMARY_REPLICA_IN_EU_WEST_1_CLUSTER_B=${pw}`;
+    expect(run(longKey).out).toBe(longKey.replace(pw, "‹redacted:kv-secret›"));
+    expect(run(`postgresql+asyncpg://app:${pw}@db.invalid/x`).out).toBe("postgresql+asyncpg://app:‹redacted:url-credentials›@db.invalid/x");
+    const jwt = fake.jwt();
+    expect(run(`session-${jwt} ok`).out).toBe("session-‹redacted:jwt› ok");
+    // END'siz blok ardından tam blok: ikisinin de gövdesi maskelenir
+    const full = fake.privateKeyBlock();
+    const cut = full.slice(0, full.indexOf("-----END"));
+    const { out } = run(`${cut}\n${full}`, false);
+    expect(out).not.toMatch(/[A-Za-z0-9+/]{40,}/);
+    expect(out.match(/‹redacted:private-key-block›/g)).toHaveLength(2);
   });
 
   it("PEM sertifikasını secret saymaz ama token için sıkıştırır", () => {

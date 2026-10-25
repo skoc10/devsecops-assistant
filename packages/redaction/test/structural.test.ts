@@ -41,6 +41,22 @@ describe("M1 yapısal reddet listesi", () => {
     expect(r.out).toEqual({ kimlik: "‹redacted:field›", password: "‹redacted:field›" });
   });
 
+  it("`g`/`y` bayraklı profil ifadesi maskelemeyi durumlu yapmaz (varsayılanlar aralıklı düşmez)", () => {
+    registerProfile({ name: "t-g", maskKeys: /^kimlik$/g, dropKeys: /^gecici$/y, nameValueSecretNames: /^MY_/g });
+    const p = getProfile("t-g");
+    for (const re of [p.maskKeys, p.dropKeys, p.nameValueSecretNames]) expect(re?.flags).not.toMatch(/[gy]/);
+    const rows = Array.from({ length: 6 }, (_, i) => ({ password: `hunter2-${i}`, kimlik: `k-${i}`, gecici: 1, env: [{ name: "MY_KEY", value: `v${i}` }] }));
+    for (let pass = 0; pass < 2; pass++) {
+      const { out } = apply(rows, p);
+      expect(JSON.stringify(out)).not.toMatch(/hunter2|"k-\d|gecici|"v\d/);
+    }
+    // kaydedilmeden doğrudan verilen profil de durumsuz
+    const direct = { name: "t-direct", maskKeys: /^password$/g };
+    const { out } = apply(rows, direct);
+    expect(JSON.stringify(out)).not.toContain("hunter2");
+    expect(direct.maskKeys.lastIndex).toBe(0);
+  });
+
   it("bilinmeyen profil adı varsayılana düşer", () => {
     expect(getProfile("yok").name).toBe("default");
   });

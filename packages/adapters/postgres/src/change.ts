@@ -95,7 +95,7 @@ export function renderPreview(plan: ChangePlan, estimates: readonly (number | nu
   ];
   for (const s of plan.statements) {
     const est = estimates[s.index];
-    const tag = [s.kind, s.risk, s.dml ? (est === null || est === undefined ? "satır tahmini yok" : `≈${est} satır`) : "şema değişikliği", s.unbounded ? "WHERE YOK" : ""].filter(Boolean).join(" · ");
+    const tag = [s.kind, s.risk, s.dml ? (est === null || est === undefined ? "satır tahmini yok" : `≈${est} satır`) : "şema değişikliği", s.unbounded ? "WHERE YOK/SINIRLAMIYOR" : ""].filter(Boolean).join(" · ");
     lines.push(`[${s.index + 1}/${plan.statements.length}] ${tag}`);
     lines.push(s.text.length > MAX_STMT_DISPLAY ? `${s.text.slice(0, MAX_STMT_DISPLAY)}… (kesildi; tam metin sha256 ile bağlıdır)` : s.text);
   }
@@ -107,7 +107,7 @@ export function renderPreview(plan: ChangePlan, estimates: readonly (number | nu
     const complete = known.length === dml.length;
     impact.push(`tahmini etkilenen satır: ${complete ? "" : "≥ "}${total} (planlayıcı tahmini; yürütmede gerçek sayı sayılır)${total > plan.maxRows ? ` — ÜST SINIRI (${plan.maxRows}) AŞIYOR: büyük olasılıkla ROLLBACK` : ""}`);
   }
-  for (const s of plan.statements) if (s.unbounded) impact.push(`ifade ${s.index + 1}: WHERE yok — tüm satırlar etkilenir`);
+  for (const s of plan.statements) if (s.unbounded) impact.push(`ifade ${s.index + 1}: WHERE yok ya da satırları sınırlamıyor (sütuna başvurmuyor) — tüm satırlar etkilenir`);
   const strong = plan.locks.filter((l) => l.mode === "ACCESS EXCLUSIVE" || l.mode === "SHARE");
   if (strong.length > 0) impact.push(`kilit (işlem boyunca): ${strong.map((l) => `${l.schema}.${l.name} ${l.mode}`).join(", ")}`);
   impact.push(`en yüksek sınıf: ${plan.statements.reduce<RiskClass>((m, s) => (rank(s.risk) > rank(m) ? s.risk : m), "mutate")}`);

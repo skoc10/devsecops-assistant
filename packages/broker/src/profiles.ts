@@ -1,7 +1,7 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { OpsError, ProfileSchema } from "@ops/contracts";
 import type { Profile } from "@ops/contracts";
+import { writeFileAtomic } from "./atomic-write.ts";
 
 export interface ProfileRegistryOptions {
   readonly path: string;
@@ -92,10 +92,6 @@ export class ProfileRegistry {
   }
 
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.o.path), { recursive: true, mode: 0o700 });
-    const tmp = `${this.o.path}.tmp`;
-    await writeFile(tmp, JSON.stringify({ version: 1, profiles: this.profiles } satisfies FileShape, null, 2), { mode: 0o600 });
-    await chmod(tmp, 0o600);
-    await rename(tmp, this.o.path);
+    await writeFileAtomic(this.o.path, JSON.stringify({ version: 1, profiles: this.profiles } satisfies FileShape, null, 2));
   }
 }

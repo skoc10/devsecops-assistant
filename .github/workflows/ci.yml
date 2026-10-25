@@ -7,29 +7,38 @@ on:
 permissions:
   contents: read
 
+# Aynı PR'a gelen yeni commit eskisinin koşusunu iptal eder; varsayılan dal geçmişi eksiksiz kalır.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Etiket sabit: `ubuntu-latest` Ubuntu 26'ya taşınıyor (AppArmor/bubblewrap/PostgreSQL sürümleri değişir).
+    # Geçiş bilinçli yapılmalı; aşağıdaki "atlanan test yok" adımı sessiz kapsam kaybını yakalar.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      # Not: eylemler etiketle sabitlendi; sürüm sabitleme (SHA) için docs/design/13 "doğrulanacak" listesine bakın.
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # Eylemler tam commit SHA'sıyla sabitlendi (etiket taşınabilir); güncellemeleri Dependabot önerir.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
           cache: pnpm
-      # Bağımlılık yaşam-döngüsü scriptleri kapalı (pnpm-workspace.yaml: onlyBuiltDependencies: [])
+      # Bağımlılık yaşam-döngüsü scriptleri kapalı (pnpm-workspace.yaml: onlyBuiltDependencies: [], strictDepBuilds)
       - run: pnpm install --frozen-lockfile
       # Gerçek OS sandbox testleri (S-15) için bubblewrap. Ubuntu 24.04 runner'larında AppArmor
-      # kullanıcı ad alanlarını kısıtlar; kısıt kapatılamazsa sandbox testleri otomatik ATLANIR
-      # (detectSandbox yoklaması başarısız olur) — atlandığı test çıktısında uyarı olarak görünür.
+      # kullanıcı ad alanlarını kısıtlar; kısıt aşağıda kaldırılır ve bwrap'in çalıştığı ayrıca doğrulanır.
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       # Gerçek PostgreSQL testleri (S-02/S-03/S-14 DB ayağı, I-02): testkit geçici bir küme başlatır
-      # (TLS + scram; ayrı süreç, yalnız loopback). Sunucu kurulu değilse bu testler uyarıyla ATLANIR.
+      # (TLS + scram; ayrı süreç, yalnız loopback).
       - run: sudo apt-get install -y postgresql postgresql-client
       # IaC testleri (S-17..S-19, Faz 1b): OpenTofu ve Terraform (sürüm + sha256 PİNLİ), ansible-core + ansible-lint (pip, sürüm
-      # pinli, ayrı venv). Kurulu değilse ilgili testler uyarıyla ATLANIR. sha256 değerleri yayıncıların SHA256SUMS dosyalarıyla
-      # (aynı kaynaktan) eşleştirildi; SHA256SUMS imza doğrulaması (GPG/cosign) yapılmadı → "doğrulanacak".
+      # pinli, ayrı venv). sha256 değerleri yayıncıların SHA256SUMS dosyalarıyla (aynı kaynaktan) eşleştirildi;
+      # SHA256SUMS imza doğrulaması (GPG/cosign) yapılmadı → "doğrulanacak".
       - name: IaC araçları (OpenTofu, Terraform, ansible-core, ansible-lint)
         run: |
           set -euo pipefail
@@ -42,6 +51,32 @@ jobs:
           python3 -m venv "$T/venv"
           "$T/venv/bin/pip" install --quiet "ansible-core==2.21.5" "ansible-lint==26.10.1"
           echo "OPS_TOOL_DIRS=$T/bin:$T/venv/bin" >> "$GITHUB_ENV"
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # Kısıt kaldırılamazsa iş burada düşer: sandbox testleri sessizce atlanmaz.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: OS sandbox kullanılabilir (ürünün kendi yoklamasıyla)
+        run: |
+          node --input-type=module -e '
+            const { detectSandbox } = await import("./packages/sandbox/src/index.ts");
+            const sb = await detectSandbox();
+            if (!sb) { console.error("::error::OS sandbox (bubblewrap) çalışmıyor"); process.exit(1); }
+            console.log(`sandbox: ${sb.kind}`);'
       - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-report.json"
+      # Ortam eksikse (bwrap, PostgreSQL, IaC ikilileri) güvenlik testleri ATLANIR; CI'da atlanan test
+      # doğrulanmamış bir "Enforced" iddiası demektir → iş başarısız olur.
+      - name: Atlanan test yok
+        run: node .github/scripts/assert-no-skipped-tests.mjs "$RUNNER_TEMP/vitest-report.json"
+
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      # Bilinen zafiyetli bağımlılık (yüksek ve üstü) birleştirmeyi durdurur.
+      - run: pnpm audit --audit-level high

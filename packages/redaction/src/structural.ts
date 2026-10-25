@@ -1,4 +1,5 @@
 import { Counter, redacted } from "./counter.ts";
+import { statelessRegExp, withoutStateFlags } from "./regex.ts";
 
 /**
  * M1: yapısal reddet listesi. Alan/tür düzeyinde, desenden bağımsız: değer neye benzerse benzesin
@@ -26,11 +27,26 @@ export const DEFAULT_PROFILE: StructuralProfile = {
   nameValueSecretNames: SECRETISH_KEY,
 };
 
+/**
+ * Profil ifadeleri her düğümde AYNI RegExp ile `test` edilir: `g`/`y` bayrağı `lastIndex` taşır ve
+ * sonraki anahtarda eşleşme atlatır (ör. `maskKeys: /^kimlik$/g` varsayılan `password` maskesini
+ * aralıklı olarak düşürüyordu). Birleşime ve tek başına kullanılan ifadeye bu bayraklar taşınmaz.
+ */
 function union(a: RegExp | undefined, b: RegExp | undefined): RegExp | undefined {
-  if (!a) return b;
-  if (!b) return a;
-  const flags = [...new Set([...a.flags, ...b.flags])].join("");
+  if (!a || !b) {
+    const one = a ?? b;
+    return one && statelessRegExp(one);
+  }
+  const flags = [...new Set([...withoutStateFlags(a), ...withoutStateFlags(b)])].join("");
   return new RegExp(`(?:${a.source})|(?:${b.source})`, flags);
+}
+
+/** Kaydedilmeden doğrudan verilen profil için aynı koruma (kayıtlı profiller zaten durumsuz). */
+function stateless(p: StructuralProfile): StructuralProfile {
+  const regexes = [p.dropKeys, p.maskKeys, p.nameValueSecretNames];
+  if (!regexes.some((re) => re !== undefined && (re.global || re.sticky))) return p;
+  const fix = (re: RegExp | undefined): RegExp | undefined => re && statelessRegExp(re);
+  return { ...p, dropKeys: fix(p.dropKeys), maskKeys: fix(p.maskKeys), nameValueSecretNames: fix(p.nameValueSecretNames) };
 }
 
 /**
@@ -65,7 +81,7 @@ export function getProfile(name: string): StructuralProfile {
 const MAX_DEPTH = 48;
 
 export function applyStructural(value: unknown, profile: StructuralProfile, counter: Counter): unknown {
-  return walk(value, profile, counter, [], 0);
+  return walk(value, stateless(profile), counter, [], 0);
 }
 
 function walk(value: unknown, p: StructuralProfile, c: Counter, path: readonly string[], depth: number): unknown {

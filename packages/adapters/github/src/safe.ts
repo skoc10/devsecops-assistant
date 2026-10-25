@@ -1,6 +1,21 @@
 import { OpsError } from "@ops/contracts";
 
-export const REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
+/** `sahip/ad`. Depo adı `.` veya `..` olamaz (GitHub de yasaklar): ad API yoluna girer, `encodeURIComponent` noktaları kaçışlamaz. */
+export const REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/;
+
+/** Dal/etiket/SHA karakter kümesi (araç şemasındaki desen). */
+export const GIT_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+
+/**
+ * `git check-ref-format` kuralları, karakter kümesine ek olarak: `..` ve `//` yok, `/` veya `.` ile bitmez, hiçbir
+ * bileşen `.` ile başlamaz ya da `.lock` ile bitmez. Ref API yollarına girer (`.../git/ref/heads/<ref>`, compare):
+ * nokta bölümleri yol gezinmesine dönüşmesin.
+ */
+export function isGitRef(v: string): boolean {
+  return GIT_REF.test(v) && !v.includes("..") && !v.includes("//") && !v.endsWith("/") && !v.endsWith(".") && v.split("/").every((c) => !c.startsWith(".") && !c.endsWith(".lock"));
+}
+
+export const GIT_REF_MESSAGE = "geçersiz git ref: '..', '//', sonda '/' veya '.', '.' ile başlayan ya da '.lock' ile biten bileşen olamaz";
 
 /**
  * Depoya özgü adlar (iş/adım/workflow/dal adı...) KALIP-DOĞRULAMALI KISA TANIMLAYICIYA indirgenir:

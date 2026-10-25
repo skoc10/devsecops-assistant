@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
+import { posix } from "node:path";
 import { Scalar, isScalar, parseDocument, visit } from "yaml";
 import { z } from "zod";
 import { RISK_CLASSES, SensitivitySchema, TOOLSET_PATTERN, TOOL_NAME_PATTERN } from "@ops/contracts";
@@ -15,6 +18,86 @@ const ABS_PATH = z
   .refine((p) => p.startsWith("/") && !p.includes("\0") && !p.split("/").includes(".."), "mutlak yol olmalı ve '..' içermemeli");
 
 const SHA256 = z.string().regex(/^[0-9a-f]{64}$/, "64 haneli küçük harf sha256 beklenir");
+
+/** Kimlik/secret konumları: ev dizinine göre kök (kendisi, içi, ATASI) ve her yerde bileşen dizisi olarak reddedilir. */
+const SECRET_LOCATIONS = [".ssh", ".aws", ".kube", ".docker", ".gnupg", ".config/gcloud", ".azure", "Library/Keychains", ".ops-assistant"] as const;
+/**
+ * RO bağın bile etkin yetki verdiği çalışma zamanı/IPC konumları: Unix soketlerine (docker.sock, ssh-agent, D-Bus/
+ * keyring) ve aygıt dosyalarına salt-okunur bağ üzerinden de bağlanılır/yazılır; host `/proc` aynı kullanıcının diğer
+ * süreçlerinin ortamını (secret) okutur. Kendisi, içi ve ATASI reddedilir.
+ */
+const RUNTIME_ROOTS = ["/proc", "/sys", "/dev", "/run", "/var/run", "/tmp", "/var/tmp", "/var/folders", "/private/tmp", "/private/var/run", "/private/var/tmp", "/private/var/folders"] as const;
+
+export interface BindContext {
+  /** Kullanıcının ev dizini. */
+  readonly home: string;
+  /** Ürün durum dizini (`OPS_HOME`); varsayılan `~/.ops-assistant` her durumda korunur. */
+  readonly opsHome?: string;
+  /** Var olan yolun gerçek (sembolik bağları çözülmüş) yolu; yoksa undefined. */
+  readonly realpath?: (p: string) => string | undefined;
+}
+
+const realpathOrUndefined = (p: string): string | undefined => {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return undefined;
+  }
+};
+
+/** `HOME` boşsa parola kaydındaki ev dizini (koruma sessizce düşmesin). */
+function homeDir(): string {
+  const h = homedir();
+  if (h !== "") return h;
+  try {
+    return userInfo().homedir || "/";
+  } catch {
+    return "/";
+  }
+}
+
+export function defaultBindContext(): BindContext {
+  const opsHome = process.env["OPS_HOME"];
+  return { home: homeDir(), ...(opsHome ? { opsHome } : {}), realpath: realpathOrUndefined };
+}
+
+/** Karşılaştırma biçimleri: mutlak + sözcüksel normalleştirilmiş, küçük harf (macOS/Windows harfe duyarsız) ve NFKC katlanmış. */
+const forms = (p: string): string[] => {
+  const r = posix.resolve(p);
+  return [...new Set([r.toLowerCase(), posix.resolve(r.normalize("NFKC")).toLowerCase()])];
+};
+/** `p`, `root`un kendisi ya da altında mı? */
+const inside = (p: string, root: string): boolean => p === root || root === "/" || p.startsWith(`${root}/`);
+
+/**
+ * Salt-okunur bağ (`roBinds`) reddedilmeli mi? `network: host` sunucusu bağlananı okuyup dışarı taşıyabilir (yalnız
+ * `command`/`files` sha256 ile pinlidir). Reddedilenler: `/`; ev dizini ve ataları; kimlik/secret konumları (`.ssh`,
+ * `.aws`, `.kube`, `.docker`, `.gnupg`, `.config/gcloud`, `.azure`, `Library/Keychains`) ve ürün durum dizini
+ * (`~/.ops-assistant`, `$OPS_HOME`) — kendisi, içi veya atası; çalışma zamanı/IPC konumları ve `*.sock` soketleri.
+ * Eşleşme harfe duyarsızdır; sözcüksel yol ve (varsa) gerçek yol ayrı ayrı denetlenir. Gerekçe döner; izinliyse null.
+ */
+export function roBindProblem(path: string, ctx: BindContext = defaultBindContext()): string | null {
+  const withReal = (p: string | undefined): string[] => (p ? [p, ctx.realpath?.(p)].filter((x): x is string => x !== undefined).flatMap(forms) : []);
+  const homes = withReal(ctx.home);
+  const roots = [...homes.flatMap((h) => SECRET_LOCATIONS.map((s) => `${h === "/" ? "" : h}/${s.toLowerCase()}`)), ...withReal(ctx.opsHome)];
+  const sequences = SECRET_LOCATIONS.map((s) => s.toLowerCase().split("/"));
+  for (const b of withReal(path)) {
+    if (b === "/") return "kök dizin";
+    if (homes.some((h) => inside(h, b))) return "ev dizini veya atası";
+    if (roots.some((r) => inside(b, r) || inside(r, b))) return "kimlik/secret konumu veya ürün durum dizini (kendisi, içi ya da atası)";
+    const segs = b.split("/");
+    if (sequences.some((q) => segs.some((_, i) => q.every((s, j) => segs[i + j] === s)))) return "kimlik/secret konumu";
+    if (RUNTIME_ROOTS.some((r) => inside(b, r) || inside(r, b))) return "çalışma zamanı/IPC konumu (soket, aygıt, /proc; kendisi, içi ya da atası)";
+    if (segs.some((s) => /\.(sock|socket)$/.test(s))) return "Unix soketi";
+  }
+  return null;
+}
+
+/** Ek salt-okunur yol: mutlak, '..'sız ve `roBindProblem` yasaklarına takılmayan. */
+const RO_BIND = ABS_PATH.superRefine((p, ctx) => {
+  const why = roBindProblem(p);
+  if (why) ctx.addIssue({ code: "custom", message: `salt-okunur bağ reddedildi (${why}): ${p.slice(0, 120)}` });
+});
 
 const ARG_NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const NO_CONTROL = /^[^\u0000-\u001f\u007f]*$/;
@@ -77,8 +160,8 @@ export const McpServerSchema = z.strictObject({
     .default({})
     .refine((e) => Object.keys(e).length <= 10, "en çok 10 ortam değişkeni")
     .refine((e) => Object.keys(e).every((k) => !SECRET_ENV.test(k)), "v0: sunuculara kimlik/secret ortam değişkeni verilmez"),
-  /** Çalışma zamanı kütüphaneleri vb. için ek SALT-OKUNUR yollar (ör. node kurulum öneki). */
-  roBinds: z.array(ABS_PATH).max(10).default([]),
+  /** Çalışma zamanı kütüphaneleri vb. için ek SALT-OKUNUR yollar (ör. node kurulum öneki). Kimlik/secret/IPC konumları reddedilir. */
+  roBinds: z.array(RO_BIND).max(10).default([]),
   /** `none`: ağ ad alanı ayrı (ENFORCED). `host`: kısıtsız host ağı — allowlist YOK (Planned); açık onay ister. */
   network: z.enum(["none", "host"]).default("none"),
   acknowledgeUnrestrictedNetwork: z.boolean().optional(),

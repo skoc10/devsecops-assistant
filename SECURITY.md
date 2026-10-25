@@ -26,10 +26,12 @@ Ayrıntı: [docs/design/08-threat-model.md](docs/design/08-threat-model.md). Her
 
 - Aynı kullanıcı hesabında ptrace/bellek okuyabilen zararlı süreç **kapsam dışıdır**.
 - Kullanıcının kendi kabuğunda / ortamında duran kimlikler (ör. `~/.kube/config`) ürünün denetimi dışındadır; yalnız uyarılır.
-- Denetim zinciri **tamper-tespit** sağlar, tamper-önleme değil; kuyruk kesme dış çapa olmadan tespit edilemez.
+- Denetim zinciri **tamper-tespit** sağlar, tamper-önleme değil. Baş çapası zincir anahtarıyla MAC'lidir (silinen/sahte çapa kesmeyi aklamaz); eski geçerli çapanın geri yüklenmesi ve günlük + çapanın birlikte silinmesi dış çapa olmadan tespit edilemez. Aynı günlüğe yazan süreçler (opsd + tek seferlik komutlar) dosya kilidiyle sıralanır.
 - JS bellekte secret silme **en iyi çabadır**.
 - Sütun maskeleme (M4) `Best-effort`tur; en güçlü savunma veritabanında maskeli view'dır.
 - Karantina varsayılan **kapalıdır** ve yalnız log/olay araçlarını kapsar; diğer untrusted araçlar taint ile korunur.
+- macOS'ta seatbelt profili güncel sürümde (macOS 27) süreç başlatamıyor: sandbox gerektiren araçlar (kabuk, çalışma alanı/IaC, MCP köprüsü, Cursor) macOS'ta **kapalıdır** (fail-closed). Linux/bubblewrap etkilenmez.
+- `trust_zone: local` yalnız loopback uca verilebilir; loopback'te dinleyen ve buluta aktaran bir vekil/tünel ürün tarafından görülemez (local-only kullanıcı beyanına dayanır).
 - Skill/runbook sezgisel taramaları (`injection_phrase`, `external_url`, …) `Best-effort`tir: temiz çıkış güven değildir.
 - Anthropic/OpenAI-uyumlu/Cursor sağlayıcıları ve model kademesi yerel sahte uçlara karşı test edildi; **gerçek servislere karşı doğrulanmadı**.
 - `ops replay` modelin metnini göstermez (denetim bunu saklamaz); yalnız eylem çizelgesini kurar.

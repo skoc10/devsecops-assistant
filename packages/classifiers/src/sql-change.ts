@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { parseSync } from "libpg-query";
 import { riskRank } from "@ops/contracts";
 import type { RiskClass, SqlClassification } from "@ops/contracts";
-import { MAX_SQL_CHARS, walkKit } from "./sql.ts";
-import type { WalkCtx, WalkObj } from "./sql.ts";
+import { MAX_SQL_CHARS, emptyClassification, walkKit } from "./sql.ts";
+import type { PgSqlClassification, WalkCtx, WalkObj } from "./sql.ts";
 
 /**
  * PostgreSQL DEĞİŞİKLİK sınıflayıcısı (`db.change.*`): gerçek ayrıştırıcıyla her ifadeyi AST allowlist'ten
@@ -41,7 +41,7 @@ export interface ChangeStatement {
   readonly lockMode: LockMode;
   /** Yalnız okunan ilişkiler (alt sorgu, USING, FROM, FK hedefi...). */
   readonly reads: readonly ChangeRelation[];
-  /** WHERE'siz UPDATE/DELETE. */
+  /** WHERE'siz ya da WHERE'i satırları sınırlamayan (sütuna başvurmayan) UPDATE/DELETE. */
   readonly unbounded: boolean;
   /** CREATE TABLE/VIEW: hedefin bu ifadeyle yaratıldığı (önceden var olması gerekmez). */
   readonly creates: boolean;
@@ -55,7 +55,7 @@ export interface ChangeAnalysis {
   readonly risk: RiskClass;
   /** İfade metinlerinin sha256'sı (onaylanan ifade seti). */
   readonly digest: string;
-  readonly classification: SqlClassification;
+  readonly classification: PgSqlClassification;
 }
 
 const LOCK_ORDER: readonly LockMode[] = ["ACCESS SHARE", "ROW EXCLUSIVE", "SHARE", "ACCESS EXCLUSIVE"];
@@ -76,7 +76,7 @@ const ALTER_RISK: Readonly<Record<string, RiskClass>> = {
   AT_AlterColumnType: "destroy",
 };
 
-const empty = (n = 0): SqlClassification => ({ parsed: n > 0, statementCount: n, statementKinds: [], relations: [], columnRefs: [], functions: [], wholeRowRefs: [], hasStarSelect: false });
+const empty = (n = 0): PgSqlClassification => emptyClassification(n > 0, n);
 const deny = (reason: string, n = 0): ChangeAnalysis => ({ allowed: false, reason, statements: [], risk: "destroy", digest: "", classification: empty(n) });
 
 /** Değişiklik ifadesinde bulunmaması gereken (boş olmayan) alanlar. */
@@ -182,6 +182,35 @@ interface Built {
   creates: boolean;
 }
 
+/**
+ * WHERE hedefin satırlarını gerçekten sınırlıyor mu? Hedefin sütununa başvurmayan koşul (`1=1`, `true`,
+ * `'a'='a'`, `EXISTS (alt sorgu)`, `UPDATE … FROM o WHERE o.x = 1`) her satırı seçer → WHERE'siz ifadeyle
+ * aynı sınıf. Alt sorgunun kendi sütunları sayılmaz; `id IN (…)` gibi dış ifade sayılır; nitelenmemiş
+ * sütun hedefin sütunu kabul edilir. Sözdizimseldir: `WHERE id > 0` gibi her satırı seçen sütunlu koşulu
+ * tanımaz — oradaki sınır onaylı `maxRows` ve önizlemedeki satır tahminidir.
+ */
+function constrainsRows(where: unknown, relation: unknown): boolean {
+  const own = new Set<string>();
+  if (isObj(relation)) {
+    if (typeof relation["relname"] === "string") own.add(relation["relname"]);
+    const alias = relation["alias"];
+    if (isObj(alias) && typeof alias["aliasname"] === "string") own.add(alias["aliasname"]);
+  }
+  const refs = (v: unknown): boolean => {
+    if (Array.isArray(v)) return v.some(refs);
+    if (!isObj(v)) return false;
+    for (const [k, x] of Object.entries(v)) {
+      if (k === "ColumnRef") {
+        const fields = isObj(x) && Array.isArray(x["fields"]) ? (x["fields"] as unknown[]) : [];
+        const qualifier = fields.length > 1 ? strVal(fields[fields.length - 2]) : null;
+        if (fields.length <= 1 || (qualifier !== null && own.has(qualifier))) return true;
+      } else if (k !== "subselect" && refs(x)) return true;
+    }
+    return false;
+  };
+  return where !== undefined && refs(where);
+}
+
 function build(top: WalkObj, ctx: WalkCtx): Built {
   const key = Object.keys(top)[0];
   const b = (key ? top[key] : undefined) as WalkObj;
@@ -204,7 +233,7 @@ function build(top: WalkObj, ctx: WalkCtx): Built {
       walk(b["targetList"]);
       walk(b["fromClause"]);
       walk(b["whereClause"]);
-      const unbounded = b["whereClause"] === undefined;
+      const unbounded = !constrainsRows(b["whereClause"], b["relation"]);
       return { kind: "update", risk: unbounded ? "deploy" : "mutate", targets: [t], lockMode: "ROW EXCLUSIVE", unbounded, creates: false };
     }
     case "DeleteStmt": {
@@ -212,7 +241,7 @@ function build(top: WalkObj, ctx: WalkCtx): Built {
       const t = writeTarget(b["relation"], ctx, 1, "DELETE");
       walk(b["usingClause"]);
       walk(b["whereClause"]);
-      const unbounded = b["whereClause"] === undefined;
+      const unbounded = !constrainsRows(b["whereClause"], b["relation"]);
       return { kind: "delete", risk: unbounded ? "destroy" : "mutate", targets: [t], lockMode: "ROW EXCLUSIVE", unbounded, creates: false };
     }
     case "CreateStmt": {
@@ -322,7 +351,10 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
   const columnRefs: SqlClassification["columnRefs"][number][] = [];
   const functions = new Set<string>();
   const wholeRow = new Set<string>();
+  const renamed = new Set<string>();
   let hasStar = false;
+  let setOperation = false;
+  let naturalJoin = false;
   let risk: RiskClass = "mutate";
   try {
     let parts: { text: string; node: WalkObj }[];
@@ -350,8 +382,11 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
       }
       for (const c of ctx.columnRefs) columnRefs.push(c);
       for (const f of ctx.functions) functions.add(f);
-      for (const w of [...ctx.rowJsonArgs, ...ctx.singleNameRefs.filter((n) => ctx.aliases.has(n))]) wholeRow.add(w);
+      for (const w of walkKit.wholeRowOf(ctx)) wholeRow.add(w);
+      for (const r of ctx.renamed) renamed.add(r);
       if (ctx.hasStar) hasStar = true;
+      if (ctx.setOp) setOperation = true;
+      if (ctx.natural) naturalJoin = true;
       kinds.push(Object.keys(p.node)[0] as string);
       if (riskRank(built.risk) > riskRank(risk)) risk = built.risk;
       statements.push({ index, kind: built.kind, risk: built.risk, text: p.text, targets: built.targets, lockMode: built.lockMode, reads, unbounded: built.unbounded, creates: built.creates });
@@ -360,7 +395,7 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
     if (e instanceof Reject) return deny(e.message);
     throw e;
   }
-  const classification: SqlClassification = {
+  const classification: PgSqlClassification = {
     parsed: true,
     statementCount: statements.length,
     statementKinds: kinds,
@@ -369,6 +404,9 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
     functions: [...functions],
     wholeRowRefs: [...wholeRow],
     hasStarSelect: hasStar,
+    setOperation,
+    naturalJoin,
+    renamedRelations: [...renamed],
   };
   const digest = createHash("sha256").update(JSON.stringify(statements.map((s) => s.text))).digest("hex");
   return { allowed: true, statements, risk, digest, classification };

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { estimateTokens } from "@ops/contracts";
 import { findCanary, makeCanary } from "@ops/testkit";
 import type { Canary } from "@ops/testkit";
-import { KnownSecrets, processOutput, registerProfile, scrubText } from "../src/index.ts";
+import { Counter, DEFAULT_MASKING, KnownSecrets, processOutput, registerProfile, scrubText } from "../src/index.ts";
 import type { OutputPolicy } from "../src/index.ts";
 import { fake } from "./helpers.ts";
 
@@ -67,6 +67,43 @@ describe("S-06 çekirdeği: canary çıktı boru hattından sızmaz", () => {
     expect(leakIn([out], [canary])).toEqual([]);
     expect(out).not.toContain("\u001b");
     expect(out).toContain("‹redacted:github-token›");
+  });
+
+  it("kayıtlı değer (M3) desenden (M2) önce maskelenir: kısmi kv-secret eşleşmesi parolayı bölüp kalanını sızdıramaz", () => {
+    const known = new KnownSecrets();
+    const pass = "correct horse battery staple"; // boşluklu (passphrase) parola
+    const pw2 = "Tr0ub4dor,3xYz!Q9"; // virgüllü: kv-secret değeri virgülde kesilir
+    known.add("db1", pass);
+    known.add("db2", pw2);
+    const a = scrubText(`FATAL: could not connect, password=${pass}`, known);
+    const b = scrubText(`DATABASE_PASSWORD: ${pw2}`, known);
+    expect(a).not.toContain("horse");
+    expect(b).not.toContain("3xYz");
+    const p = processOutput({ log: `password=${pass}`, env: `DATABASE_PASSWORD: ${pw2}` }, "", policy({}, known));
+    expect(p.evidenceText).not.toContain("battery");
+    expect(p.evidenceText).not.toContain("3xYz");
+  });
+
+  it("extraPatternRules scrubText ve processOutput'ta uygulanır; `g`siz/`y`li kural da her geçişi maskeler", () => {
+    const rules = [
+      { id: "corp-token", regex: /\bCORP-[0-9]{8}\b/ }, // bilerek `g`siz: yalnız ilk geçiş maskelenmemeli
+      { id: "corp-ref", regex: /REF#[A-Z]{6}/y },
+    ];
+    const c = new Counter();
+    expect(scrubText("a CORP-12345678 b CORP-87654321 REF#ABCDEF REF#GHIJKL", new KnownSecrets(), c, { extraPatternRules: rules })).toBe(
+      "a ‹redacted:corp-token› b ‹redacted:corp-token› ‹redacted:corp-ref› ‹redacted:corp-ref›",
+    );
+    expect(c.toSummary()).toEqual([
+      { rule: "corp-ref", count: 2 },
+      { rule: "corp-token", count: 2 },
+    ]);
+    const out = processOutput({ v: "CORP-12345678", list: ["x CORP-87654321 REF#ABCDEF"] }, "özet CORP-11112222", policy({ extraPatternRules: rules }));
+    for (const ch of [out.evidenceText, out.viewText, out.summary]) expect(ch).not.toMatch(/CORP-\d{8}|REF#[A-Z]{6}/);
+    expect(out.redactions.find((r) => r.rule === "corp-token")?.count).toBe(3);
+    expect(out.redactions.find((r) => r.rule === "corp-ref")?.count).toBe(1);
+    // çağıranın RegExp nesnesi değiştirilmez
+    expect(rules[0]?.regex.global).toBe(false);
+    expect(rules[1]?.regex.lastIndex).toBe(0);
   });
 
   it("M1 secret anahtarı ve yapılandırılmış profil kuralı birlikte çalışır", () => {
@@ -138,5 +175,62 @@ describe("B-03: referansla taşıma ve token tavanı", () => {
     expect(out.evidenceText).not.toContain("example.invalid");
     expect(out.viewText).not.toContain("example.invalid");
     expect(out.redactions.some((r) => r.rule === "m4:column:hash")).toBe(true);
+  });
+
+  it("tablodaki jsonb/dizi hücrelerinde PII kanıta ve görünüme gitmez", () => {
+    const table = {
+      columns: [{ name: "id" }, { name: "meta" }, { name: "tags" }],
+      rows: [[1, { iletisim: { eposta: "ayse.yilmaz@example.invalid", tel: "+90 532 123 45 67" } }, ["kart 4111 1111 1111 1111"]]],
+    };
+    const out = processOutput(table, undefined, policy({ masking: DEFAULT_MASKING }));
+    for (const ch of [out.evidenceText, out.viewText]) expect(ch).not.toMatch(/ayse\.yilmaz|532 123|4111/);
+    expect(out.redactions.map((r) => r.rule)).toEqual(expect.arrayContaining(["m4:email", "m4:phone", "m4:card"]));
+  });
+});
+
+describe("ReDoS: tek satırlık saldırgan girdi olay döngüsünü kilitlemez", () => {
+  const N = 256 * 1024; // günlük araçlarının izin verdiği tek satır üst sınırı
+  const rep = (unit: string): string => unit.repeat(Math.ceil(N / unit.length)).slice(0, N);
+  // Düzeltme öncesi her biri processOutput'ta saniyeler–dakikalar sürüyordu (karesel geri izleme):
+  // ör. 256 KB `token`×n ≈ 51 sn, `eyJ-`×n ≈ 107 sn, `a`×n ≈ 41 sn.
+  const hostile: readonly (readonly [string, () => string])[] = [
+    ["kv-secret: token×n", () => rep("token")],
+    ["jwt: eyJ-×n", () => rep("eyJ-")],
+    ["url-credentials + e-posta: a-×n", () => rep("a-")],
+    ["e-posta yerel kısım: a×n", () => rep("a")],
+    ["e-posta alan adı geri izlemesi", () => rep(`${"a".repeat(64)}@${"b.".repeat(126)}b1`)],
+    ["END'siz BEGIN PRIVATE KEY×n", () => rep("-----BEGIN PRIVATE KEY-----!\n")],
+    ["END'siz BEGIN CERTIFICATE×n", () => rep("-----BEGIN CERTIFICATE-----!\n")],
+    ["M3 çözme: %C5×n", () => rep("%C5")],
+    ["M3 çözme: \\u0041×n", () => rep("\\u0041")],
+    ["M3 çözme: &amp;×n", () => rep("&amp;")],
+  ];
+  const known = new KnownSecrets();
+  known.add("db", "Tr0ub4dor&3!/x+y=ab");
+  known.add("tok", fake.highEntropy());
+  const p = policy({ maxBytes: 300_000, masking: DEFAULT_MASKING }, known);
+
+  // Cömert sınır (titrek olmasın): hedef ≪ 300 ms, yerelde ≈ 10–90 ms; karesel davranış onlarca saniye.
+  it.each(hostile)("%s: 256 KB tek satır (nesne ve günlük metni) 1,5 sn'nin altında", (_name, gen) => {
+    const line = gen();
+    for (const data of [{ log: line }, line]) {
+      const t = performance.now();
+      processOutput(data, "özet", { ...p, logLike: typeof data === "string" });
+      expect(performance.now() - t).toBeLessThan(1500);
+    }
+  });
+
+  it("uzun saldırgan satırın sonundaki secret ve PII yine maskelenir (sınırlı nicelikler tespiti daraltmaz)", () => {
+    const pw = fake.password();
+    const jwt = fake.jwt();
+    const tail = ` password=${pw} dsn=postgres://app:${pw}@db.example.invalid/x auth ${jwt} mail ali.veli@example.invalid`;
+    const out = processOutput({ log: `${rep("token-a-eyJ-")}${tail}` }, undefined, p);
+    for (const ch of [out.evidenceText, out.viewText]) {
+      expect(ch).not.toContain(pw);
+      expect(ch).not.toContain(jwt.split(".")[1] as string);
+      expect(ch).not.toContain("ali.veli@");
+    }
+    const rules = out.redactions.map((r) => r.rule);
+    expect(rules).toEqual(expect.arrayContaining(["kv-secret", "url-credentials", "jwt", "m4:email"]));
   });
 });

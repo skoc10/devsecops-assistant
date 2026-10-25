@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -42,6 +42,28 @@ describe("EncryptedFileStore", () => {
     await EncryptedFileStore.open(path, pass("p"), FAST);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect((await stat(join(dir, "vault"))).mode & 0o777).toBe(0o700);
+  });
+
+  it("R-V2: önceden dikilmiş vault.json.tmp symlink'i izlenmez (yazım hedefe gitmez, symlink kasa olmaz)", async () => {
+    await mkdir(join(dir, "vault"), { recursive: true });
+    const victim = join(dir, "kurban.txt");
+    await writeFile(victim, "dokunulmamali");
+    await symlink(victim, `${path}.tmp`);
+    const s = await EncryptedFileStore.open(path, pass("p"), FAST);
+    await s.set("a", new TextEncoder().encode("deger-12345"));
+    expect(await readFile(victim, "utf8")).toBe("dokunulmamali");
+    const st = await lstat(path);
+    expect(st.isSymbolicLink()).toBe(false);
+    expect(st.isFile()).toBe(true);
+    expect(st.mode & 0o777).toBe(0o600);
+    // sarkan (hedefi olmayan) symlink: hedef oluşturulmaz
+    await symlink(join(dir, "yok.txt"), `${path}.tmp`);
+    await s.set("b", new Uint8Array([1]));
+    await expect(stat(join(dir, "yok.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(path)).isSymbolicLink()).toBe(false);
+    const again = await EncryptedFileStore.open(path, pass("p"), FAST);
+    expect(new TextDecoder().decode((await again.get("a"))!)).toBe("deger-12345");
+    expect(await again.list("")).toEqual(["a", "b"]);
   });
 
   it("yanlış parola vault_locked verir ve hiçbir şey okutmaz", async () => {

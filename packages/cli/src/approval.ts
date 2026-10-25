@@ -86,6 +86,12 @@ export class TtyApprovalGate implements ApprovalGate {
   private readonly granted: number[] = [];
   private total = 0;
   private prod = 0;
+  /**
+   * Onaylar SIRAYLA sorulur (aynı anda tek istem). Aynı turdaki paralel çağrılar eşzamanlı istenirse özetler
+   * terminalde iç içe geçer, tek yanıt başka bir isteği onaylayabilir ve bütçe artırım öncesi sayaçla
+   * değerlendirildiği için atlanırdı.
+   */
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(opts: TtyApprovalOptions) {
     this.o = opts;
@@ -96,7 +102,13 @@ export class TtyApprovalGate implements ApprovalGate {
     return `Bu oturumda ${this.total} onay verdiniz${this.prod ? `, ${this.prod} tanesi prod` : ""}.`;
   }
 
-  async request(req: ApprovalRequest): Promise<ApprovalOutcome> {
+  request(req: ApprovalRequest): Promise<ApprovalOutcome> {
+    const run = this.queue.then(() => this.prompt(req));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async prompt(req: ApprovalRequest): Promise<ApprovalOutcome> {
     const tty = await this.o.openTty().catch(() => null);
     if (!tty) return { approved: false, reason: "onay terminali (TTY) yok: onay verilemez" };
     this.events.emit("start");

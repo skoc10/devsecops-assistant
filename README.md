@@ -81,7 +81,7 @@ node packages/cli/src/bin.ts chat --embedded --local-only             # yalnız 
 
 ## Geliştirme
 
-Gereksinimler: Node ≥ 22.13, pnpm ≥ 10.
+Gereksinimler: Node 22.18+ veya 24+ (CLI `.ts` kaynağını derlemeden çalıştırır; tip ayıklama bu sürümlerde bayraksız açıktır — Node 23.0–23.5 desteklenmez), pnpm ≥ 10.
 
 ```sh
 pnpm install

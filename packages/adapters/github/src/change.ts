@@ -6,7 +6,7 @@ import { KnownSecrets, scrubText } from "@ops/redaction";
 import { writeCheck } from "@ops/workspace";
 import { ghError } from "./client.ts";
 import type { GithubClient, GhResponse } from "./client.ts";
-import { int, isoOrUndefined, safeName, sha40 } from "./safe.ts";
+import { GIT_REF_MESSAGE, int, isGitRef, isoOrUndefined, safeName, sha40 } from "./safe.ts";
 
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {});
@@ -46,6 +46,8 @@ export interface PrArgs {
  * dizinleri YASAK — T21), içerik/başlık/gövde secret benzeri değer taşıyamaz, toplam boyut sınırlı.
  */
 export function validatePr(a: PrArgs): void {
+  // dal adları API yollarına girer (`.../git/ref/heads/<dal>`): şemanın yanı sıra burada da
+  if (!isGitRef(a.base) || !isGitRef(a.branch)) throw new OpsError("pr_invalid", `dal adı reddedildi: ${GIT_REF_MESSAGE}`);
   if (a.branch === a.base) throw new OpsError("pr_invalid", "baş dal ile hedef dal aynı olamaz");
   const seen = new Set<string>();
   let total = 0;

@@ -5,3 +5,12 @@ packages:
 
 # Tedarik zinciri: hiçbir bağımlılığın yaşam-döngüsü (install) scripti çalışmaz.
 onlyBuiltDependencies: []
+# İzin listesinde olmayan derleme scripti olan bağımlılık sessizce atlanmaz, kurulum hata verir.
+strictDepBuilds: true
+# Yeni yayımlanan sürüm en az 1 gün (dakika) beklenir: ele geçirilmiş hesapla yayımlanan paketler
+# çoğunlukla saatler içinde geri çekilir. (Mevcut kilit dosyası bu kuralla birebir aynı çözülür.)
+minimumReleaseAge: 1440
+# Bir paketin güven kanıtı (trusted publishing / provenance) önceki sürümlerine göre düşerse reddedilir.
+trustPolicy: no-downgrade
+# Dolaylı bağımlılıklar git/tarball gibi kayıt dışı kaynaklardan gelemez.
+blockExoticSubdeps: true

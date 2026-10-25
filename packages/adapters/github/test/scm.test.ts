@@ -53,6 +53,24 @@ describe("scm araçları (PEP üzerinden, sahte GitHub)", () => {
     }
   });
 
+  it("ref/depo adı nokta bölümleri (diff base/head, file.read ref, commit.list branch, '..' depo) şemada reddedilir; API'ye istek gitmez", async () => {
+    const h = await makeGhHarness({ kind: "scm" });
+    try {
+      const calls: [string, Record<string, unknown>][] = [
+        ["scm.diff.get", { repo: BUILD_REPO, base: "main/../../../../other/repo/compare/x", head: BUILD_SHA }],
+        ["scm.diff.get", { repo: BUILD_REPO, base: "main", head: "feature//x" }],
+        ["scm.file.read", { repo: BUILD_REPO, path: "README.md", ref: "v1.0/" }],
+        ["scm.file.read", { repo: BUILD_REPO, path: "README.md", ref: "refs/.hidden" }],
+        ["scm.commit.list", { repo: BUILD_REPO, since: "2h", branch: "release.lock" }],
+        ["scm.pr.list", { repo: "acme/.." }],
+      ];
+      for (const [tool, args] of calls) expect((await h.call(tool, args)).reasonCode, `${tool} ${JSON.stringify(args)}`).toBe("schema_invalid");
+      expect(h.api.requests.length).toBe(0);
+    } finally {
+      await h.stop();
+    }
+  });
+
   it("pr.list ve commit.list: tipli alanlar + serbest metin (başlık/mesaj) yalnız untrusted çıktıda; zaman penceresi", async () => {
     const h = await makeGhHarness({ kind: "scm" });
     try {

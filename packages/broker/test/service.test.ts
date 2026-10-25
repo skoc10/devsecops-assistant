@@ -2,9 +2,12 @@ import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { KnownSecrets, MIN_KNOWN_SECRET_BYTES } from "@ops/redaction";
 import { buildKubeconfig, CaptureSink, generateTestPki, makeCanary } from "@ops/testkit";
+import { MIN_KNOWN_SECRET_BYTES as BROKER_MIN_KNOWN_SECRET_BYTES } from "../src/service.ts";
 import {
   AUDIT_KEY_NAME,
+  LocalBroker,
   MemorySecretStore,
   ProfileRegistry,
   ProfileService,
@@ -98,6 +101,55 @@ describe("ProfileService", () => {
     });
     expect(await store.list("")).toEqual([]);
     expect(registry.list()).toEqual([]);
+  });
+
+  it("R-K1: paylaşılan kubeconfig'in tokenFile'ı (../home/.vault-token) kasaya alınmaz; açık izin servisten geçer", async () => {
+    const { store, registry, svc } = await make();
+    const pki = await generateTestPki();
+    const victim = makeCanary("vault-token");
+    await mkdir(join(dir, "home"), { recursive: true });
+    await writeFile(join(dir, "home", ".vault-token"), `${victim.value}\n`, { mode: 0o600 });
+    await mkdir(join(dir, "dl"), { recursive: true });
+    const text = buildKubeconfig({ server, caPem: pki.caPem, tokenFile: "../home/.vault-token", namespace: "default" });
+    const err = await svc.addKubeconfig({ id: "shared", kubeconfigText: text, environment: "dev", baseDir: join(dir, "dl") }).catch((e: Error) => e);
+    expect(err).toMatchObject({ code: "kubeconfig_token_file_outside" });
+    expect((err as Error).message).not.toContain(victim.value);
+    expect(await store.list("")).toEqual([]);
+    expect(registry.list()).toEqual([]);
+
+    const ok = await svc.addKubeconfig({ id: "shared", kubeconfigText: text, environment: "dev", baseDir: join(dir, "dl"), allowExternalTokenFile: true });
+    const w = ok.warnings.join("\n");
+    expect(w).toMatch(/tokenFile kubeconfig dizininin DIŞINDA/);
+    expect(w).toMatch(/\(tokenFile\): \/.*\/home\/\.vault-token/);
+    expect(w).not.toContain(victim.value);
+  });
+
+  it("R-R6: M3'e kaydedilemeyecek kısa kimlik uyarı üretir (değer uyarıda yok); UTF-8 bayt sayılır", async () => {
+    const { store, svc } = await make();
+    const db = { environment: "dev" as const, host: "db.example", database: "app", user: "app", allowedScopes: ["public"] };
+    const short = await svc.addDatabase({ ...db, id: "kisa", password: "s3cr3t" });
+    expect(short.warnings.join("\n")).toMatch(/parola 8 bayttan kısa: bilinen-secret maskelemesine \(M3\) kaydedilemez/);
+    expect(short.warnings.join("\n")).not.toContain("s3cr3t");
+    const k1 = new KnownSecrets();
+    await new LocalBroker({ store }).prime(short.profile, k1);
+    expect(k1.size).toBe(0); // uyarının dayanağı: gerçekten kaydedilmiyor
+
+    // 7 karakter ama 8 bayt: M3'e girer, uyarı yok
+    const ok = await svc.addDatabase({ ...db, id: "yeterli", password: "şifre12" });
+    expect(ok.warnings.join("\n")).not.toMatch(/M3/);
+    const k2 = new KnownSecrets();
+    await new LocalBroker({ store }).prime(ok.profile, k2);
+    expect(k2.size).toBe(1);
+
+    // kubeconfig statik belirteci de aynı kurala tabi
+    const pki = await generateTestPki();
+    const kube = await svc.addKubeconfig({ id: "k", environment: "dev", kubeconfigText: buildKubeconfig({ server, caPem: pki.caPem, token: "abc123", namespace: "x" }) });
+    expect(kube.warnings.join("\n")).toMatch(/belirteç 8 bayttan kısa/);
+    expect(kube.warnings.join("\n")).not.toContain("abc123");
+  });
+
+  it("M3 alt sınırı @ops/redaction ile aynı (broker o pakete bağımlı değil)", () => {
+    expect(BROKER_MIN_KNOWN_SECRET_BYTES).toBe(MIN_KNOWN_SECRET_BYTES);
   });
 
   it("remove hem kaydı hem kimliği siler", async () => {

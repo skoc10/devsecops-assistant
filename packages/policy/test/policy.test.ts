@@ -151,6 +151,18 @@ describe("kurallar", () => {
     expect(engine(allow()).decide(stage)).toMatchObject({ effect: "allow" });
   });
 
+  it("öncelik deny > ask > allow: eşleşen ask kuralı dar allow'u geçersiz kılar (taban zaten ask olsa da)", () => {
+    const rules: PolicyDocument["rules"] = [...allow(), { id: "payments-sor", when: { scope: ["payments"] }, effect: "ask" }];
+    expect(engine(rules).decide(mut())).toMatchObject({ effect: "ask", reasonCode: "policy_ask", detail: "kural: payments-sor" });
+    // ask kuralı eşleşmeyen kapsamda allow yine çalışır
+    const other = mut();
+    expect(engine(rules).decide({ ...other, target: { ...other.target!, scopes: ["default"] } })).toMatchObject({ effect: "allow", detail: "kural: scale-ok" });
+    // yerel yazmada ask kuralı `approval_required` değil `policy_ask` verir → oturum yazma izni onu atlayamaz
+    const w = tool({ name: "fs.write", scope: "local", localWrite: true, profileKind: null, sensitivity: "none" });
+    const e = engine([{ id: "yazim-sor", when: { tool: "fs.write" }, effect: "ask" }]);
+    expect(e.decide(input({ tool: w, profile: null, target: null }))).toMatchObject({ effect: "ask", reasonCode: "policy_ask" });
+  });
+
   it("deploy için allow kuralı etkisiz (şema da engeller, motor da gevşetmez)", () => {
     const rules = allow({ when: { tool: "k8s.apply", profile: "test-k8s" } });
     const t = tool({ name: "k8s.apply", class: "deploy" });

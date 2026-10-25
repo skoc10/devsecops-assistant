@@ -208,6 +208,9 @@ describe("AnthropicProvider (resmî SDK, yerel sahte uç)", () => {
     expect(() => new AnthropicProvider({ apiKey: KEY, baseUrl: "https://u:p@api.example.invalid" })).toThrow(/kimlik bilgisi/);
     expect(() => new AnthropicProvider({ apiKey: KEY, baseUrl: "not a url" })).toThrow(/baseUrl/);
     expect(() => new AnthropicProvider({ apiKey: KEY, trustZone: "mars" as never })).toThrow(/trustZone/);
+    // bulut uç yapılandırmayla 'local' sayılamaz (local-only / egress:local atlatması)
+    expect(() => new AnthropicProvider({ apiKey: KEY, trustZone: "local" })).toThrow(/yalnız loopback/);
+    expect(() => new AnthropicProvider({ apiKey: KEY, baseUrl: "https://gw.example.invalid", trustZone: "local" })).toThrow(/yalnız loopback/);
     const cloud = new AnthropicProvider({ apiKey: KEY });
     expect(cloud.capabilities.trustZone).toBe("third-party-cloud");
     expect(cloud.model).toBe("claude-opus-5-5");

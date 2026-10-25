@@ -1,6 +1,7 @@
 import pg_ from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 import { makeCanary } from "@ops/testkit";
+import type { ToolResult } from "@ops/contracts";
 import { parseMaskingConfig } from "../src/index.ts";
 import type { PgDriverApi } from "../src/index.ts";
 import { ROLES, canaries, makePgHarness, pg } from "./harness.ts";
@@ -195,6 +196,65 @@ describe.skipIf(!pg)("M4: maskeli sütunlar (AST kuralı + köken + dedektörler
     const r = await h.call("db.query.read", { sql });
     expect(r.status).toBe("denied");
     expect(r.summary).toMatch(/maskeli/);
+    expect(c.state.connects).toBe(0);
+  });
+
+  // `name` değer dedektörlerine takılmaz: tek savunma AST kuralı + köken maskelemesidir.
+  const maskingName = parseMaskingConfig(["version: 1", "profiles:", "  '*':", "    maskedColumns:", "      customers: [name, email, phone]"].join("\n"));
+  const ORIGINLESS: [string, string][] = [
+    ["json_build_object(satır)", "SELECT json_build_object('r', c) AS j FROM public.customers c"],
+    ["json_agg(satır)", "SELECT json_agg(c) AS j FROM public.customers c"],
+    ["array_agg(satır)::text", "SELECT array_agg(c)::text AS j FROM public.customers c"],
+    ["satır::text", "SELECT c::text AS j FROM public.customers c"],
+    ["format('%s', satır)", "SELECT format('%s', c) AS j FROM public.customers c"],
+    ["öznitelik gösterimi (c.to_jsonb)", "SELECT c.to_jsonb AS j FROM public.customers c"],
+    ["alan seçimi ifade içinde", "SELECT lower((c).name) AS j FROM public.customers c"],
+    ["UNION ALL kolu", "SELECT 'x' AS j UNION ALL SELECT name FROM public.customers"],
+    ["sütun takma adı listesi", "SELECT lower(b) AS j FROM public.customers AS x(a, b)"],
+  ];
+
+  it("kökensiz çıktılar: sunucu köken bildirmez (köken maskelemesi göremez) → AST kuralı sorguyu çalıştırmadan reddeder", async () => {
+    // Katman bağımsızlığı: PEP/AST atlanınca bu biçimlerin sonuç sütununda köken YOK ve değer ham gelir.
+    const h0 = await makePgHarness();
+    const d = await h0.openSession();
+    try {
+      for (const sql of ["SELECT json_agg(c) AS j FROM public.customers c", "SELECT 'x' AS j UNION ALL SELECT name FROM public.customers"]) {
+        const raw = await d.session.executeRead(sql, d.limits);
+        expect(raw.columns[0]?.origin, sql).toBeUndefined();
+        expect(JSON.stringify(raw.rows), sql).toContain("Ayse");
+      }
+    } finally {
+      await d.close();
+    }
+
+    const c = counting();
+    const h = await makePgHarness({ masking: maskingName, driver: c.wrap });
+    const results: ToolResult[] = [];
+    for (const [, sql] of ORIGINLESS) {
+      const r = await h.call("db.query.read", { sql });
+      expect(r.status, sql).toBe("denied");
+      expect(r.summary, sql).toMatch(/maskeli sütun kuralı/);
+      results.push(r);
+    }
+    expect(c.state.connects).toBe(0);
+    // maskeli değer hiçbir kanala (kanıt, denetim, model) ulaşmadı
+    const sink = await h.sinkFor(results);
+    expect(sink.text()).not.toMatch(/Ayse|Mehmet/);
+    // doğrudan seçim hâlâ serbest ve köken kuralıyla maskelenir
+    const okr = await h.call("db.query.read", { sql: "SELECT id, name FROM public.customers ORDER BY id" });
+    expect(okr.status).toBe("ok");
+    expect(JSON.stringify(h.evidenceJson(okr))).not.toMatch(/Ayse|Mehmet/);
+  });
+
+  it.each([
+    ["JOIN … USING (maskeli sütun)", "SELECT count(*) AS n FROM public.customers JOIN (VALUES ('Zeynep')) v(name) USING (name)", /maskeli sütun ifade\/koşul içinde: name/],
+    ["NATURAL JOIN", "SELECT count(*) AS n FROM public.customers NATURAL JOIN (VALUES ('Zeynep')) v(name)", /NATURAL JOIN/],
+  ])("birleştirme oracle'ı reddedilir: %s", async (_n, sql, why) => {
+    const c = counting();
+    const h = await makePgHarness({ masking: maskingName, driver: c.wrap });
+    const r = await h.call("db.query.read", { sql });
+    expect(r.status).toBe("denied");
+    expect(r.summary).toMatch(why);
     expect(c.state.connects).toBe(0);
   });
 
@@ -412,6 +472,23 @@ describe.skipIf(!pg)("bağlantı güvenliği: pin, TLS, ortam değişkenleri, pa
     // hata mesajları kısa SQLSTATE'li
     expect(results[4]?.summary).toMatch(/\[42P01\]/);
     expect(results[6]?.summary).toMatch(/\[22012\]/);
+  });
+
+  it("veri istisnası mesajı hücre değerini taşımaz (sorgu başına bir değerlik kanal kapalı); SQLSTATE ve hata türü kalır", async () => {
+    const h = await makePgHarness();
+    const results = [
+      await h.call("db.query.read", { sql: "SELECT note::int AS n FROM public.customers ORDER BY id" }),
+      await h.call("db.query.read", { sql: "SELECT name::int AS n FROM public.customers ORDER BY id" }),
+      await h.call("db.query.read", { sql: "SELECT name::date AS d FROM public.customers ORDER BY id DESC" }),
+    ];
+    for (const r of results) {
+      expect(r.status, JSON.stringify(r)).toBe("error");
+      expect(r.summary).toMatch(/\[22(P02|007|008)\] invalid input syntax for type (integer|date) \(değer gizlendi\)/);
+    }
+    // ad sütunu dedektörlere takılmaz: tek savunma dbError; hiçbir kanalda (denetim, kanıt, model) yok
+    const sink = await h.sinkFor(results);
+    expect(sink.text()).not.toMatch(/Ayse|Mehmet|call \+90|555 111/);
+    expect(sink.leaks([canaries.readerPw])).toEqual([]);
   });
 });
 

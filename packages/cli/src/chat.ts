@@ -92,6 +92,26 @@ export interface ChatOptions {
   readonly approvalEvents?: EventEmitter;
   /** Yeniden kimlik doğrulama (kontrol terminalinden). Yoksa `/breakglass start` reddedilir. */
   readonly reauth?: () => Promise<{ method: string; verifiedAtMs: number }>;
+  /** Ctrl-C / SIGTERM: süren tur iptal edilir ve sohbet kapanır (takılmış model çağrısı süreci kilitlemez). */
+  readonly stop?: AbortSignal;
+}
+
+/** Yineleyiciyi sinyal gelince bırakır: uzak arka uç sinyali tanımasa da döngü takılı kalmaz. */
+async function* untilAborted<T>(source: AsyncIterable<T>, signal: AbortSignal): AsyncGenerator<T> {
+  const it = source[Symbol.asyncIterator]();
+  const aborted = new Promise<IteratorResult<T>>((resolve) => {
+    if (signal.aborted) resolve({ done: true, value: undefined });
+    else signal.addEventListener("abort", () => resolve({ done: true, value: undefined }), { once: true });
+  });
+  try {
+    for (;;) {
+      const r = await Promise.race([it.next(), aborted]);
+      if (r.done) return;
+      yield r.value;
+    }
+  } finally {
+    void it.return?.();
+  }
 }
 
 const DURATION = /^(\d{1,6})([smh]?)$/i;
@@ -109,6 +129,13 @@ export async function runChat(backend: ChatBackend, io: { input: Readable; outpu
     io.output.write(`${s}\n`);
   };
   const rl = createInterface({ input: io.input, crlfDelay: Infinity });
+  let turn: AbortController | null = null;
+  const onStop = (): void => {
+    turn?.abort();
+    rl.close();
+  };
+  if (opts.stop?.aborted) onStop();
+  else opts.stop?.addEventListener("abort", onStop, { once: true });
   // Onay istemi kontrol terminalinden okunur; sohbet girdisi o sırada DURAKLATILIR ki yanıt
   // sohbet satırı olarak (modele) gitmesin.
   opts.approvalEvents?.on("start", () => rl.pause());
@@ -138,6 +165,7 @@ export async function runChat(backend: ChatBackend, io: { input: Readable; outpu
     }
     await banner();
   }
+  opts.stop?.removeEventListener("abort", onStop);
   rl.close();
 
   async function handleLine(line: string): Promise<void> {
@@ -174,9 +202,16 @@ export async function runChat(backend: ChatBackend, io: { input: Readable; outpu
       else out(`bilinmeyen komut: ${safe(cmd ?? "")}. /help`);
       return;
     }
-    for await (const ev of backend.send(line)) {
-      const s = renderEvent(ev);
-      if (s !== null) out(s);
+    const ac = new AbortController();
+    turn = ac;
+    try {
+      for await (const ev of untilAborted(backend.send(line, ac.signal), ac.signal)) {
+        const s = renderEvent(ev);
+        if (s !== null) out(s);
+      }
+      if (ac.signal.aborted) out("⏹ tur iptal edildi");
+    } finally {
+      turn = null;
     }
   }
 

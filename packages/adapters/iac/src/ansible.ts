@@ -1,5 +1,5 @@
 import { LineCounter, isAlias, isMap, isNode, isScalar, isSeq, parseDocument } from "yaml";
-import type { Node, YAMLMap } from "yaml";
+import type { Document, Node, YAMLMap } from "yaml";
 import { riskRank } from "@ops/contracts";
 import type { RiskClass } from "@ops/contracts";
 import type { PrescanFinding } from "./terraform.ts";
@@ -12,7 +12,7 @@ const MODULE_CLASS: Readonly<Record<string, RiskClass>> = {
   // okuma / bağlam
   setup: "read", gather_facts: "read", stat: "read", find: "read", debug: "read", assert: "read", ping: "read", slurp: "read", fail: "read", meta: "read",
   set_fact: "read", include_vars: "read", getent: "read", service_facts: "read", package_facts: "read", pause: "read", add_host: "read", group_by: "read",
-  set_stats: "read", validate_argument_spec: "read", wait_for_connection: "read", include_tasks: "read", import_tasks: "read", include_role: "read",
+  set_stats: "read", validate_argument_spec: "read", wait_for_connection: "read", include_tasks: "read", import_tasks: "read", include: "read", include_role: "read",
   import_role: "read", import_playbook: "read", fetch: "read",
   // mutasyon
   copy: "mutate", template: "mutate", lineinfile: "mutate", blockinfile: "mutate", replace: "mutate", file: "mutate", user: "mutate", group: "mutate",
@@ -33,9 +33,32 @@ const TASK_KEYWORDS = new Set([
   "failed_when", "no_log", "until", "retries", "delay", "async", "poll", "connection", "remote_user", "port", "run_once", "throttle", "any_errors_fatal", "diff",
   "module_defaults", "collections", "timeout", "debugger", "first_found", "when_changed", "no_log_values", "max_fail_percentage",
 ]);
-const PLAY_TASK_LISTS = ["pre_tasks", "tasks", "post_tasks", "handlers"] as const;
+const PLAY_TASK_LISTS: readonly string[] = ["pre_tasks", "tasks", "post_tasks", "handlers"];
 const PLUGIN_DIRS = /(^|\/)(library|action_plugins|callback_plugins|connection_plugins|filter_plugins|lookup_plugins|inventory_plugins|module_utils|vars_plugins|strategy_plugins|become_plugins|cache_plugins|test_plugins|doc_fragments|ansible_collections)\//;
-const LOOKUP_PIPE = /\b(?:lookup|query|q)\s*\(\s*['"](?:ansible\.builtin\.)?pipe['"]/i;
+/** Denetleyicide komut çalıştıran lookup'lar: `pipe` ve `lines` (lookup/query/q çağrısı veya `with_pipe`/`with_lines` döngüsü). */
+const LOOKUP_PIPE = /\b(?:lookup|query|q)\s*\(\s*['"](?:ansible\.(?:builtin|legacy)\.)?(?:pipe|lines)['"]|\bwith_(?:pipe|lines)\s*:/i;
+const CONTROLLER_EXEC = /\blocal_action\b|delegate_to:\s*['"]?(localhost|127\.0\.0\.1)\b|connection:\s*['"]?local\b/;
+const ROLE_TASK_FILE = /(^|\/)roles\/[^/]+\/(tasks|handlers)\//;
+
+/** Görev listesi yükleyen modüller: hedef dosyanın görevleri AYNI ziyaretçiyle sınıflanır. */
+const TASK_INCLUDES = new Set(["include_tasks", "import_tasks", "include"]);
+/** Rol yükleyen modüller: `tasks_from`/`handlers_from` (yoksa `main`) ve rolün `meta` bağımlılıkları izlenir. */
+const ROLE_INCLUDES = new Set(["include_role", "import_role"]);
+/** Play düzeyinde playbook yükleyen anahtarlar (normalleştirilmiş; `include` eski biçim). */
+const PLAYBOOK_IMPORTS = new Set(["import_playbook", "include"]);
+/** Playbook tespiti: play (`hosts`) veya playbook içe aktarımı (FQCN dahil). */
+const PLAYBOOK_KEYS = new Set(["hosts", "import_playbook", "ansible.builtin.import_playbook", "ansible.legacy.import_playbook"]);
+/** Rol dosyası adayları (Ansible `_load_role_yaml`: uzantısız ad ve `.yml/.yaml/.json`). Sıra önemsiz: VAR OLAN her aday taranır. */
+const ROLE_FILE_EXTS = ["", ".yml", ".yaml", ".json"] as const;
+/** Jinja ifadesi/deyimi/yorumu: yol çalışma anında belirlenir → statik çözülemez. */
+const TEMPLATED = /\{\{|\{%|\{#/;
+/** include/rol zinciri derinlik sınırı: aşılırsa fail-closed (döngüler ziyaret kümeleriyle zaten sonlanır). */
+const MAX_INCLUDE_DEPTH = 24;
+/** Toplam görev ziyareti ve iç içe blok sınırı: takma ad (alias) bombası/döngüsü taramayı kilitlemez; aşılırsa ENGEL. */
+const MAX_TASK_VISITS = 20_000;
+const MAX_BLOCK_DEPTH = 64;
+/** Ansible `boolean()` doğru kümesi (kırpılmış, küçük harf). `check_mode` yalnız açıkça doğruysa zararsızdır. */
+const BOOL_TRUE = new Set(["y", "yes", "on", "1", "true", "t"]);
 
 export interface AnsibleTask {
   readonly file: string;
@@ -63,20 +86,176 @@ export interface AnsibleScan {
   readonly blocked: boolean;
 }
 
+/** Ön-taramaya verilen dosya. Ansible include/rol hedefini uzantısından bağımsız YAML olarak yükler: içerik her dosya için verilmelidir. */
+export interface AnsibleFile {
+  readonly path: string;
+  /** `null`: içerik okunamadı (ikili/çok büyük). Include/rol hedefiyse "çözülemedi" sayılır (fail-closed). */
+  readonly text: string | null;
+}
+
+type ArgResult<T> = { readonly kind: "ok"; readonly value: T } | { readonly kind: "dynamic" } | { readonly kind: "invalid"; readonly why: string };
+
+const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+const isTemplated = (v: unknown): boolean => typeof v === "string" && TEMPLATED.test(v);
+const parentOf = (p: string): string => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const baseOf = (p: string): string => p.slice(p.lastIndexOf("/") + 1);
+const deref = (n: unknown, doc: Document): unknown => (isAlias(n) ? n.resolve(doc) : n);
+const isMergeKey = (v: unknown): boolean => v === "<<" || (typeof v === "symbol" && v.description === "<<");
+
+interface Pair {
+  readonly key: string;
+  readonly value: unknown;
+}
+
+/**
+ * Eşlemenin etkin çiftleri, Ansible'ın (PyYAML) gördüğü gibi: takma ad anahtarlar çözülür, `<<` birleştirme anahtarı
+ * açılır (birleştirilenler önce, kendi çiftleri sonra; dizide önceki eşleme kazanır). Yinelenen anahtarlar KORUNUR:
+ * işaretler herhangi bir geçişten (birleşim), değerler sonuncudan (PyYAML: son kazanır) okunur.
+ */
+function pairsOf(m: YAMLMap, doc: Document, depth = 0): Pair[] {
+  const merged: Pair[] = [];
+  const own: Pair[] = [];
+  for (const p of m.items) {
+    const k = deref(p.key, doc);
+    const kv = isScalar(k) ? k.value : undefined;
+    if (isMergeKey(kv)) {
+      if (depth >= 8) continue;
+      const v = deref(p.value, doc);
+      const sources = isMap(v) ? [v] : isSeq(v) ? v.items.map((i) => deref(i, doc)).filter(isMap) : [];
+      for (const s of sources.reverse()) merged.push(...pairsOf(s, doc, depth + 1));
+    } else {
+      own.push({ key: kv === undefined || kv === null ? "" : String(kv), value: p.value });
+    }
+  }
+  return [...merged, ...own];
+}
+
+/** `check_mode` değeri check modunu KAPATABİLİR mi? Açıkça doğru olmayan her değer (`off`, `NO`, `n`, 0, şablon, null) güvensiz. */
+function checkModeOff(v: unknown): boolean {
+  if (v === true || v === 1) return false;
+  return typeof v === "string" ? !BOOL_TRUE.has(v.trim().toLowerCase()) : true;
+}
+
 function normalizeModule(name: string): string {
   return BUILTIN_NS.test(name) ? name.replace(BUILTIN_NS, "") : name;
+}
+
+/** Kaba `k=v` ayrıştırma (`file: path=/x state=absent`); yalnız sınıflama içindir. */
+function kvArgs(s: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const tok of s.trim().split(/\s+/)) {
+    const i = tok.indexOf("=");
+    if (i > 0) out[tok.slice(0, i)] = tok.slice(i + 1).replace(/^(['"])(.*)\1$/, "$2");
+  }
+  return out;
+}
+
+/** Katı `k=v`: her parça `anahtar=değer` ve anahtar `allowed` içinde olmalı; aksi halde undefined (çağıran fail-closed davranır). */
+function strictKv(s: string, allowed: ReadonlySet<string>): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const tok of s.trim().split(/\s+/)) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/.exec(tok);
+    if (!m || !allowed.has(m[1] as string)) return undefined;
+    out[m[1] as string] = (m[2] as string).replace(/^(['"])(.*)\1$/, "$2");
+  }
+  return out;
 }
 
 function classOf(module: string, args: unknown): RiskClass | "unclassified" {
   const base = MODULE_CLASS[module];
   if (base === undefined) return "unclassified";
   let cls: RiskClass = base;
-  const state = args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>)["state"] : undefined;
+  const state = isObj(args) ? args["state"] : typeof args === "string" ? kvArgs(args)["state"] : undefined;
   if (state === "absent" && (module === "file" || module === "user" || module === "group" || module === "package" || module === "apt" || module === "yum" || module === "dnf" || module === "pip")) cls = "destroy";
   return cls;
 }
 
-export function scanAnsible(files: readonly { path: string; text: string }[]): AnsibleScan {
+/** `action:`/`local_action:` değerinden modül ve argüman: `shell echo` (ilk sözcük + serbest biçim) veya `{ module: shell, ... }`. */
+function actionForm(a: unknown): { module: string; args: unknown } {
+  if (typeof a === "string") {
+    const t = a.trim();
+    const i = t.search(/\s/);
+    return i < 0 ? { module: t || "action", args: undefined } : { module: t.slice(0, i), args: t.slice(i + 1).trim() };
+  }
+  if (isObj(a)) {
+    const { module, ...rest } = a;
+    return { module: typeof module === "string" && module !== "" ? module : "action", args: rest };
+  }
+  return { module: "action", args: undefined };
+}
+
+const TASK_INCLUDE_KEYS: ReadonlySet<string> = new Set(["file", "_raw_params"]);
+const ROLE_INCLUDE_KEYS: ReadonlySet<string> = new Set(["name", "role", "tasks_from", "handlers_from", "vars_from", "defaults_from", "public", "allow_duplicates", "rolespec_validate"]);
+
+/** `include_tasks`/`import_tasks`/`include` hedef(ler)i: `x.yml`, `file=x.yml` veya `{ file: x.yml }`. */
+function taskIncludeTargets(args: unknown): ArgResult<string[]> {
+  let o: Record<string, unknown>;
+  if (typeof args === "string") {
+    if (TEMPLATED.test(args)) return { kind: "dynamic" };
+    if (!/[\s=]/.test(args)) return args === "" ? { kind: "invalid", why: "hedef yok" } : { kind: "ok", value: [args] };
+    const kv = strictKv(args, TASK_INCLUDE_KEYS);
+    if (!kv) return { kind: "invalid", why: "serbest biçimli argüman çözülemedi" };
+    o = kv;
+  } else if (isObj(args)) {
+    o = args;
+  } else {
+    return { kind: "invalid", why: "hedef yok" };
+  }
+  const vals = [o["file"], o["_raw_params"]].filter((v) => v !== undefined && v !== null);
+  if (vals.some(isTemplated)) return { kind: "dynamic" };
+  if (vals.length === 0 || vals.some((v) => typeof v !== "string" || v === "")) return { kind: "invalid", why: "hedef yok veya dizge değil" };
+  return { kind: "ok", value: vals as string[] };
+}
+
+/** `include_role`/`import_role`: `name` (veya `role`), `tasks_from`, `handlers_from`; sözlük ya da `name=x tasks_from=y`. */
+function roleIncludeArgs(args: unknown): ArgResult<{ name: string; tasksFrom?: string; handlersFrom?: string }> {
+  let o: Record<string, unknown>;
+  if (typeof args === "string") {
+    if (TEMPLATED.test(args)) return { kind: "dynamic" };
+    const kv = strictKv(args, ROLE_INCLUDE_KEYS);
+    if (!kv) return { kind: "invalid", why: "serbest biçimli argüman çözülemedi" };
+    o = kv;
+  } else if (isObj(args)) {
+    o = args;
+  } else {
+    return { kind: "invalid", why: "rol adı yok" };
+  }
+  const name = o["name"] ?? o["role"];
+  const tasksFrom = o["tasks_from"];
+  const handlersFrom = o["handlers_from"];
+  if ([name, tasksFrom, handlersFrom].some(isTemplated)) return { kind: "dynamic" };
+  if (typeof name !== "string" || name === "") return { kind: "invalid", why: "rol adı yok" };
+  for (const v of [tasksFrom, handlersFrom]) if (v !== undefined && v !== null && typeof v !== "string") return { kind: "invalid", why: "tasks_from/handlers_from dizge değil" };
+  return {
+    kind: "ok",
+    value: { name, ...(typeof tasksFrom === "string" && tasksFrom !== "" ? { tasksFrom } : {}), ...(typeof handlersFrom === "string" && handlersFrom !== "" ? { handlersFrom } : {}) },
+  };
+}
+
+/**
+ * Göreli hedefin ağaç içi soneki: sözcüksel normalleştirme, BAŞTAKİ `..` bölümleri atılır. Ansible hedefi birden çok
+ * tabana göre arar (playbook dizini, rol `tasks/`, üst include dizini, cwd...); ağaçtaki HER aday bu sonekle biter →
+ * sonek eşleşmesi Ansible'ın ağaç içi arama kümesinin üst kümesidir. Mutlak, `~`, boş ya da NUL/ters eğik çizgili
+ * yol → undefined (ağaçta çözülemez).
+ */
+function treeSuffix(target: string): string | undefined {
+  if (target.startsWith("/") || target.startsWith("~") || /[\0\\]/.test(target)) return undefined;
+  const segs: string[] = [];
+  for (const s of target.split("/")) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") segs.pop();
+    else segs.push(s);
+  }
+  return segs.length > 0 ? segs.join("/") : undefined;
+}
+
+/**
+ * Deterministik Ansible ön-taraması. Görevler playbook'lardan, `roles/<ad>/(tasks|handlers)/` dosyalarından ve bunların
+ * YÜKLEDİĞİ her dosyadan (include_tasks/import_tasks/include, include_role/import_role + `tasks_from`, play `roles:`,
+ * rol `meta` bağımlılıkları, import_playbook) aynı ziyaretçiyle sınıflanır. Hedef ağaç içinde sonek eşleşmesiyle çözülür
+ * (büyük/küçük harfe duyarsız: macOS); şablonlu ya da çözülemeyen hedef → bulgu + destroy muamelesi (ansible.check ÇALIŞMAZ).
+ */
+export function scanAnsible(files: readonly AnsibleFile[]): AnsibleScan {
   const findings: PrescanFinding[] = [];
   const add = (severity: PrescanFinding["severity"], code: string, message: string, file: string, line?: number): void => {
     findings.push({ severity, code, message, file, ...(line !== undefined ? { line } : {}) });
@@ -84,10 +263,80 @@ export function scanAnsible(files: readonly { path: string; text: string }[]): A
   const tasks: AnsibleTask[] = [];
   const playbooks: string[] = [];
   const roles = new Set<string>();
+  const roleDirs = new Set<string>();
   const inventories: string[] = [];
   let requirements = false;
   let scanned = 0;
+  let forceDestroy = false;
   const seenDirs = new Set<string>();
+
+  // ---- dizin: metin ve include çözümü için harfe duyarsız tam yol / taban ad eşlemleri ----------------------------
+  const textOf = new Map<string, string | null>();
+  const byPath = new Map<string, string[]>();
+  const fileByBase = new Map<string, string[]>();
+  const dirByBase = new Map<string, string[]>();
+  const allDirs = new Set<string>();
+  const index = (m: Map<string, string[]>, k: string, v: string): void => {
+    const l = m.get(k);
+    if (l) l.push(v);
+    else m.set(k, [v]);
+  };
+  for (const f of files) {
+    textOf.set(f.path, f.text);
+    index(byPath, f.path.toLowerCase(), f.path);
+    index(fileByBase, baseOf(f.path).toLowerCase(), f.path);
+    for (let d = parentOf(f.path); d !== "" && !allDirs.has(d); d = parentOf(d)) {
+      allDirs.add(d);
+      index(dirByBase, baseOf(d).toLowerCase(), d);
+    }
+  }
+  const suffixMatch = (m: Map<string, string[]>, rel: string): string[] => {
+    const l = rel.toLowerCase();
+    return (m.get(baseOf(l)) ?? []).filter((p) => {
+      const pl = p.toLowerCase();
+      return pl === l || pl.endsWith(`/${l}`);
+    });
+  };
+
+  interface Parsed {
+    readonly doc: Document.Parsed;
+    readonly lc: LineCounter;
+  }
+  const parsed = new Map<string, Parsed | null>();
+  /** Dosyayı bir kez ayrıştırır; YAML hatası ENGELLER (fail-closed). Okunamayan içerik → null. */
+  const parse = (path: string): Parsed | null => {
+    const hit = parsed.get(path);
+    if (hit !== undefined) return hit;
+    let out: Parsed | null = null;
+    const text = textOf.get(path);
+    if (typeof text === "string") {
+      const lc = new LineCounter();
+      try {
+        // `merge`: değerler `<<` birleştirmesiyle Ansible'ın (PyYAML) gördüğü gibi çözülür
+        const doc = parseDocument(text, { lineCounter: lc, uniqueKeys: false, merge: true });
+        if (doc.errors.length > 0) {
+          const e = doc.errors[0];
+          add("block", "yaml_error", `YAML hatası: ${(e?.message ?? "").split("\n")[0]?.slice(0, 100)}`, path, e?.linePos?.[0]?.line);
+        } else {
+          out = { doc, lc };
+        }
+      } catch {
+        add("block", "yaml_error", "YAML ayrıştırılamadı", path);
+      }
+    }
+    parsed.set(path, out);
+    return out;
+  };
+
+  const textChecked = new Set<string>();
+  /** Metin düzeyi işaretler: her YAML dosyasında ve include/rol ile yüklenen (uzantısı ne olursa olsun) her dosyada. */
+  const checkText = (path: string): void => {
+    if (textChecked.has(path)) return;
+    textChecked.add(path);
+    const text = textOf.get(path) ?? "";
+    if (LOOKUP_PIPE.test(text)) add("warn", "lookup_pipe", "lookup('pipe'/'lines') denetleyicide komut çalıştırır (çalıştırma araçlarında engel)", path);
+    if (CONTROLLER_EXEC.test(text)) add("warn", "controller_execution", "görev denetleyicide yerelde çalışıyor (local_action/delegate_to localhost/connection: local)", path);
+  };
 
   for (const f of files) {
     const dir = PLUGIN_DIRS.exec(f.path);
@@ -98,120 +347,322 @@ export function scanAnsible(files: readonly { path: string; text: string }[]): A
     if (/(^|\/)ansible\.cfg$/.test(f.path)) add("warn", "ansible_cfg_ignored", "depodaki ansible.cfg GÜVENİLMEZ: yok sayılır (ürünün kendi yapılandırması kullanılır)", f.path);
     if (/(^|\/)\.ansible-lint(\.ya?ml)?$/.test(f.path)) add("warn", "ansible_lint_config_ignored", "depodaki .ansible-lint yok sayılır (rulesdir kod yükleyebilir)", f.path);
     const roleMatch = /(^|\/)roles\/([^/]+)\//.exec(f.path);
-    if (roleMatch) roles.add(roleMatch[2] as string);
+    if (roleMatch) {
+      roles.add(roleMatch[2] as string);
+      roleDirs.add(f.path.slice(0, roleMatch.index + roleMatch[0].length - 1));
+    }
     if (/(^|\/)requirements\.ya?ml$/.test(f.path)) requirements = true;
     if (/(^|\/)(inventory|inventories|hosts)(\/|\.|$)/.test(f.path) || /\.ini$/.test(f.path)) inventories.push(f.path);
     if (!/\.ya?ml$/.test(f.path)) continue;
     scanned++;
-
-    if (LOOKUP_PIPE.test(f.text)) add("warn", "lookup_pipe", "lookup('pipe') denetleyicide komut çalıştırır (çalıştırma araçlarında engel)", f.path);
-    if (/\blocal_action\b|delegate_to:\s*['"]?(localhost|127\.0\.0\.1)\b|connection:\s*['"]?local\b/.test(f.text)) add("warn", "controller_execution", "görev denetleyicide yerelde çalışıyor (local_action/delegate_to localhost/connection: local)", f.path);
-
-    const lc = new LineCounter();
-    let doc;
-    try {
-      doc = parseDocument(f.text, { lineCounter: lc, uniqueKeys: false });
-    } catch {
-      add("block", "yaml_error", "YAML ayrıştırılamadı", f.path);
-      continue;
-    }
-    if (doc.errors.length > 0) {
-      const e = doc.errors[0];
-      add("block", "yaml_error", `YAML hatası: ${(e?.message ?? "").split("\n")[0]?.slice(0, 100)}`, f.path, e?.linePos?.[0]?.line);
-      continue;
-    }
-    const lineOf = (n: Node | null | undefined): number => (n?.range ? lc.linePos(n.range[0]).line : 0);
-    const root = doc.contents;
-    const isRoleTaskFile = /(^|\/)roles\/[^/]+\/(tasks|handlers)\//.test(f.path);
-
-    const visitTaskList = (seq: unknown): void => {
-      if (!isSeq(seq)) return;
-      for (const raw of seq.items) {
-        const item = isAlias(raw) ? raw.resolve(doc) : raw;
-        if (isMap(item)) visitTask(item);
-      }
-    };
-    const visitTask = (m: YAMLMap): void => {
-      const keys = m.items.map((p) => (isScalar(p.key) ? String(p.key.value) : ""));
-      for (const nested of ["block", "rescue", "always"]) {
-        const idx = keys.indexOf(nested);
-        if (idx >= 0) visitTaskList(m.items[idx]?.value);
-      }
-      const flags: string[] = [];
-      let module: string | undefined;
-      let args: unknown;
-      const get = (k: string): unknown => {
-        const i = keys.indexOf(k);
-        return i >= 0 ? m.items[i]?.value : undefined;
-      };
-      const toJs = (v: unknown): unknown => {
-        if (isNode(v)) {
-          try {
-            return (v as Node & { toJS(d: unknown, o: { maxAliasCount: number }): unknown }).toJS(doc, { maxAliasCount: 50 });
-          } catch {
-            return undefined;
-          }
-        }
-        return v;
-      };
-      if (keys.includes("local_action")) {
-        module = "local_action";
-        flags.push("local_action");
-      } else if (keys.includes("action")) {
-        const a = toJs(get("action"));
-        module = typeof a === "string" ? (a.trim().split(/\s+/)[0] ?? "action") : a && typeof a === "object" ? String((a as Record<string, unknown>)["module"] ?? "action") : "action";
-        args = typeof a === "object" ? a : undefined;
-      } else {
-        const k = keys.find((x) => x !== "" && !TASK_KEYWORDS.has(x) && !x.startsWith("with_"));
-        if (k === undefined) return; // görev değil (block vb.)
-        module = k;
-        args = toJs(get(k));
-      }
-      const norm = normalizeModule(module);
-      let cls = classOf(norm, args);
-      if (module === "local_action") cls = "deploy";
-      const chk = toJs(get("check_mode"));
-      if (chk === false || chk === "no" || chk === "false") flags.push("check_mode_false");
-      const del = toJs(get("delegate_to"));
-      if (typeof del === "string" && /^(localhost|127\.0\.0\.1)$/.test(del)) flags.push("delegate_localhost");
-      if (toJs(get("become")) === true || toJs(get("become")) === "yes") flags.push("become");
-      if (["command", "shell", "raw", "script"].includes(norm)) flags.push("arbitrary_command");
-      const line = lineOf(m);
-      const resolved: RiskClass = cls === "unclassified" ? "destroy" : cls;
-      if (cls === "unclassified") {
-        add("warn", "module_unclassified", `modül '${norm.slice(0, 60)}' kataloğda yok: destroy muamelesi görür`, f.path, line);
-        flags.push("unclassified");
-      }
-      if (/\{\{/.test(String(toJs(get(module)) ?? "")) && ["include_tasks", "import_tasks", "include_role", "import_role"].includes(norm)) {
-        add("warn", "dynamic_include", `${norm} şablonlu yol içeriyor`, f.path, line);
-        flags.push("dynamic_include");
-      }
-      tasks.push({ file: f.path, line, module: norm.slice(0, 60), class: resolved, flags });
-    };
-
-    if (isSeq(root)) {
-      const maps: YAMLMap[] = [];
-      for (const x of root.items) {
-        const r = isAlias(x) ? x.resolve(doc) : x;
-        if (isMap(r)) maps.push(r as unknown as YAMLMap);
-      }
-      const isPlaybook = maps.some((m) => m.items.some((p) => isScalar(p.key) && (p.key.value === "hosts" || p.key.value === "import_playbook")));
-      if (isPlaybook) {
-        playbooks.push(f.path);
-        for (const play of maps) {
-          for (const list of PLAY_TASK_LISTS) {
-            const it = play.items.find((p) => isScalar(p.key) && p.key.value === list);
-            if (it) visitTaskList(it.value);
-          }
-        }
-      } else if (isRoleTaskFile) {
-        visitTaskList(root);
-      }
+    checkText(f.path);
+    const p = parse(f.path);
+    const root = p?.doc.contents;
+    if (p && isSeq(root)) {
+      const isPlaybook = root.items.some((x) => {
+        const r = deref(x, p.doc);
+        return isMap(r) && pairsOf(r, p.doc).some((pr) => PLAYBOOK_KEYS.has(pr.key));
+      });
+      if (isPlaybook) playbooks.push(f.path);
     }
   }
+  const playbookSet: ReadonlySet<string> = new Set(playbooks);
+
+  // ---- ziyaret: playbook'lar, rol dosyaları ve YÜKLEDİKLERİ her dosya ------------------------------------------------
+  interface Ctx {
+    readonly file: string;
+    readonly doc: Document.Parsed;
+    readonly lc: LineCounter;
+    readonly depth: number;
+  }
+  interface Site {
+    readonly file: string;
+    readonly line?: number;
+  }
+  const visitedTaskFiles = new Set<string>();
+  const visitedPlaybooks = new Set<string>();
+  const visitedRoles = new Map<string, { tasks: boolean; handlers: boolean; readable: boolean }>();
+
+  const lineOf = (n: unknown, ctx: Ctx): number => (isNode(n) && n.range ? ctx.lc.linePos(n.range[0]).line : 0);
+  const toJs = (v: unknown, ctx: Ctx): unknown => {
+    if (isNode(v)) {
+      try {
+        return (v as Node & { toJS(d: unknown, o: { maxAliasCount: number }): unknown }).toJS(ctx.doc, { maxAliasCount: 50 });
+      } catch {
+        return undefined;
+      }
+    }
+    return v;
+  };
+  const dynamic = (site: Site, what: string): void => {
+    forceDestroy = true;
+    add("warn", "dynamic_include", `${what} şablonlu yol içeriyor`, site.file, site.line);
+  };
+  const unresolved = (site: Site, what: string, why: string): void => {
+    forceDestroy = true;
+    add("warn", "include_unresolved", `${what} çözülemedi (${why}): içerik sınıflanamaz → destroy muamelesi`, site.file, site.line);
+  };
+  /** Play/blok/rol düzeyindeki `check_mode` kapsamındaki TÜM görevlere uygulanır (Ansible kalıtımı). */
+  const scopeCheckMode = (pairs: readonly Pair[], ctx: Ctx, scope: string, line: number): void => {
+    if (pairs.some((p) => p.key === "check_mode" && checkModeOff(toJs(p.value, ctx)))) {
+      add("warn", "check_mode_false", `${scope} düzeyinde check_mode kapatılıyor (veya doğrulanamıyor): kapsamdaki görevler check modunda GERÇEKTEN çalışır`, ctx.file, line);
+    }
+  };
+  let taskVisits = 0;
+  let limitHit = false;
+  const overLimit = (file: string): void => {
+    if (limitHit) return;
+    limitHit = true;
+    add("block", "task_limit", `görev genişleme sınırı aşıldı (en çok ${MAX_TASK_VISITS} görev ziyareti, ${MAX_BLOCK_DEPTH} iç içe blok; takma ad bombası/döngüsü?): tarama tamamlanamadı`, file);
+  };
+
+  /** Hedefi ağaç içinde (sonek eşleşmesiyle) çözer ve VAR OLAN her adayı `visit` ile tarar; çözülemezse bulgu + false. */
+  const follow = (label: string, target: string, site: Site, depth: number, visit: (path: string, depth: number) => boolean, skip?: ReadonlySet<string>): boolean => {
+    const fail = (why: string): boolean => {
+      unresolved(site, label, why);
+      return false;
+    };
+    if (depth > MAX_INCLUDE_DEPTH) return fail(`include zinciri ${MAX_INCLUDE_DEPTH} düzeyden derin`);
+    const rel = treeSuffix(target);
+    if (rel === undefined) return fail("mutlak, ağaç dışı veya geçersiz yol");
+    const cands = suffixMatch(fileByBase, rel).filter((c) => !skip?.has(c));
+    if (cands.length === 0) return fail("çalışma alanında yok");
+    const unreadable = cands.filter((c) => !visit(c, depth));
+    return unreadable.length === 0 || fail(`içeriği okunamayan aday: ${(unreadable[0] as string).slice(0, 80)}`);
+  };
+
+  /** Dosyayı görev listesi olarak tarar (dosya başına bir kez: döngüler sonlanır). İçerik okunamadıysa false. */
+  const visitTaskFile = (path: string, depth: number): boolean => {
+    if (typeof textOf.get(path) !== "string") return false;
+    if (visitedTaskFiles.has(path)) return true;
+    visitedTaskFiles.add(path);
+    checkText(path);
+    const p = parse(path);
+    if (p) visitTaskList(p.doc.contents, { file: path, doc: p.doc, lc: p.lc, depth }, 0);
+    return true;
+  };
+
+  /** Playbook: play görev listeleri, `roles:` ve içe aktarılan playbook'lar (uzantısı ne olursa olsun). */
+  const visitPlaybook = (path: string, depth: number): boolean => {
+    if (typeof textOf.get(path) !== "string") return false;
+    if (visitedPlaybooks.has(path)) return true;
+    visitedPlaybooks.add(path);
+    checkText(path);
+    const p = parse(path);
+    if (!p || !isSeq(p.doc.contents)) return true;
+    const ctx: Ctx = { file: path, doc: p.doc, lc: p.lc, depth };
+    for (const x of p.doc.contents.items) {
+      const play = deref(x, p.doc);
+      if (!isMap(play)) continue;
+      const site: Site = { file: path, line: lineOf(play, ctx) };
+      const pairs = pairsOf(play, p.doc);
+      scopeCheckMode(pairs, ctx, "play", site.line ?? 0);
+      for (const { key, value } of pairs) {
+        if (PLAY_TASK_LISTS.includes(key)) {
+          visitTaskList(value, ctx, 0);
+        } else if (key === "roles") {
+          visitRoleRefs(value, ctx);
+        } else if (PLAYBOOK_IMPORTS.has(normalizeModule(key))) {
+          const target = toJs(value, ctx);
+          if (isTemplated(target)) dynamic(site, "import_playbook");
+          else if (typeof target !== "string" || target === "") unresolved(site, "import_playbook", "hedef yok");
+          else follow(`import_playbook '${target.slice(0, 80)}'`, target, site, depth + 1, visitPlaybook);
+        }
+      }
+    }
+    return true;
+  };
+
+  /** Rol dizininde `<alt>/<ad>` dosya adayları; ad alt dizinden kaçarsa undefined (Ansible de rol dışını reddeder). */
+  const roleFiles = (dir: string, sub: string, name: string): string[] | undefined => {
+    if (name.startsWith("/") || name.startsWith("~") || /[\0\\]/.test(name)) return undefined;
+    const segs: string[] = [];
+    for (const s of name.split("/")) {
+      if (s === "" || s === ".") continue;
+      if (s !== "..") segs.push(s);
+      else if (segs.pop() === undefined) return undefined;
+    }
+    if (segs.length === 0) return undefined;
+    const base = `${dir}/${sub}/${segs.join("/")}`.toLowerCase();
+    return ROLE_FILE_EXTS.flatMap((ext) => byPath.get(base + ext) ?? []);
+  };
+
+  /** Rol: görev/handler dosyaları (`*_from` yoksa `main`) aynı ziyaretçiyle; `meta/main` bağımlılıkları özyinelemeli. */
+  const visitRole = (dir: string, tasksFrom: string | undefined, handlersFrom: string | undefined, depth: number): { tasks: boolean; handlers: boolean; readable: boolean } => {
+    const key = `${dir}\0${tasksFrom ?? ""}\0${handlersFrom ?? ""}`;
+    const seen = visitedRoles.get(key);
+    if (seen) return seen;
+    const r = { tasks: false, handlers: false, readable: true };
+    visitedRoles.set(key, r);
+    for (const [sub, from] of [["tasks", tasksFrom], ["handlers", handlersFrom]] as const) {
+      const cands = roleFiles(dir, sub, from ?? "main") ?? [];
+      if (cands.length > 0) r[sub] = true;
+      for (const c of cands) if (!visitTaskFile(c, depth)) r.readable = false;
+    }
+    for (const mf of roleFiles(dir, "meta", "main") ?? []) {
+      if (typeof textOf.get(mf) !== "string") {
+        r.readable = false;
+        continue;
+      }
+      checkText(mf);
+      const p = parse(mf);
+      if (!p || !isMap(p.doc.contents)) continue;
+      const ctx: Ctx = { file: mf, doc: p.doc, lc: p.lc, depth };
+      for (const pair of pairsOf(p.doc.contents, p.doc)) if (pair.key === "dependencies") visitRoleRefs(pair.value, ctx);
+    }
+    return r;
+  };
+
+  /** Rol adını ağaç içindeki dizin(ler)e çözer (sonek: `<playbook>/roles/ad`, `<playbook>/ad`, rol tabanı/ad, cwd/ad...). */
+  const followRole = (label: string, name: string, tasksFrom: string | undefined, handlersFrom: string | undefined, site: Site, depth: number): boolean => {
+    const fail = (why: string): boolean => {
+      unresolved(site, label, why);
+      return false;
+    };
+    if (depth > MAX_INCLUDE_DEPTH) return fail(`include zinciri ${MAX_INCLUDE_DEPTH} düzeyden derin`);
+    const rel = treeSuffix(name);
+    if (rel === undefined) return fail("mutlak, ağaç dışı veya geçersiz rol yolu");
+    const found = suffixMatch(dirByBase, rel);
+    if (found.length === 0) return fail("rol dizini çalışma alanında yok");
+    let hasTasks = tasksFrom === undefined;
+    let hasHandlers = handlersFrom === undefined;
+    let readable = true;
+    for (const d of found) {
+      const r = visitRole(d, tasksFrom, handlersFrom, depth);
+      hasTasks ||= r.tasks;
+      hasHandlers ||= r.handlers;
+      readable &&= r.readable;
+    }
+    if (!hasTasks) return fail(`rolde tasks/${(tasksFrom ?? "").slice(0, 60)} yok`);
+    if (!hasHandlers) return fail(`rolde handlers/${(handlersFrom ?? "").slice(0, 60)} yok`);
+    return readable || fail("rol dosyası okunamadı");
+  };
+
+  /** Play `roles:` ve rol `meta` `dependencies:` listeleri: dize ya da `{ role|name: ad, ... }`. */
+  const visitRoleRefs = (list: unknown, ctx: Ctx): void => {
+    const seq = deref(list, ctx.doc);
+    if (!isSeq(seq)) return;
+    for (const raw of seq.items) {
+      const item = deref(raw, ctx.doc);
+      const site: Site = { file: ctx.file, line: lineOf(item, ctx) };
+      let name: unknown;
+      if (isMap(item)) {
+        const pairs = pairsOf(item, ctx.doc);
+        const last = (k: string): unknown => toJs(pairs.filter((p) => p.key === k).at(-1)?.value, ctx);
+        name = last("role") ?? last("name");
+        scopeCheckMode(pairs, ctx, "rol", site.line ?? 0);
+      } else {
+        name = toJs(item, ctx);
+      }
+      if (isTemplated(name)) dynamic(site, "rol");
+      else if (typeof name !== "string" || name === "") unresolved(site, "rol", "rol adı yok");
+      else followRole(`rol '${name.slice(0, 80)}'`, name, undefined, undefined, site, ctx.depth + 1);
+    }
+  };
+
+  const visitTaskList = (seq: unknown, ctx: Ctx, nest: number): void => {
+    const s = deref(seq, ctx.doc); // `tasks: *ortak` / `block: *ortak` (Ansible takma adı çözer)
+    if (!isSeq(s)) return;
+    for (const raw of s.items) {
+      const item = deref(raw, ctx.doc);
+      if (isMap(item)) visitTask(item, ctx, nest);
+    }
+  };
+  const visitTask = (m: YAMLMap, ctx: Ctx, nest: number): void => {
+    if (++taskVisits > MAX_TASK_VISITS || nest > MAX_BLOCK_DEPTH) {
+      overLimit(ctx.file);
+      return;
+    }
+    const pairs = pairsOf(m, ctx.doc);
+    const keys = pairs.map((p) => p.key);
+    const nodes = (k: string): unknown[] => pairs.filter((p) => p.key === k).map((p) => p.value);
+    /** Değer: yinelenen anahtarda SON geçiş (PyYAML/Ansible gibi). */
+    const get = (k: string): unknown => toJs(nodes(k).at(-1), ctx);
+    /** İşaret: anahtarın HERHANGİ bir geçişi koşulu sağlıyor mu (birleşim; güvenli yön)? */
+    const any = (k: string, pred: (v: unknown) => boolean): boolean => nodes(k).some((n) => pred(toJs(n, ctx)));
+    const line = lineOf(m, ctx);
+    let isBlock = false;
+    for (const nested of ["block", "rescue", "always"]) {
+      for (const n of nodes(nested)) {
+        isBlock = true;
+        visitTaskList(n, ctx, nest + 1);
+      }
+    }
+    if (isBlock) scopeCheckMode(pairs, ctx, "blok", line);
+    const flags: string[] = [];
+    let module: string;
+    let args: unknown;
+    const local = keys.includes("local_action");
+    if (local || keys.includes("action")) {
+      ({ module, args } = actionForm(get(local ? "local_action" : "action")));
+      if (local) flags.push("local_action");
+    } else {
+      const k = keys.find((x) => x !== "" && !TASK_KEYWORDS.has(x) && !x.startsWith("with_"));
+      if (k === undefined) return; // görev değil (block vb.)
+      module = k;
+      args = get(k);
+    }
+    // `args:` anahtar sözcüğü modül argümanlarına eklenir (Ansible gibi)
+    const kw = get("args");
+    if (isObj(kw) && (args === undefined || args === null || isObj(args))) args = { ...(isObj(args) ? args : {}), ...kw };
+    const norm = normalizeModule(module);
+    let cls = classOf(norm, args);
+    if (local && cls !== "unclassified" && riskRank(cls) < riskRank("deploy")) cls = "deploy"; // denetleyicide yürütme en az deploy
+    if (any("check_mode", checkModeOff)) flags.push("check_mode_false");
+    // include_tasks/include_role `apply:` anahtar sözcükleri yüklenen görevlere uygulanır
+    const apply = isObj(args) ? args["apply"] : undefined;
+    if ((TASK_INCLUDES.has(norm) || ROLE_INCLUDES.has(norm)) && apply !== undefined && apply !== null && (!isObj(apply) || ("check_mode" in apply && checkModeOff(apply["check_mode"])))) {
+      if (!flags.includes("check_mode_false")) flags.push("check_mode_false");
+    }
+    if (any("delegate_to", (v) => typeof v === "string" && /^(localhost|127\.0\.0\.1)$/.test(v))) flags.push("delegate_localhost");
+    if (any("become", (v) => v === true || v === "yes")) flags.push("become");
+    if (["command", "shell", "raw", "script"].includes(norm)) flags.push("arbitrary_command");
+    const site: Site = { file: ctx.file, line };
+    let resolved: RiskClass = cls === "unclassified" ? "destroy" : cls;
+    if (cls === "unclassified") {
+      add("warn", "module_unclassified", `modül '${norm.slice(0, 60)}' kataloğda yok: destroy muamelesi görür`, ctx.file, line);
+      flags.push("unclassified");
+    }
+    // include/rol: hedefin görevleri AYNI ziyaretçiyle sınıflanır; şablonlu/çözülemeyen hedef → destroy muamelesi.
+    // Görev, hedefin görevlerinden ÖNCE listelenir (sınıfı izleme sonucuna göre aşağıda güncellenir).
+    const shown = (local ? "local_action" : norm).slice(0, 60);
+    const slot = tasks.push({ file: ctx.file, line, module: shown, class: resolved, flags }) - 1;
+    const failClosed = (flag: string): void => {
+      if (!flags.includes(flag)) flags.push(flag);
+      resolved = "destroy";
+    };
+    if (TASK_INCLUDES.has(norm)) {
+      const t = taskIncludeTargets(args);
+      if (t.kind === "dynamic") {
+        dynamic(site, norm);
+        failClosed("dynamic_include");
+      } else if (t.kind === "invalid") {
+        unresolved(site, norm, t.why);
+        failClosed("include_unresolved");
+      } else {
+        for (const target of t.value) if (!follow(`${norm} '${target.slice(0, 80)}'`, target, site, ctx.depth + 1, visitTaskFile, playbookSet)) failClosed("include_unresolved");
+      }
+    } else if (ROLE_INCLUDES.has(norm)) {
+      const r = roleIncludeArgs(args);
+      if (r.kind === "dynamic") {
+        dynamic(site, norm);
+        failClosed("dynamic_include");
+      } else if (r.kind === "invalid") {
+        unresolved(site, norm, r.why);
+        failClosed("include_unresolved");
+      } else if (!followRole(`${norm} '${r.value.name.slice(0, 80)}'`, r.value.name, r.value.tasksFrom, r.value.handlersFrom, site, ctx.depth + 1)) {
+        failClosed("include_unresolved");
+      }
+    }
+    tasks[slot] = { file: ctx.file, line, module: shown, class: resolved, flags };
+  };
+
+  for (const pb of playbooks) visitPlaybook(pb, 0);
+  for (const f of files) if (/\.ya?ml$/.test(f.path) && ROLE_TASK_FILE.test(f.path)) visitTaskFile(f.path, 0);
+  for (const d of roleDirs) visitRole(d, undefined, undefined, 0);
 
   const modules: Record<string, number> = {};
-  let maxClass: RiskClass = "read";
+  let maxClass: RiskClass = forceDestroy ? "destroy" : "read";
   for (const t of tasks) {
     modules[t.module] = (modules[t.module] ?? 0) + 1;
     if (riskRank(t.class) > riskRank(maxClass)) maxClass = t.class;

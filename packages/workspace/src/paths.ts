@@ -38,11 +38,15 @@ const HARD_DENY: readonly [RegExp, string][] = [
   [/vault[^/]*\.ya?ml$|(^|\/)\.vault[^/]*$|(^|\/)(group_vars|host_vars)\/(?:[^/]+\/)*[^/]*vault[^/]*$/, "Ansible vault dosyası"],
 ];
 
-/** Yazma yasak (okuma serbest): CI tanımları ve kod çalıştıran araç yapılandırmaları. */
+/**
+ * Yazma yasak (okuma serbest): CI tanımları ve kod çalıştıran araç yapılandırmaları. Desenler KÜÇÜK harflidir
+ * ve küçük harfe çevrilmiş yola uygulanır: büyük/küçük harfe duyarsız dosya sisteminde (macOS APFS varsayılanı)
+ * `.GitHub/workflows/x.yml` ile `.github/workflows/x.yml` aynı dosyadır.
+ */
 const WRITE_DENY: readonly [RegExp, string][] = [
   [/^\.github(\/|$)/, "CI/pipeline tanımı (.github)"],
   [/^\.gitlab-ci\.ya?ml$|^\.gitlab(\/|$)/, "CI/pipeline tanımı (GitLab)"],
-  [/(^|\/)Jenkinsfile$/, "CI/pipeline tanımı (Jenkinsfile)"],
+  [/(^|\/)jenkinsfile$/, "CI/pipeline tanımı (Jenkinsfile)"],
   [/(^|\/)azure-pipelines[^/]*\.ya?ml$/, "CI/pipeline tanımı (Azure)"],
   [/^\.circleci(\/|$)|(^|\/)bitbucket-pipelines\.ya?ml$|(^|\/)\.drone\.ya?ml$|(^|\/)\.travis\.ya?ml$|(^|\/)buildkite[^/]*\.ya?ml$/, "CI/pipeline tanımı"],
   [/(^|\/)ansible\.cfg$|(^|\/)\.ansible-lint(\.ya?ml)?$|(^|\/)\.ansible(\/|$)/, "Ansible yapılandırması (eklenti/kural yolu yükleyebilir)"],
@@ -77,14 +81,16 @@ export function readCheck(input: string, policy: PathPolicy): PathCheck {
   const n = normalizeRel(input);
   if (!n.ok) return n;
   for (const [re, why] of HARD_DENY) if (re.test(n.rel.toLowerCase())) return { ok: false, reason: `gizli dosya deseni: ${why}` };
-  if (policy.denyPaths.some((g) => pathGlob(g, n.rel))) return { ok: false, reason: "çalışma alanı denyPaths kuralı" };
+  // Ret globları harfe duyarsız eşlenir (yukarıdaki gerekçe); izin globları (writePaths) duyarlı kalır: güvenli yön.
+  if (policy.denyPaths.some((g) => pathGlob(g.toLowerCase(), n.rel.toLowerCase()))) return { ok: false, reason: "çalışma alanı denyPaths kuralı" };
   return n;
 }
 
 export function writeCheck(input: string, policy: PathPolicy): PathCheck {
   const r = readCheck(input, policy);
   if (!r.ok) return r;
-  for (const [re, why] of WRITE_DENY) if (re.test(r.rel)) return { ok: false, reason: `yazma yasak: ${why}` };
+  const lower = r.rel.toLowerCase();
+  for (const [re, why] of WRITE_DENY) if (re.test(lower)) return { ok: false, reason: `yazma yasak: ${why}` };
   if (!policy.writePaths.some((g) => pathGlob(g, r.rel))) return { ok: false, reason: "çalışma alanı writePaths dışında" };
   return r;
 }

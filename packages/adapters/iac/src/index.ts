@@ -4,7 +4,7 @@ export { IAC_TOOLS } from "./tools.ts";
 export { scanTerraform } from "./terraform.ts";
 export type { PrescanFinding, TerraformModel, TerraformScan } from "./terraform.ts";
 export { parseInventory, scanAnsible, SECRET_VAR } from "./ansible.ts";
-export type { AnsibleModel, AnsibleScan, AnsibleTask, InventorySummary } from "./ansible.ts";
+export type { AnsibleFile, AnsibleModel, AnsibleScan, AnsibleTask, InventorySummary } from "./ansible.ts";
 export { HclError, parseHcl, walkBlocks } from "./hcl.ts";
 export { resolveTool, runInSandbox, writeTfRc } from "./runner.ts";
 export { summarizePlan, risksFor } from "./plan.ts";

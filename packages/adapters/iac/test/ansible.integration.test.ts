@@ -110,6 +110,8 @@ describe.skipIf(!ok)("Ansible araçları (gerçek ansible + gerçek bubblewrap, 
       ["lookup_pipe", "- name: pipe\n  ansible.builtin.debug:\n    msg: \"{{ lookup('pipe', 'id') }}\"", "lookup_pipe"],
       ["unclassified", "- name: weird\n  community.unknown.thing:\n    a: 1", "module_unclassified"],
       ["dynamic_include", "- name: inc\n  ansible.builtin.include_tasks: \"{{ which }}.yml\"", "dynamic_include"],
+      ["block_check_mode", "- block:\n    - name: real\n      ansible.builtin.file:\n        path: /tmp/ops-should-not-exist\n        state: touch\n  check_mode: off", "check_mode_false"],
+      ["dup_check_mode", "- name: real\n  ansible.builtin.file:\n    path: /tmp/ops-should-not-exist\n    state: touch\n  check_mode: true\n  check_mode: false", "check_mode_false"],
     ];
     for (const [name, task, code] of cases) {
       const h = await makeIacHarness({ engine: "ansible", files: { "p.yml": mk(task) } });
@@ -121,6 +123,30 @@ describe.skipIf(!ok)("Ansible araçları (gerçek ansible + gerçek bubblewrap, 
         expect(j.findings.map((f: { code: string }) => f.code), name).toContain(code);
         expect(r.summary).toMatch(/check ÇALIŞMADI/);
         expect(existsSync("/tmp/ops-should-not-exist")).toBe(false);
+      } finally {
+        await h.cleanup();
+      }
+    }
+  });
+
+  it("ansible.check: include_tasks / roles/ dışı rol ile YÜKLENEN dosyadaki check_mode: false ve çözülemeyen include da ÇALIŞTIRMAYI ENGELLER (bulgu PoC'si)", async () => {
+    const MARK = "/tmp/ops-include-" + Math.random().toString(36).slice(2);
+    const head = "---\n- hosts: all\n  gather_facts: false\n";
+    const evil = `- ansible.builtin.shell: touch ${MARK}\n  check_mode: false\n- ansible.builtin.file:\n    path: /tmp/ops-should-not-exist\n    state: absent\n`;
+    const cases: [string, Record<string, string>, string][] = [
+      ["include_tasks", { "site.yml": `${head}  tasks:\n    - ansible.builtin.include_tasks: extra.yml\n`, "extra.yml": evil }, "check_mode_false"],
+      ["roles/ dışı rol", { "site.yml": `${head}  roles: [evil]\n`, "evil/tasks/main.yml": evil }, "check_mode_false"],
+      ["çözülemeyen include", { "site.yml": `${head}  tasks:\n    - ansible.builtin.include_tasks: missing.yml\n` }, "include_unresolved"],
+    ];
+    for (const [name, files, code] of cases) {
+      const h = await makeIacHarness({ engine: "ansible", files });
+      try {
+        const r = await h.call("ansible.check", { playbook: "site.yml" });
+        expect(r.status, name).toBe("ok");
+        const j = h.json(r);
+        expect(j, name).toMatchObject({ executed: false, unsafe: true });
+        expect(j.findings.map((f: { code: string }) => f.code), name).toContain(code);
+        expect(existsSync(MARK), name).toBe(false);
       } finally {
         await h.cleanup();
       }

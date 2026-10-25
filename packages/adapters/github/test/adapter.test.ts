@@ -4,7 +4,7 @@ import { adapterConformance } from "@ops/testkit/conformance";
 import { BUILD_DIGEST, BUILD_REPO, BUILD_SHA, checkAdapterStructure } from "@ops/testkit";
 import { LocalBroker, MemorySecretStore } from "@ops/broker";
 import { estimateTokens } from "@ops/contracts";
-import { GithubActionsAdapter, GithubScmAdapter, isAllowedLogHost, pathProblem, safeName, workflowFacts } from "../src/index.ts";
+import { GithubActionsAdapter, GithubScmAdapter, REPO, assertRepo, isAllowedLogHost, isGitRef, pathProblem, safeName, workflowFacts } from "../src/index.ts";
 import { makeGhHarness } from "./harness.ts";
 
 const resolver = () => new LocalBroker({ store: new MemorySecretStore() }).resolver;
@@ -49,6 +49,16 @@ describe("yapı", () => {
       expect(pathProblem(bad), bad).not.toBeNull();
     }
     for (const ok of ["README.md", "src/app.ts", "environment.md", ".github/workflows/ci.yml", "docs/key-concepts.md", "src/secretary.ts"]) expect(pathProblem(ok), ok).toBeNull();
+  });
+
+  it("depo adı '.'/'..' olamaz; git ref '..', '//', sonda '/' veya '.', '.' ile başlayan / '.lock' ile biten bileşen içeremez", () => {
+    for (const bad of ["acme/.", "acme/..", "acme", "../etc/passwd", "acme/pay/ments", "-acme/x", "acme/"]) {
+      expect(REPO.test(bad), bad).toBe(false);
+      expect(() => assertRepo(bad), bad).toThrow(/sahip\/ad/);
+    }
+    for (const ok of ["acme/payments", "acme/.github", "acme/a..b", "acme/x.y", "a/b_c-d", "acme/..."]) expect(REPO.test(ok), ok).toBe(true);
+    for (const bad of ["main..evil", "a/../b", "a/..", "a//b", "a/", "v1.", "x.lock", "a/b.lock/c", "a/.hidden", ".x", "/main", "a b"]) expect(isGitRef(bad), bad).toBe(false);
+    for (const ok of ["main", "feature/x-1", "v1.2.3", "release/2026.10", BUILD_SHA, "a.lockfile", "ops/fix.v2"]) expect(isGitRef(ok), ok).toBe(true);
   });
 
   it("günlük yönlendirme host izni: aynı host, profil listesi, (yalnız api.github.com) bilinen blob alan adları; http/kullanıcı bilgisi yok", () => {
@@ -143,10 +153,14 @@ describe("pipeline araçları (PEP üzerinden, sahte GitHub)", () => {
       expect((await h.call("pipeline.runs.list", { repo: BUILD_REPO, since: "99999d" })).status).toBe("denied");
       expect((await h.call("pipeline.runs.list", { repo: "acme", since: "1h" })).reasonCode).toBe("schema_invalid");
       expect((await h.call("pipeline.runs.list", { repo: "../etc/passwd", since: "1h" })).reasonCode).toBe("schema_invalid");
+      for (const repo of ["acme/..", "acme/."]) expect((await h.call("pipeline.runs.list", { repo, since: "1h" })).reasonCode, repo).toBe("schema_invalid");
+      for (const branch of ["main/../../x", "main..x", "a//b", "main.lock"]) expect((await h.call("pipeline.runs.list", { repo: BUILD_REPO, since: "1h", branch })).reasonCode, branch).toBe("schema_invalid");
+      expect((await h.call("pipeline.workflow.definition", { repo: BUILD_REPO, path: ".github/workflows/ci.yml", ref: "x/../../../y" })).reasonCode).toBe("schema_invalid");
       expect(await h.call("pipeline.runs.list", { repo: "acme/billing", since: "1h" })).toMatchObject({ status: "denied", reasonCode: "scope_violation" });
       expect((await h.call("pipeline.runs.list", { repo: "ACME/Payments", since: "1h" })).status).toBe("ok");
       expect(h.api.requests.every((q) => q.method === "GET")).toBe(true);
       expect(h.api.requests.some((q) => q.path.includes("billing"))).toBe(false);
+      expect(h.api.requests.some((q) => q.path.includes(".."))).toBe(false);
     } finally {
       await h.stop();
     }

@@ -1,10 +1,10 @@
-import { chmod, copyFile, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Readable, Writable } from "node:stream";
 import { generateReadOnlyRbac } from "@ops/adapter-kubernetes";
 import { FileAuditStorage, FileHeadAnchor, verifyAudit } from "@ops/audit";
-import { ensureAuditKey, scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
+import { ensureAuditKey, scanAmbientCredentials, scanAmbientEnv, writeFileAtomic } from "@ops/broker";
 import { ENVIRONMENTS, OpsError, RISK_CLASSES } from "@ops/contracts";
 import type { Environment, ModelProvider, RiskClass, SecretStore } from "@ops/contracts";
 import { ChangeStore, breakGlassBanner, buildReplay, formatUsage, lastSessionId, renderBreakGlassReview, renderReplay, usageFromAudit } from "@ops/core";
@@ -69,7 +69,7 @@ const USAGE = [
   "kullanım: ops <komut>",
   "  init                               OPS_HOME ve kasayı oluştur",
   "  profile add k8s --id ID --kubeconfig YOL --env dev|stage|prod|sandbox [--context C] [--scope a,b] [--ceiling read]",
-  "              [--name AD] [--ambient-env ADLAR] [--ambient-path DİZİN]",
+  "              [--name AD] [--ambient-env ADLAR] [--ambient-path DİZİN] [--allow-external-token-file]  (kubeconfig dizini dışındaki tokenFile yalnız bu açık izinle)",
   "  profile add db --id ID --env E --host H [--port 5432] --database D --user U --scope public,sales [--ca-file PEM] [--ceiling read|mutate|deploy|destroy]  (read olmayan tavan = writer profili)",
   "              [--default-schema S] [--datasource AD] [--name AD] [--tls verify-full|disable] [--replace]",
   "              (parola: OPS_DB_PASSWORD_FILE ile 0600 dosya veya yankısız TTY istemi; bağlantı DİZESİ kabul edilmez)",
@@ -154,7 +154,7 @@ async function engineFor(c: CliEnv, rt: Runtime, localOnly?: boolean, quarantine
   if (lo) {
     // Sağlayıcı seçimi sırasında erken ret (PEP ayrıca her çağrıda zorlar): bağlam bulut modele HİÇ gitmez.
     if (isAgentRuntime(sel)) throw new OpsError("local_only", "egress: local-only kipinde sağlayıcı-döngülü çalışma zamanı (Cursor) kullanılamaz: model barındırması dış");
-    if (sel.capabilities.trustZone !== "local") throw new OpsError("local_only", `egress: local-only kipinde yalnız yerel (local) sağlayıcı kullanılır; '${sel.id}' bölgesi '${sel.capabilities.trustZone}'. Yerel uç için OPS_PROVIDER_URL=http://127.0.0.1:… ayarlayın`);
+    if (sel.capabilities.trustZone !== "local") throw new OpsError("local_only", `egress: local-only kipinde yalnız yerel (local) sağlayıcı kullanılır; '${sel.id}' bölgesi '${sel.capabilities.trustZone}'. Yerel uç için OPS_PROVIDER_BASE_URL=http://127.0.0.1:… ayarlayın`);
   }
   if (quarantine === "model" && !isAgentRuntime(sel)) {
     // Karantina özetleyicisi: AYRI bir sağlayıcı örneği (ana örneğin konuşma durumu — ör. Anthropic'in düşünme bloğu
@@ -504,11 +504,9 @@ async function policyCommand(c: CliEnv, sub: string | undefined, rest: string[])
     await rt.audit.append({ event: "policy_change", sessionId: rt.session.id, message: `${what}; sürüm ${before.slice(0, 12)}→${after.slice(0, 12)}` }).catch(() => {
       throw new OpsError("audit_unavailable", "denetim kaydı yazılamadı: politika değişmedi");
     });
-    if (userText !== null) await copyFile(c.paths.policyFile, `${c.paths.policyFile}.bak`).catch(() => undefined);
-    const tmp = `${c.paths.policyFile}.${process.pid}.tmp`;
-    await writeFile(tmp, next, { mode: 0o600 });
-    await chmod(tmp, 0o600);
-    await rename(tmp, c.paths.policyFile);
+    // Yedek ve politika atomik yazılır: sabit adlı geçici/yedek yola dikilmiş symlink izlenmez (O_EXCL + rename).
+    if (userText !== null) await writeFileAtomic(`${c.paths.policyFile}.bak`, userText).catch(() => undefined);
+    await writeFileAtomic(c.paths.policyFile, next);
     out(c, `Politika yazıldı: ${c.paths.policyFile}${userText !== null ? " (önceki sürüm .bak)" : ""}`);
     return 0;
   });
@@ -531,7 +529,8 @@ async function breakGlassCommand(c: CliEnv, sub: string | undefined, rest: strin
     out(c, md ?? `Bu oturumda break-glass kaydı yok: ${sid}`);
     return md ? 0 : 1;
   }
-  const client = await OpsdClient.connect(c.paths.socket).catch(() => {
+  const client = await OpsdClient.connect(c.paths.socket).catch((e: unknown) => {
+    if (e instanceof OpsError) throw e; // güvensiz/çok uzun soket yolu: asıl sebep gösterilir
     throw new OpsError("opsd_unreachable", `opsd'ye bağlanılamadı (${c.paths.socket}). Break-glass çalışan bir oturumun tavanını yükseltir: önce \`ops daemon\`; gömülü sohbette \`/breakglass\` kullanın`);
   });
   try {
@@ -591,7 +590,7 @@ export async function runCli(c: CliEnv): Promise<number> {
           if (kind !== "k8s") throw new OpsError("usage", "profil türü: 'k8s', 'db', 'pipeline' veya 'scm' (bu sürümde)");
           const { values } = parseArgs({
             args: r2,
-            options: { id: { type: "string" }, kubeconfig: { type: "string" }, env: { type: "string" }, context: { type: "string" }, scope: { type: "string" }, ceiling: { type: "string" }, name: { type: "string" }, "ambient-env": { type: "string" }, "ambient-path": { type: "string" }, replace: { type: "boolean" } },
+            options: { id: { type: "string" }, kubeconfig: { type: "string" }, env: { type: "string" }, context: { type: "string" }, scope: { type: "string" }, ceiling: { type: "string" }, name: { type: "string" }, "ambient-env": { type: "string" }, "ambient-path": { type: "string" }, "allow-external-token-file": { type: "boolean" }, replace: { type: "boolean" } },
             strict: true,
           });
           if (!values.id || !values.kubeconfig || !values.env) throw new OpsError("usage", "--id, --kubeconfig ve --env gerekli");
@@ -613,17 +612,19 @@ export async function runCli(c: CliEnv): Promise<number> {
               ...(values.name ? { displayName: values.name } : {}),
               ...(values["ambient-env"] ? { ambientOptInEnv: list(values["ambient-env"]) } : {}),
               ...(values["ambient-path"] ? { ambientPaths: list(values["ambient-path"]) } : {}),
+              ...(values["allow-external-token-file"] ? { allowExternalTokenFile: true } : {}),
               ...(values.replace ? { replace: true } : {}),
             }),
           );
           out(c, `Profil eklendi: ${res.profile.id} (${res.profile.environment}, tavan ${res.profile.classCeiling}, kapsam ${res.profile.allowedScopes.join("|")}, kimlik ${res.profile.credentialSource.kind})`);
-          for (const w of res.warnings) out(c, `⚠ ${w}`);
+          // uyarılar kubeconfig'ten gelen adlar/yollar taşır (üçüncü taraf girdisi): terminal kaçışları basılmaz
+          for (const w of res.warnings) out(c, `⚠ ${stripControlChars(w)}`);
           out(c, "Kimlik materyali yalnız kasada. Orijinal kubeconfig dosyası ürünün denetimi dışında kalır: güvenle taşıyın/silin. `ops profile doctor` ile fiili yetkiyi doğrulayın.");
           return 0;
         }
         if (sub === "list") {
           const rows = await withRuntime(c, async (rt) => rt.registry.list());
-          out(c, rows.length === 0 ? "(profil yok)" : rows.map((p) => `${p.id}\t${p.kind}\t${p.environment}\ttavan ${p.classCeiling}\tkapsam ${p.allowedScopes.join("|")}\t${p.credentialSource.kind}\t${p.displayName}`).join("\n"));
+          out(c, rows.length === 0 ? "(profil yok)" : rows.map((p) => `${p.id}\t${p.kind}\t${p.environment}\ttavan ${p.classCeiling}\tkapsam ${p.allowedScopes.join("|")}\t${p.credentialSource.kind}\t${stripControlChars(p.displayName)}`).join("\n"));
           return 0;
         }
         if (sub === "rm") {
@@ -792,12 +793,13 @@ export async function runCli(c: CliEnv): Promise<number> {
         if (embedded) {
           const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
           await withRuntime(c, async (rt) => {
-            await runChat(new LocalBackend(rt, await engineFor(c, rt, cv["local-only"], cq)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events, reauth: makeReauth(c) });
+            await runChat(new LocalBackend(rt, await engineFor(c, rt, cv["local-only"], cq)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events, reauth: makeReauth(c), ...(c.stop ? { stop: c.stop } : {}) });
             out(c, gate.summaryLine());
           }, gate, cv.workspace, cv["local-only"], cq);
           return 0;
         }
-        const client = await OpsdClient.connect(c.paths.socket).catch(() => {
+        const client = await OpsdClient.connect(c.paths.socket).catch((e: unknown) => {
+          if (e instanceof OpsError) throw e; // güvensiz/çok uzun soket yolu: asıl sebep gösterilir
           throw new OpsError("opsd_unreachable", `opsd'ye bağlanılamadı (${c.paths.socket}). \`ops daemon\` çalıştırın veya \`ops chat --embedded\` kullanın`);
         });
         try {
@@ -806,7 +808,7 @@ export async function runCli(c: CliEnv): Promise<number> {
           const info = await client.ping();
           if (isLocalOnly(c, cv["local-only"]) && !info.localOnly) throw new OpsError("local_only", "istenen `local-only` kipi çalışan opsd'de KAPALI: `ops daemon --local-only` ile yeniden başlatın");
           if (cq && info.quarantine !== cq && !(cq === "digest" && info.quarantine === "model")) throw new OpsError("usage", `istenen karantina kipi '${cq}' ama çalışan opsd '${info.quarantine}': \`ops daemon --quarantine ${cq}\` ile yeniden başlatın`);
-          await runChat(client, { input: c.io.input, output: c.io.output }, { reauth: makeReauth(c) });
+          await runChat(client, { input: c.io.input, output: c.io.output }, { reauth: makeReauth(c), ...(c.stop ? { stop: c.stop } : {}) });
         } finally {
           client.close();
         }

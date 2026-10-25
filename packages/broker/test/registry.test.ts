@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +27,19 @@ describe("ProfileRegistry", () => {
     expect(await r.remove("a")).toBe(true);
     expect(await r.remove("a")).toBe(false);
     expect((await open()).list().map((p) => p.id)).toEqual(["b"]);
+  });
+
+  it("önceden dikilmiş profiles.json.tmp symlink'i izlenmez (yazım hedefe gitmez, symlink kayıt olmaz)", async () => {
+    const victim = join(dir, "kurban.txt");
+    await writeFile(victim, "dokunulmamali");
+    await symlink(victim, `${path}.tmp`);
+    const r = await open();
+    await r.add(makeTestProfile({ id: "a" }));
+    expect(await readFile(victim, "utf8")).toBe("dokunulmamali");
+    const st = await lstat(path);
+    expect(st.isSymbolicLink()).toBe(false);
+    expect(st.mode & 0o777).toBe(0o600);
+    expect((await open()).list().map((p) => p.id)).toEqual(["a"]);
   });
 
   it("aynı kimlik replace olmadan eklenemez", async () => {

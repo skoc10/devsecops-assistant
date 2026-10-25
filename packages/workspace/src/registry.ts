@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -64,8 +64,17 @@ export class WorkspaceRegistry {
     const run = async (): Promise<void> => {
       await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
       const tmp = `${this.file}.${process.pid}.tmp`;
-      await writeFile(tmp, `${JSON.stringify({ version: 1, workspaces: this.items }, null, 2)}\n`, { mode: 0o600 });
-      await chmod(tmp, 0o600);
+      // Önceden dikilmiş symlink izlenmez: eski geçici dosya silinir (symlink'in kendisi), yenisi O_EXCL ile açılır.
+      await unlink(tmp).catch((e: NodeJS.ErrnoException) => {
+        if (e.code !== "ENOENT") throw e;
+      });
+      const fh = await open(tmp, "wx", 0o600);
+      try {
+        await fh.chmod(0o600);
+        await fh.writeFile(`${JSON.stringify({ version: 1, workspaces: this.items }, null, 2)}\n`, "utf8");
+      } finally {
+        await fh.close();
+      }
       await rename(tmp, this.file);
     };
     const next = this.queue.then(run, run);

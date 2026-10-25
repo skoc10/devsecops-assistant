@@ -200,10 +200,11 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const classifiers: ((tool: string, args: unknown) => ReturnType<ReturnType<typeof shellCommandClassifier>>)[] = [];
   let terminalNote = "kapalı";
   if (o.workdir) {
+    // Güvensiz iş alanı (kök/ev dizini) sandbox olsun olmasın reddedilir: yapılandırma hatası platforma göre sessizce geçmez.
+    const workdir = await assertSafeWorkdir(o.workdir);
     if (!sandbox || sandbox.kind === "none") {
       terminalNote = "devre dışı (OS sandbox yok)";
     } else {
-      const workdir = await assertSafeWorkdir(o.workdir);
       let catalog: CommandCatalog = parseCatalog(await readFile(BUILTIN_CATALOG_FILE, "utf8"));
       if (await exists(o.paths.userCatalogFile)) catalog = mergeCatalogs(catalog, parseCatalog(await readFile(o.paths.userCatalogFile, "utf8")));
       const terminal = new TerminalAdapter({ sandbox, catalog, workdir });

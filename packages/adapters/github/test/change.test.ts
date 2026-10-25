@@ -101,6 +101,11 @@ describe("scm.pr.create", () => {
     expect(await h.call("scm.pr.create", prArgs({ branch: "feature/x" }), { cited: [ev] })).toMatchObject({ reasonCode: "schema_invalid" });
     const many = Array.from({ length: 21 }, (_, i) => ({ path: `f${i}.txt`, content: "x" }));
     expect(await h.call("scm.pr.create", prArgs({ files: many }), { cited: [ev] })).toMatchObject({ reasonCode: "schema_invalid" });
+    // hedef/baş dal API yoluna girer (`.../git/ref/heads/<dal>`): nokta bölümü, `//`, `.lock`, sonda '.' reddedilir
+    for (const over of [{ base: "main/../../../other" }, { base: "a//b" }, { base: "main.lock" }, { branch: "ops/fix." }, { branch: "ops/a..b" }]) {
+      expect(await h.call("scm.pr.create", prArgs(over), { cited: [ev] }), JSON.stringify(over)).toMatchObject({ reasonCode: "schema_invalid" });
+    }
+    expect(writes(h)).toEqual([]);
   });
 
   it("baş dal zaten varsa önizleme reddeder (onay İSTENMEZ)", async () => {
@@ -181,6 +186,9 @@ describe("scm.pr.create", () => {
 
   it("validatePr birimi: geçerli içerik geçer", () => {
     expect(() => validatePr({ repo: BUILD_REPO, base: "main", branch: "ops/x", title: "t t", files: [{ path: "a/b.txt", content: "x" }] })).not.toThrow();
+    for (const [base, branch] of [["main/../x", "ops/x"], ["main", "ops/../../x"]] as const) {
+      expect(() => validatePr({ repo: BUILD_REPO, base, branch, title: "t t", files: [{ path: "a/b.txt", content: "x" }] }), `${base} ${branch}`).toThrow(/dal adı reddedildi/);
+    }
     expect(randomBytes(1).length).toBe(1);
   });
 });

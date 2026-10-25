@@ -8,7 +8,7 @@ import { truncateString } from "./limits.ts";
 import { DEFAULT_MASKING, MaskingContext, maskByDetectors, maskTable } from "./masking.ts";
 import type { MaskingRules, Table } from "./masking.ts";
 import { applyPatternRules } from "./patterns.ts";
-import type { PatternRule } from "./patterns.ts";
+import type { PatternOptions, PatternRule } from "./patterns.ts";
 import { applyStructural, getProfile } from "./structural.ts";
 
 export interface OutputPolicy {
@@ -52,16 +52,14 @@ export interface ProcessedOutput {
   readonly fullTokens: number;
 }
 
-/** M2 + M3 + kontrol karakteri temizliği: serbest metin (hata mesajı, kullanıcı girdisi, denetim) için. */
-export function scrubText(
-  text: string,
-  known: KnownSecrets,
-  counter: Counter = new Counter(),
-  opts: { entropy?: boolean; extraPatternRules?: readonly PatternRule[] } = {},
-): string {
+/**
+ * M3 + M2 + kontrol karakteri temizliği: serbest metin (hata mesajı, kullanıcı girdisi, denetim) için. Kayıtlı
+ * değerler (M3) desenlerden (M2) ÖNCE maskelenir: M2'nin kısmi eşleşmesi (`password=correct horse…` → yalnız ilk
+ * sözcük) kayıtlı değeri bölüp M3'ün onu tanımasını engelliyor, kalan kısım sızıyordu.
+ */
+export function scrubText(text: string, known: KnownSecrets, counter: Counter = new Counter(), opts: PatternOptions = {}): string {
   const cleaned = stripControlChars(text);
-  const patterned = applyPatternRules(cleaned, counter, opts);
-  return known.scrub(patterned, counter);
+  return applyPatternRules(known.scrub(cleaned, counter), counter, opts);
 }
 
 function isTable(v: unknown): v is Table {
@@ -102,11 +100,12 @@ function limitEvidence(value: unknown, maxBytes: number, maxItems: number): { va
  */
 export function processOutput(data: unknown, summary: string | undefined, policy: OutputPolicy): ProcessedOutput {
   const counter = new Counter();
-  const patternOpts = { entropy: policy.entropy ?? true, extraPatternRules: policy.extraPatternRules ?? [] };
+  // tek tip: alan adı yanlış yazılırsa derleme hatası (eskiden `extraRules` okunuyor, kurallar sessizce yok sayılıyordu)
+  const patternOpts: PatternOptions = { entropy: policy.entropy ?? true, extraPatternRules: policy.extraPatternRules ?? [] };
 
   // M1
   let value = applyStructural(data, getProfile(policy.structuralProfile), counter);
-  // M2 + M3 (+ kontrol karakterleri) her string ve anahtar üzerinde
+  // M3 + M2 (+ kontrol karakterleri) her string ve anahtar üzerinde
   value = mapStrings(value, (s) => scrubText(s, policy.known, counter, patternOpts));
   // M4
   if (policy.masking) {

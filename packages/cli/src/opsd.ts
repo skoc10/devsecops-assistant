@@ -1,5 +1,5 @@
-import { chmod, mkdir, rm } from "node:fs/promises";
-import { createServer } from "node:net";
+import { chmod, lstat, mkdir, rm } from "node:fs/promises";
+import { connect, createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
@@ -9,9 +9,73 @@ import { breakGlassBanner, usageFromAudit, formatUsage } from "@ops/core";
 import type { Sender } from "./backend.ts";
 import { readAuditRecords } from "./backend.ts";
 import type { ProfileRow } from "./chat.ts";
+import { assertPrivateDir, assertSocketPathFits } from "./paths.ts";
 import type { Runtime } from "./runtime.ts";
 
 const MAX_LINE = 1 << 20;
+
+/**
+ * `fn`'i geçici umask ile EŞZAMANLI çalıştırır. umask süreç genelidir: await boyunca açık bırakılmaz (araya giren
+ * başka bir dosya/dizin oluşturma etkilenmesin). Worker iş parçacığında umask değiştirilemez; orada 0700 dizin ve
+ * dinleme sonrası doğrulama yeterlidir.
+ */
+function withUmask(mask: number, fn: () => void): void {
+  let prev: number | undefined;
+  try {
+    prev = process.umask(mask);
+  } catch {
+    prev = undefined;
+  }
+  try {
+    fn();
+  } finally {
+    if (prev !== undefined) process.umask(prev);
+  }
+}
+
+/** UDS'ye bağlanmayı dener: biri dinliyorsa `alive`; ECONNREFUSED/ENOENT `dead` (kanıtlanmış ölü); diğer hata/zaman aşımı `unknown`. */
+function probeSocket(path: string, timeoutMs = 1_000): Promise<"alive" | "dead" | "unknown"> {
+  return new Promise((resolve) => {
+    const s = connect(path);
+    const done = (r: "alive" | "dead" | "unknown"): void => {
+      clearTimeout(timer);
+      s.destroy();
+      resolve(r);
+    };
+    const timer = setTimeout(() => done("unknown"), timeoutMs);
+    s.once("connect", () => done("alive"));
+    s.on("error", (e: NodeJS.ErrnoException) => done(e.code === "ECONNREFUSED" || e.code === "ENOENT" ? "dead" : "unknown"));
+  });
+}
+
+const alreadyRunning = (path: string): OpsError => new OpsError("opsd_running", `opsd zaten çalışıyor (${path}): ikinci daemon başlatılmadı; önce çalışanı kapatın`);
+
+/**
+ * Önceki çalışmadan kalan soket yalnız ÖLÜ olduğu kanıtlanırsa silinir. Yanıt veren soket başka bir opsd'dir ve
+ * devralınmaz (eskiden koşulsuz silinip üzerine bağlanılıyordu: çalışan daemon sessizce erişilmez oluyordu). Soket
+ * olmayan dosyaya ve durumu belirlenemeyen sokete dokunulmaz.
+ */
+async function removeStaleSocket(path: string): Promise<void> {
+  const st = await lstat(path).catch((e: NodeJS.ErrnoException) => {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  });
+  if (st === null) return;
+  if (!st.isSocket()) throw new OpsError("socket_path_occupied", `${path} soket değil: silinmedi (elle inceleyin)`);
+  const state = await probeSocket(path);
+  if (state === "alive") throw alreadyRunning(path);
+  if (state === "unknown") throw new OpsError("socket_path_occupied", `${path} yanıt vermedi ama ölü olduğu da kanıtlanamadı: silinmedi, daemon başlatılmadı`);
+  await rm(path, { force: true });
+}
+
+/** Soket BEKLENEN yolda, bu kullanıcıya ait ve 0600 mü? (kesik/başka yere bağlanma, izin uyuşmazlığı) */
+async function assertOwnSocket(path: string): Promise<void> {
+  const st = await lstat(path).catch(() => null);
+  const uid = process.getuid?.();
+  if (!st?.isSocket() || (uid !== undefined && st.uid !== uid) || (st.mode & 0o777) !== 0o600) {
+    throw new OpsError("socket_insecure", `opsd soketi beklenen yolda/izinlerde değil (${path}${st ? `, mod ${(st.mode & 0o777).toString(8)}, sahip uid ${st.uid}` : ": yok"}): dinleme durduruldu`);
+  }
+}
 
 const BreakGlassStart = z.strictObject({
   profile: z.string().min(1).max(100),
@@ -43,6 +107,8 @@ export interface OpsdOptions {
 export class Opsd {
   private readonly o: OpsdOptions;
   private server: Server | undefined;
+  /** Soket bu örnek tarafından bağlanıp doğrulandı mı? (yalnız o zaman kapanışta silinir) */
+  private bound = false;
   private busy = false;
   private readonly sockets = new Set<Socket>();
 
@@ -50,22 +116,48 @@ export class Opsd {
     this.o = opts;
   }
 
+  /**
+   * Sıra: yol uzunluğu (kesilmez) → dizin 0700 ve bu kullanıcıya ait → kalan soket yalnız ölüyse silinir (canlıysa
+   * "zaten çalışıyor") → soket 0600 DOĞAR (bind sırasında umask) → son durum doğrulanır (beklenen yolda, bu
+   * kullanıcıya ait, 0600); uyuşmazlıkta dinleme bırakılır.
+   */
   async listen(): Promise<void> {
-    await mkdir(dirname(this.o.socketPath), { recursive: true, mode: 0o700 });
-    await chmod(dirname(this.o.socketPath), 0o700);
-    await rm(this.o.socketPath, { force: true }); // eski soket (süreç ölmüş olabilir)
-    this.server = createServer((sock) => this.onConnection(sock));
-    await new Promise<void>((resolve, reject) => {
-      this.server?.once("error", reject);
-      this.server?.listen(this.o.socketPath, resolve);
-    });
-    await chmod(this.o.socketPath, 0o600);
+    const path = this.o.socketPath;
+    assertSocketPathFits(path);
+    const dir = dirname(path);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await chmod(dir, 0o700);
+    await assertPrivateDir(dir, { forbiddenMode: 0o077 });
+    await removeStaleSocket(path);
+    const server = createServer((sock) => this.onConnection(sock));
+    this.server = server;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // ölü soket silindikten sonra araya başka bir daemon girdiyse bind EADDRINUSE verir: yine devralma yok
+        server.once("error", (e: NodeJS.ErrnoException) => reject(e.code === "EADDRINUSE" ? alreadyRunning(path) : e));
+        // bind, listen() içinde eşzamanlıdır: dosya 0600 doğar, chmod'a kadar açık pencere kalmaz
+        withUmask(0o177, () => server.listen(path, resolve));
+      });
+      await chmod(path, 0o600).catch(() => undefined); // umask uygulanamadıysa; asıl karar aşağıdaki doğrulamada
+      await assertOwnSocket(path);
+    } catch (e) {
+      this.server = undefined;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw e;
+    }
+    this.bound = true;
   }
 
   async close(): Promise<void> {
     for (const s of this.sockets) s.destroy();
-    await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
-    await rm(this.o.socketPath, { force: true });
+    const server = this.server;
+    this.server = undefined;
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    // Yalnız BU örneğin bağladığı soket silinir: dinleyemeyen örnek (ör. "zaten çalışıyor") başkasının soketini silmez.
+    if (this.bound) {
+      this.bound = false;
+      await rm(this.o.socketPath, { force: true });
+    }
   }
 
   private onConnection(sock: Socket): void {
@@ -75,13 +167,22 @@ export class Opsd {
     const send = (obj: unknown): void => {
       if (!sock.destroyed) sock.write(`${JSON.stringify(obj)}\n`);
     };
+    const tooLarge = (): void => {
+      send({ id: -1, ok: false, error: { code: "too_large", message: "istek çok büyük" } });
+      sock.destroy();
+    };
+    // Sınır satır sonu BEKLENMEDEN uygulanır: readline sonlanmamış satırı sınırsız biriktirir (istemci hiç '\n'
+    // göndermeden akıtabilir). Son satır sonundan beri gelen bayt sayılır (\n ve \r: readline ikisinde de böler).
+    let pending = 0;
+    sock.on("data", (chunk: Buffer) => {
+      const end = Math.max(chunk.lastIndexOf(0x0a), chunk.lastIndexOf(0x0d));
+      pending = end === -1 ? pending + chunk.length : chunk.length - end - 1;
+      if (pending > MAX_LINE) tooLarge();
+    });
     const rl = createInterface({ input: sock, crlfDelay: Infinity });
     rl.on("line", (line) => {
-      if (line.length > MAX_LINE) {
-        send({ id: -1, ok: false, error: { code: "too_large", message: "istek çok büyük" } });
-        sock.destroy();
-        return;
-      }
+      if (sock.destroyed) return; // aynı parçada sınır aşıldıysa kalan satırlar işlenmez
+      if (Buffer.byteLength(line, "utf8") > MAX_LINE) return tooLarge(); // satır sonu sınırı aşan parçayla birlikte geldiyse
       void this.handle(line, send);
     });
   }

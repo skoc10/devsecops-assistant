@@ -1,10 +1,12 @@
-import { createConnection } from "node:net";
-import { stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { createConnection, createServer } from "node:net";
+import { link, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ScriptedProvider, say } from "@ops/testkit";
 import type { OrchestratorEvent } from "@ops/core";
 import { Opsd, OpsdClient } from "../src/index.ts";
+import { MAX_SOCKET_PATH_BYTES } from "../src/paths.ts";
 import { e01Script, makeFixture } from "./fixture.ts";
 import type { Fixture } from "./fixture.ts";
 
@@ -95,6 +97,57 @@ describe("opsd (UDS)", () => {
     c.close();
   });
 
+  /** Ham NDJSON bağlantısı: gelen çerçeveler ve kapanış. */
+  const rawConn = async () => {
+    const raw = createConnection(fx.rt.paths.socket);
+    const frames: { id: number; ok?: boolean; error?: { code: string } }[] = [];
+    let buf = "";
+    raw.on("data", (b) => {
+      buf += b.toString();
+      for (let i = buf.indexOf("\n"); i !== -1; i = buf.indexOf("\n")) {
+        frames.push(JSON.parse(buf.slice(0, i)));
+        buf = buf.slice(i + 1);
+      }
+    });
+    raw.on("error", () => undefined); // sunucu kapatınca EPIPE/ECONNRESET beklenir
+    const closed = new Promise<void>((r) => raw.once("close", () => r()));
+    await new Promise<void>((r) => raw.once("connect", () => r()));
+    return { raw, frames, closed };
+  };
+  const within = <T,>(p: Promise<T>, ms: number): Promise<T | "zaman aşımı"> => Promise.race([p, new Promise<"zaman aşımı">((r) => setTimeout(() => r("zaman aşımı"), ms))]);
+
+  it("satır sonu gelmeden 1 MiB'ı aşan akış bağlantıyı kapatır (sınırsız tampon yok); sunucu ayakta kalır", async () => {
+    const c = await start(new ScriptedProvider([say("x")]));
+    const { raw, closed } = await rawConn();
+    const chunk = Buffer.alloc(64 * 1024, 0x61); // 'a'; hiç satır sonu yok
+    for (let i = 0; i < 48 && !raw.destroyed; i++) raw.write(chunk); // 3 MiB
+    expect(await within(closed, 5_000)).not.toBe("zaman aşımı");
+    expect(await c.ping()).toMatchObject({ pong: true });
+    c.close();
+  });
+
+  it("çok satırlı normal trafik etkilenmez: toplamı sınırı aşan satırlar ve tam 1 MiB'lık satır kabul edilir; 1 MiB+1 reddedilir", async () => {
+    const c = await start(new ScriptedProvider([say("x")]));
+    const pad = "p".repeat(600_000);
+    const lines = [1, 2, 3].map((id) => JSON.stringify({ id, method: "ping", params: { pad } }));
+    const frame = (id: number, n: number): string => JSON.stringify({ id, method: "ping", params: { p: "q".repeat(n) } });
+    const overhead = frame(4, 0).length;
+    lines.push(frame(4, (1 << 20) - overhead));
+    expect(lines.at(-1)?.length).toBe(1 << 20);
+    const ok = await rawConn();
+    ok.raw.write(`${lines.join("\n")}\n`); // ~2.8 MiB tek yazımda
+    for (let i = 0; i < 250 && ok.frames.length < 4; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(ok.frames.map((f) => [f.id, f.ok])).toEqual([[1, true], [2, true], [3, true], [4, true]]);
+    ok.raw.destroy();
+
+    const over = await rawConn();
+    over.raw.write(`${frame(5, (1 << 20) - overhead + 1)}\n`);
+    expect(await within(over.closed, 5_000)).not.toBe("zaman aşımı");
+    expect(over.frames.some((f) => f.ok === true)).toBe(false);
+    expect(await c.ping()).toMatchObject({ pong: true });
+    c.close();
+  });
+
   it("S-16: onay/araç çağırma yöntemi bu soketten sunulmaz (yalnız sohbet ve yönetim)", async () => {
     const c = await start(new ScriptedProvider([say("x")]));
     await expect(c.call("tool.invoke", { tool: "k8s.resources.list" })).rejects.toThrow(/bad_request/);
@@ -109,5 +162,105 @@ describe("opsd (UDS)", () => {
     c.close();
     await d.close();
     await expect(stat(fx.rt.paths.socket)).rejects.toThrow();
+  });
+
+  it("aynı yolda ikinci opsd: canlı soket DEVRALINMAZ ('zaten çalışıyor'); başlayamayan örneğin close'u soketi silmez", async () => {
+    const c = await start(new ScriptedProvider([say("x")]));
+    const second = new Opsd({ runtime: fx.rt, orchestrator: fx.rt.createOrchestrator(new ScriptedProvider([say("y")])), socketPath: fx.rt.paths.socket });
+    await expect(second.listen()).rejects.toMatchObject({ code: "opsd_running", message: expect.stringContaining("opsd zaten çalışıyor") });
+    await second.close();
+    expect(await c.ping()).toMatchObject({ pong: true });
+    const c2 = await OpsdClient.connect(fx.rt.paths.socket); // yeni bağlantılar da ilk daemon'a gider
+    expect(await c2.ping()).toMatchObject({ pong: true });
+    c.close();
+    c2.close();
+  });
+
+  it("ölü soket (çökmüş süreç) silinip yeniden dinlenir; soket olmayan dosyaya dokunulmaz", async () => {
+    const sock = fx.rt.paths.socket;
+    // ölü soket: başka adda dinleyip sabit bağla hedef yola koy, sonra kapat (libuv yalnız kendi adını siler)
+    const tmp = join(dirname(sock), "eski.sock");
+    const old = createServer();
+    await new Promise<void>((r) => old.listen(tmp, () => r()));
+    await link(tmp, sock);
+    await new Promise<void>((r) => old.close(() => r()));
+    expect((await lstat(sock)).isSocket()).toBe(true);
+    const c = await start(new ScriptedProvider([say("x")]));
+    expect(await c.ping()).toMatchObject({ pong: true });
+    c.close();
+    await d.close();
+
+    await writeFile(sock, "soket değil");
+    const third = new Opsd({ runtime: fx.rt, orchestrator: fx.rt.createOrchestrator(new ScriptedProvider([say("z")])), socketPath: sock });
+    await expect(third.listen()).rejects.toMatchObject({ code: "socket_path_occupied" });
+    expect(await readFile(sock, "utf8")).toBe("soket değil");
+  });
+
+  describe("soket yolu ve izinleri", () => {
+    let base: string;
+    beforeEach(async () => {
+      base = await mkdtemp(join(tmpdir(), "ops-uds-"));
+    });
+    afterEach(async () => {
+      await rm(base, { recursive: true, force: true });
+    });
+    const opsdAt = (socketPath: string): Opsd => new Opsd({ runtime: fx.rt, orchestrator: fx.rt.createOrchestrator(new ScriptedProvider([say("x")])), socketPath });
+    const umaskNow = (): number => {
+      const m = process.umask(0o022);
+      process.umask(m);
+      return m;
+    };
+
+    it("UDS sınırını aşan yol: sunucu başlamaz (kesik yola bağlanmaz), istemci kesik yolda dinleyen sahteye bağlanmaz", async () => {
+      const long = join(base, "d".repeat(MAX_SOCKET_PATH_BYTES), "opsd.sock");
+      await expect(opsdAt(long).listen()).rejects.toMatchObject({ code: "socket_path_too_long", message: expect.stringContaining("OPS_HOME") });
+      expect(await readdir(base)).toEqual([]); // ne dizin ne 0700 dışında kesik adlı soket
+      // libuv yolu keser: sahte dinleyici kesik adda (0700 dizin DIŞINDA) dinler; istemci bağlantı denemez
+      let hits = 0;
+      const impostor = createServer((s) => {
+        hits++;
+        s.destroy();
+      });
+      await new Promise<void>((r) => {
+        impostor.once("error", () => r());
+        impostor.listen(long, () => r());
+      });
+      try {
+        await expect(OpsdClient.connect(long)).rejects.toMatchObject({ code: "socket_path_too_long" });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(hits).toBe(0);
+      } finally {
+        await new Promise<void>((r) => impostor.close(() => r()));
+      }
+    });
+
+    it("tam sınırdaki yol çalışır: soket 0600 doğar, süreç umask'ı geri yüklenir", async () => {
+      const pad = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(join(base, "", "opsd.sock")) - 1;
+      expect(pad).toBeGreaterThan(0);
+      const exact = join(base, "r".repeat(pad), "opsd.sock");
+      expect(Buffer.byteLength(exact)).toBe(MAX_SOCKET_PATH_BYTES);
+      const before = umaskNow();
+      d = opsdAt(exact);
+      await d.listen();
+      expect(umaskNow()).toBe(before);
+      const st = await lstat(exact);
+      expect(st.isSocket()).toBe(true);
+      expect(st.mode & 0o777).toBe(0o600);
+      expect((await stat(dirname(exact))).mode & 0o777).toBe(0o700);
+      const c = await OpsdClient.connect(exact);
+      expect(await c.ping()).toMatchObject({ pong: true });
+      c.close();
+    });
+
+    it("soket dizini sembolik bağsa dinlenmez; istemci bu kullanıcıya ait olmayan/soket olmayan yola bağlanmaz", async () => {
+      const target = await mkdtemp(join(base, "hedef-"));
+      await symlink(target, join(base, "run"));
+      await expect(opsdAt(join(base, "run", "opsd.sock")).listen()).rejects.toMatchObject({ code: "home_insecure" });
+      expect(await readdir(target)).toEqual([]);
+
+      await mkdir(join(base, "run2"), { mode: 0o700 });
+      await writeFile(join(base, "run2", "opsd.sock"), "soket değil");
+      await expect(OpsdClient.connect(join(base, "run2", "opsd.sock"))).rejects.toMatchObject({ code: "socket_insecure" });
+    });
   });
 });

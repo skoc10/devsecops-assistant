@@ -25,6 +25,14 @@ describe("M4 dedektörler", () => {
     expect(maskByDetectors(text, new Counter())).toBe(text);
   });
 
+  it("e-posta: 64 karakterlik yerel kısım ve bitişik adresler maskelenir; daha uzun koşuda adres yine yakalanır", () => {
+    const local = `${"a".repeat(30)}.${"b".repeat(33)}`;
+    expect(maskByDetectors(`to ${local}@mail.example.invalid ok`, new Counter())).toBe("to ‹redacted:email› ok");
+    expect(maskByDetectors("ali@x.invalid.v@y.invalid", new Counter())).toBe("‹redacted:email›‹redacted:email›");
+    const out = maskByDetectors(`${"x".repeat(100)}@example.invalid`, new Counter());
+    expect(out).toBe(`${"x".repeat(36)}‹redacted:email›`);
+  });
+
   it("detectors:false ile devre dışı", () => {
     expect(maskByDetectors("a@b.invalid", new Counter(), { columns: [], detectors: false })).toBe("a@b.invalid");
   });
@@ -64,6 +72,61 @@ describe("M4 tablo maskeleme", () => {
     const t = { columns: [{ name: "c1", origin: { relation: "users", column: "email" } }], rows: [["ali@example.invalid"]] };
     const out = maskTable(t, DEFAULT_MASKING, new MaskingContext(), new Counter());
     expect(String(out.rows[0]?.[0])).toMatch(/^h:/);
+  });
+
+  it("`g`/`y` bayraklı sütun kuralı ve ek dedektör durum taşımaz (aynı adlı ikinci sütun, ikinci geçiş)", () => {
+    const rules = {
+      columns: [{ match: /^email$/g, action: "hash" as const }],
+      extraDetectors: [{ id: "musteri-no", regex: /\bMN-\d{6}\b/ }],
+    };
+    const t = {
+      columns: [{ name: "email" }, { name: "email" }, { name: "note" }],
+      rows: [
+        ["a@example.invalid", "b@example.invalid", "MN-123456 ve MN-654321"],
+        ["c@example.invalid", "d@example.invalid", "MN-111111"],
+      ],
+    };
+    for (let pass = 0; pass < 2; pass++) {
+      const out = maskTable(t, rules, new MaskingContext(), new Counter());
+      expect(JSON.stringify(out.rows)).not.toMatch(/example\.invalid|MN-\d/);
+    }
+  });
+
+  it("jsonb/dizi hücrelerinde (iç içe, anahtar dahil) dedektörler çalışır; sayı/boolean/null/Date olduğu gibi kalır", () => {
+    const when = new Date(0);
+    const t = {
+      columns: [{ name: "id" }, { name: "contacts" }, { name: "profile" }],
+      rows: [
+        [
+          1,
+          ["ayse.yilmaz@example.com", { tel: "+90 532 123 45 67" }],
+          { phone: "+90 532 123 45 67", mail: "a@b.co", kart: { no: "4111 1111 1111 1111" }, n: 5, ok: true, x: null, when, "veli@example.com": "anahtar" },
+        ],
+      ],
+    };
+    const c = new Counter();
+    const out = maskTable(t, { columns: [], detectors: true }, new MaskingContext(), c);
+    const [row] = out.rows as unknown[][];
+    expect(JSON.stringify(out.rows)).not.toMatch(/ayse|532|a@b\.co|4111|veli@/);
+    expect(row?.[1]).toEqual(["‹redacted:email›", { tel: "‹redacted:phone›" }]);
+    const profile = row?.[2] as Record<string, unknown>;
+    expect(profile).toMatchObject({ n: 5, ok: true, x: null, "‹redacted:email›": "anahtar", kart: { no: "‹redacted:card›" } });
+    expect(profile["when"]).toBe(when);
+    expect(c.toSummary()).toEqual(expect.arrayContaining([{ rule: "m4:email", count: 3 }, { rule: "m4:phone", count: 2 }, { rule: "m4:card", count: 1 }]));
+  });
+
+  it("hücre nesnesindeki `__proto__` anahtarı prototip atamaz ve içi maskelenir; aşırı derin hücre kesilir", () => {
+    const cell = JSON.parse('{"__proto__": {"mail": "x@example.invalid"}, "ok": 1}') as unknown;
+    let deep: unknown = "derin@example.invalid";
+    for (let i = 0; i < 100; i++) deep = [deep];
+    const c = new Counter();
+    const out = maskTable({ columns: [{ name: "doc" }, { name: "deep" }], rows: [[cell, deep]] }, DEFAULT_MASKING, new MaskingContext(), c);
+    const [doc, d] = out.rows[0] as unknown[];
+    expect(Object.getPrototypeOf(doc)).toBe(Object.prototype);
+    expect(JSON.stringify(doc)).toBe('{"__proto__":{"mail":"‹redacted:email›"},"ok":1}');
+    expect(JSON.stringify(d)).not.toContain("derin@");
+    expect(JSON.stringify(d)).toContain("‹dropped:max-depth›");
+    expect(c.toSummary().some((s) => s.rule === "m4:max-depth")).toBe(true);
   });
 
   it("drop eylemi sütunu kaldırır", () => {

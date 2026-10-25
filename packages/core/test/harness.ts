@@ -2,10 +2,11 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { AuditLog, MemoryAuditStorage, MemoryHeadAnchor } from "@ops/audit";
 import { defineTool } from "@ops/contracts";
-import type { ApprovalGate, Profile, ProfileInput, RawToolOutput, ToolDefinition, ToolDescriptorMeta } from "@ops/contracts";
+import type { ApprovalGate, Profile, ProfileInput, RawToolOutput, ToolDefinition, ToolDescriptor, ToolDescriptorMeta } from "@ops/contracts";
 import { DEFAULT_POLICY, PolicyEngine } from "@ops/policy";
 import type { PolicyDocument } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
+import type { MaskingRules } from "@ops/redaction";
 import { CaptureSink, FakeAdapter, FakeBroker, makeCanary, makeTestProfile } from "@ops/testkit";
 import type { Canary } from "@ops/testkit";
 import { createLocalAdapter, EvidenceStore, Session, ToolGateway, ToolRegistry, formatForModel } from "../src/index.ts";
@@ -61,6 +62,7 @@ export interface HarnessOpts {
   now?: () => Date;
   localOnly?: boolean;
   quarantine?: Quarantine;
+  maskingFor?: (tool: ToolDescriptor, profile: Profile | null) => MaskingRules | null;
 }
 
 export async function makeHarness(opts: HarnessOpts = {}) {
@@ -115,6 +117,7 @@ export async function makeHarness(opts: HarnessOpts = {}) {
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.localOnly ? { localOnly: true } : {}),
     ...(opts.quarantine ? { quarantine: opts.quarantine } : {}),
+    ...(opts.maskingFor ? { maskingFor: opts.maskingFor } : {}),
   });
 
   const profile: Profile = makeTestProfile({ id: "test-k8s", ...(opts.profile ?? {}) });

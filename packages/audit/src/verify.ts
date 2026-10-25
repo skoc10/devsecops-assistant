@@ -1,5 +1,6 @@
 import { AuditRecordSchema } from "@ops/contracts";
 import type { AuditRecord } from "@ops/contracts";
+import { checkAnchor } from "./anchor.ts";
 import { chainHash, GENESIS_HASH } from "./chain.ts";
 import type { AuditStorage, HeadAnchor } from "./storage.ts";
 
@@ -12,7 +13,13 @@ export interface VerifyProblem {
     | "prev_hash_mismatch"
     | "hash_mismatch"
     | "tail_truncated"
-    | "anchor_mismatch";
+    | "anchor_mismatch"
+    /** Günlük dolu ama çapa yok: silinmiş olabilir, kesme denetlenemedi. */
+    | "anchor_missing"
+    /** Çapa MAC'siz (eski biçim), MAC'i tutmuyor ya da biçimsiz: içeriğine güvenilmedi. */
+    | "anchor_unauthenticated"
+    /** Çapa bir noktada doğrulanamadan yeniden kurulmuş: o noktadan önceki kesme tespit edilemez. */
+    | "anchor_reset";
   readonly message: string;
 }
 
@@ -23,9 +30,25 @@ export interface VerifyResult {
   readonly problems: VerifyProblem[];
 }
 
+/** Kilit dosyası oluşturulamayan konum (salt-okunur kopya, başkasının dizini): orada yazıcı kilidi de yoktur. */
+function isUnwritable(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException | null)?.code;
+  return code === "EROFS" || code === "EACCES" || code === "EPERM";
+}
+
 /** Zinciri baştan yeniden hesaplar. Düzenleme, silme, yeniden sıralama ve (çapa varsa) kuyruk kesme tespit edilir. */
 export async function verifyAudit(storage: AuditStorage, key: Uint8Array, anchor?: HeadAnchor): Promise<VerifyResult> {
-  const lines = await storage.readLines();
+  // Tutarlı anlık görüntü: satırlar ve çapa kilit altında okunur (eşzamanlı ekleme sahte kesme/yarım satır
+  // göstermez); hash hesabı kilit bırakıldıktan sonra yapılır, yazıcılar beklemez. Kilit hiç oluşturulamıyorsa
+  // (salt-okunur kopyanın adli incelemesi) kilitsiz okunur; çapa önce okunur ki eşzamanlı ekleme sahte kesme göstermesin.
+  const snapshot = async () => {
+    const head = anchor ? await anchor.read() : null;
+    return { head, lines: await storage.readLines() };
+  };
+  const { lines, head } = await storage.withLock(snapshot).catch((e: unknown) => {
+    if (isUnwritable(e)) return snapshot();
+    throw e;
+  });
   const problems: VerifyProblem[] = [];
   const records: AuditRecord[] = [];
   let prev = GENESIS_HASH;
@@ -58,8 +81,18 @@ export async function verifyAudit(storage: AuditStorage, key: Uint8Array, anchor
   }
 
   if (anchor) {
-    const a = await anchor.read();
-    if (a) {
+    const a = checkAnchor(key, head);
+    if (a.status === "none") {
+      if (lines.length > 0) {
+        problems.push({ seq: null, code: "anchor_missing", message: "çapa yok: kuyruk kesme denetlenemedi (çapa silinmiş olabilir)" });
+      }
+    } else if (a.status === "unauthenticated") {
+      problems.push({
+        seq: null,
+        code: "anchor_unauthenticated",
+        message: `çapa doğrulanamadı (${a.reason}): içeriğine güvenilmedi, kuyruk kesme denetlenemedi`,
+      });
+    } else {
       const last = records[records.length - 1];
       if (!last || last.seq < a.seq) {
         problems.push({ seq: null, code: "tail_truncated", message: `günlük çapadan kısa (çapa seq ${a.seq}): kuyruk kesilmiş` });
@@ -68,6 +101,13 @@ export async function verifyAudit(storage: AuditStorage, key: Uint8Array, anchor
         if (!at || at.hash !== a.hash) {
           problems.push({ seq: a.seq, code: "anchor_mismatch", message: `seq ${a.seq}: çapa hash'i ile uyuşmuyor` });
         }
+      }
+      if (a.since > 0) {
+        problems.push({
+          seq: a.since,
+          code: "anchor_reset",
+          message: `çapa seq ${a.since}'de doğrulanamadan yeniden kuruldu (önceki çapa yoktu ya da doğrulanamadı): bu kayıttan önceki kuyruk kesmesi tespit edilemez`,
+        });
       }
     }
   }

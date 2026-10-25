@@ -36,7 +36,10 @@ export interface BreakGlassGrant {
 }
 
 export interface SessionUsage {
+  /** Başarıyla çalışan araç çağrıları (raporlama). */
   toolCalls: number;
+  /** Bütçeye sayılan TÜM çağrı girişimleri (reddedilen/hatalı dahil; PEP kabul anında artırır). */
+  attemptedCalls: number;
   /** Model çağrılarının raporladığı toplam (girdi+çıktı) token. */
   sessionTokens: number;
   /** Modele giden araç sonucu görünümlerinin tahmini toplamı. */
@@ -54,7 +57,7 @@ export class Session {
   /** Profil değişimi bir çağ başlatır; eski kanıt mutasyon atfı olarak kullanılamaz. */
   epoch = 0;
   context: ContextLabel = emptyContextLabel();
-  readonly usage: SessionUsage = { toolCalls: 0, sessionTokens: 0, resultTokens: 0 };
+  readonly usage: SessionUsage = { toolCalls: 0, attemptedCalls: 0, sessionTokens: 0, resultTokens: 0 };
   readonly activeToolsets = new Set<string>(["core"]);
   /** Etkin skill gövdeleri (en çok `maxActiveSkills`; en eski çıkarılır). */
   readonly activeSkills = new Map<string, ActiveSkill>();

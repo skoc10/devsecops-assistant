@@ -198,6 +198,9 @@ export async function seedShop(pg: TestPostgres, seed: ShopSeed): Promise<void> 
   }
   await pg.admin(
     [
+      // PG ≤14 varsayılanı: herkes public şemasında CREATE yetkili (PG 15+ bunu kaldırdı). Doktor bunu doğru biçimde
+      // `schema_create` hatası sayar; harness her sürümde PG 15+ varsayılanıyla aynı başlangıcı kurar.
+      "REVOKE CREATE ON SCHEMA public FROM PUBLIC",
       "CREATE SCHEMA sales",
       "CREATE SCHEMA secret",
       "CREATE TABLE public.customers (id int PRIMARY KEY, name text NOT NULL, email text, phone text, note text)",

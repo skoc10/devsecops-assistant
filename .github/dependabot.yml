@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # GitHub Actions: SHA pinleri (ci.yml, codeql.yml) güncel tutulur; sürüm yorumu da güncellenir.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # npm (pnpm çalışma alanı): yeni yayımlanan sürüm 7 gün beklenir (ele geçirilmiş paket yayınlarına karşı).
+  # pnpm-workspace.yaml `minimumReleaseAge` ile aynı yönde; güvenlik güncellemeleri bekleme süresine tabi değildir.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        dependency-type: development
+      runtime:
+        dependency-type: production

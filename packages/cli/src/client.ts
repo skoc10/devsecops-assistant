@@ -1,9 +1,13 @@
+import { lstat } from "node:fs/promises";
 import { connect } from "node:net";
 import type { Socket } from "node:net";
+import { dirname } from "node:path";
 import { createInterface } from "node:readline";
+import { OpsError } from "@ops/contracts";
 import type { DoctorReport } from "@ops/contracts";
 import type { OrchestratorEvent } from "@ops/core";
 import type { BreakGlassStartArgs, ChatBackend, ProfileRow } from "./chat.ts";
+import { assertPrivateDir, assertSocketPathFits } from "./paths.ts";
 
 interface Frame {
   id: number;
@@ -36,7 +40,16 @@ export class OpsdClient implements ChatBackend {
     });
   }
 
-  static connect(path: string): Promise<OpsdClient> {
+  /**
+   * Bağlanmadan önce: yol UDS sınırını aşıyorsa REDDEDİLİR (libuv keser; kesik yolda dinleyen sahte bir sürece
+   * bağlanılırdı); soket bu kullanıcıya ait olmalı ve grup/diğerlerinin yazamadığı dizinde durmalı.
+   */
+  static async connect(path: string): Promise<OpsdClient> {
+    assertSocketPathFits(path);
+    await assertPrivateDir(dirname(path));
+    const st = await lstat(path);
+    const uid = process.getuid?.();
+    if (!st.isSocket() || (uid !== undefined && st.uid !== uid)) throw new OpsError("socket_insecure", `${path} bu kullanıcıya ait bir soket değil: bağlanılmadı`);
     return new Promise((resolve, reject) => {
       const s = connect(path);
       s.once("connect", () => resolve(new OpsdClient(s)));

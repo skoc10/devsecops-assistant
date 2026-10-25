@@ -1,7 +1,7 @@
 export { Counter, redacted, isRedactedToken, mapStrings } from "./counter.ts";
 export { PATTERN_RULES, applyPatternRules, looksLikeHighEntropySecret } from "./patterns.ts";
 export type { PatternRule, PatternOptions } from "./patterns.ts";
-export { KnownSecrets, secretNeedles, MIN_KNOWN_SECRET_BYTES } from "./known.ts";
+export { KnownSecrets, secretNeedles, canonicalNeedles, MIN_KNOWN_SECRET_BYTES } from "./known.ts";
 export { applyStructural, registerProfile, getProfile, DEFAULT_PROFILE } from "./structural.ts";
 export type { StructuralProfile } from "./structural.ts";
 export {

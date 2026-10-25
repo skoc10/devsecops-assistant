@@ -23,6 +23,9 @@ export interface AddKubeconfigRequest {
   readonly context?: string;
   readonly baseDir?: string;
   readonly readFile?: KubeImportOptions["readFile"];
+  readonly realpath?: KubeImportOptions["realpath"];
+  /** Kubeconfig dizini dışındaki `tokenFile`'a KULLANICININ açık izni (bkz. `KubeImportOptions.allowExternalTokenFile`). */
+  readonly allowExternalTokenFile?: boolean;
   /** exec kimlik eklentisi için: kullanıcı şablonları ve ikili çözümleyici (test). */
   readonly execCatalog?: KubeImportOptions["execCatalog"];
   readonly resolveBinary?: KubeImportOptions["resolveBinary"];
@@ -84,6 +87,21 @@ export interface AddTokenRequest {
 const REPO_SCOPE = /^(?:\*|[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?:\*|[A-Za-z0-9._-]{1,100}))$/;
 const SCHEMA_NAME = /^[a-z_][a-z0-9_$]{0,62}$/;
 
+/**
+ * M3 (bilinen-secret taraması) bu uzunluğun altındaki değerleri KAYDETMEZ (yanlış pozitif seli; `SecretSink.add`
+ * `false` döner). `@ops/redaction` `MIN_KNOWN_SECRET_BYTES` ile aynı olmalı: broker o pakete bağımlı değil, eşitliği
+ * test doğrular.
+ */
+export const MIN_KNOWN_SECRET_BYTES = 8;
+
+/** Kasaya giden kimlik M3'e kaydedilemeyecek kadar kısaysa uyarı (değerin kendisi metne girmez). */
+function shortSecretWarnings(what: string, value: string | undefined): string[] {
+  if (value === undefined || Buffer.byteLength(value, "utf8") >= MIN_KNOWN_SECRET_BYTES) return [];
+  return [
+    `${what} ${MIN_KNOWN_SECRET_BYTES} bayttan kısa: bilinen-secret maskelemesine (M3) kaydedilemez; araç çıktısında veya hata iletisinde geçerse maskelenmeyebilir. Daha uzun bir ${what} kullanın`,
+  ];
+}
+
 export interface AddResult {
   readonly profile: Profile;
   /** Secret içermez. */
@@ -108,6 +126,8 @@ export class ProfileService {
       ...(req.context ? { context: req.context } : {}),
       ...(req.baseDir ? { baseDir: req.baseDir } : {}),
       ...(req.readFile ? { readFile: req.readFile } : {}),
+      ...(req.realpath ? { realpath: req.realpath } : {}),
+      ...(req.allowExternalTokenFile ? { allowExternalTokenFile: true } : {}),
       ...(req.execCatalog ? { execCatalog: req.execCatalog } : {}),
       ...(req.resolveBinary ? { resolveBinary: req.resolveBinary } : {}),
     });
@@ -115,7 +135,7 @@ export class ProfileService {
     if (scopes.length === 0) {
       throw new OpsError("scope_required", "izinli kapsam belirtilmedi ve bağlamda varsayılan namespace yok (allowedScopes verin; '*' = hepsi)");
     }
-    const warnings = [...imp.warnings];
+    const warnings = [...imp.warnings, ...shortSecretWarnings("belirteç", imp.blob.token)];
     const ceiling: RiskClass = req.classCeiling ?? "read";
     if (ceiling !== "read") warnings.push(`sınıf tavanı '${ceiling}': yazma araçları Faz 2'de gelir; bu profil o zamana kadar yalnız okuma yapar`);
     if (scopes.includes("*")) warnings.push("allowedScopes '*': tüm namespace'ler izinli");
@@ -182,7 +202,7 @@ export class ProfileService {
       ...(req.tlsMode ? { tlsMode: req.tlsMode } : {}),
       ...(req.serverName ? { serverName: req.serverName } : {}),
     });
-    const warnings = [...imp.warnings];
+    const warnings = [...imp.warnings, ...shortSecretWarnings("parola", imp.blob.password)];
     if (scopes.includes("*")) warnings.push("allowedScopes '*': tüm şemalar izinli");
     if (writer) {
       warnings.push(
@@ -224,7 +244,7 @@ export class ProfileService {
     if (scopes.length === 0) throw new OpsError("scope_required", "izinli depo belirtilmedi (allowedScopes verin: sahip/depo, sahip/* veya *)");
     for (const sc of scopes) if (!REPO_SCOPE.test(sc)) throw new OpsError("scope_invalid", `depo kapsamı geçersiz (sahip/depo | sahip/* | *): ${sc.slice(0, 60)}`);
     const imp = buildTokenCredential({ apiBase: req.apiBase, token: req.token, ...(req.caPem !== undefined ? { caPem: req.caPem } : {}) });
-    const warnings = [...imp.warnings];
+    const warnings = [...imp.warnings, ...shortSecretWarnings("belirteç", imp.blob.token)];
     if (scopes.includes("*")) warnings.push("allowedScopes '*': erişilebilen tüm depolar izinli");
     if (riskRank(ceiling) > riskRank("read")) warnings.push(`tavan '${ceiling}': yazma araçları (PR açma${ceiling === "deploy" ? ", koşu yeniden çalıştırma" : ""}) belirtecin yazma izni olduğunda çalışır; belirteci yalnız gereken depolara ve izinlere (Contents/Pull requests/Actions) daraltın — her yazma önizleme + onaydan geçer`);
     const profile = ProfileSchema.parse({

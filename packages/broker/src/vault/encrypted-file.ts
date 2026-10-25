@@ -1,8 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { OpsError } from "@ops/contracts";
 import type { SecretStore } from "@ops/contracts";
+import { writeFileAtomic } from "../atomic-write.ts";
 
 /**
  * Şifreli yerel kasa. AEAD: AES-256-GCM (Node yerleşik); KDF: scrypt (Node yerleşik — Argon2id
@@ -37,15 +37,18 @@ const CHECK_PLAINTEXT = Buffer.from("ops-vault-check-v1");
 const CHECK_NAME = "\u0000check";
 
 function deriveKey(passphrase: Uint8Array, kdf: KdfParams): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
+  // scrypt girdisi çağıranın tamponunun KOPYASI: çağıran kendi tamponunu sıfırlar, bu kopya da türetme bitince
+  // (başarı, hata veya geçersiz parametreyle eşzamanlı ret) sıfırlanır — en iyi çaba
+  const input = Buffer.from(passphrase);
+  return new Promise<Buffer>((resolve, reject) => {
     scrypt(
-      Buffer.from(passphrase),
+      input,
       Buffer.from(kdf.salt, "base64"),
       32,
       { N: kdf.N, r: kdf.r, p: kdf.p, maxmem: 256 * 1024 * 1024 },
       (err, key) => (err ? reject(err) : resolve(key)),
     );
-  });
+  }).finally(() => input.fill(0));
 }
 
 function seal(key: Buffer, name: string, plaintext: Uint8Array): Sealed {
@@ -148,11 +151,7 @@ export class EncryptedFileStore implements SecretStore {
   }
 
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.data), { mode: 0o600 });
-    await chmod(tmp, 0o600);
-    await rename(tmp, this.path);
+    await writeFileAtomic(this.path, JSON.stringify(this.data));
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
