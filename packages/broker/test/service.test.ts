@@ -100,6 +100,27 @@ describe("ProfileService", () => {
     expect(registry.list()).toEqual([]);
   });
 
+  it("R-K1: paylaşılan kubeconfig'in tokenFile'ı (../home/.vault-token) kasaya alınmaz; açık izin servisten geçer", async () => {
+    const { store, registry, svc } = await make();
+    const pki = await generateTestPki();
+    const victim = makeCanary("vault-token");
+    await mkdir(join(dir, "home"), { recursive: true });
+    await writeFile(join(dir, "home", ".vault-token"), `${victim.value}\n`, { mode: 0o600 });
+    await mkdir(join(dir, "dl"), { recursive: true });
+    const text = buildKubeconfig({ server, caPem: pki.caPem, tokenFile: "../home/.vault-token", namespace: "default" });
+    const err = await svc.addKubeconfig({ id: "shared", kubeconfigText: text, environment: "dev", baseDir: join(dir, "dl") }).catch((e: Error) => e);
+    expect(err).toMatchObject({ code: "kubeconfig_token_file_outside" });
+    expect((err as Error).message).not.toContain(victim.value);
+    expect(await store.list("")).toEqual([]);
+    expect(registry.list()).toEqual([]);
+
+    const ok = await svc.addKubeconfig({ id: "shared", kubeconfigText: text, environment: "dev", baseDir: join(dir, "dl"), allowExternalTokenFile: true });
+    const w = ok.warnings.join("\n");
+    expect(w).toMatch(/tokenFile kubeconfig dizininin DIŞINDA/);
+    expect(w).toMatch(/\(tokenFile\): \/.*\/home\/\.vault-token/);
+    expect(w).not.toContain(victim.value);
+  });
+
   it("remove hem kaydı hem kimliği siler", async () => {
     const { store, svc } = await make();
     const pki = await generateTestPki();

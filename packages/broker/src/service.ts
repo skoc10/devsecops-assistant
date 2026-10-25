@@ -23,6 +23,9 @@ export interface AddKubeconfigRequest {
   readonly context?: string;
   readonly baseDir?: string;
   readonly readFile?: KubeImportOptions["readFile"];
+  readonly realpath?: KubeImportOptions["realpath"];
+  /** Kubeconfig dizini dışındaki `tokenFile`'a KULLANICININ açık izni (bkz. `KubeImportOptions.allowExternalTokenFile`). */
+  readonly allowExternalTokenFile?: boolean;
   /** exec kimlik eklentisi için: kullanıcı şablonları ve ikili çözümleyici (test). */
   readonly execCatalog?: KubeImportOptions["execCatalog"];
   readonly resolveBinary?: KubeImportOptions["resolveBinary"];
@@ -108,6 +111,8 @@ export class ProfileService {
       ...(req.context ? { context: req.context } : {}),
       ...(req.baseDir ? { baseDir: req.baseDir } : {}),
       ...(req.readFile ? { readFile: req.readFile } : {}),
+      ...(req.realpath ? { realpath: req.realpath } : {}),
+      ...(req.allowExternalTokenFile ? { allowExternalTokenFile: true } : {}),
       ...(req.execCatalog ? { execCatalog: req.execCatalog } : {}),
       ...(req.resolveBinary ? { resolveBinary: req.resolveBinary } : {}),
     });

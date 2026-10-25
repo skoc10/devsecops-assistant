@@ -1,7 +1,8 @@
-import { X509Certificate } from "node:crypto";
+import { X509Certificate, createPrivateKey } from "node:crypto";
 import { createHash } from "node:crypto";
-import { access, constants, readFile, realpath } from "node:fs/promises";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { access, constants, open, readFile, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { OpsError } from "@ops/contracts";
 import { parse } from "yaml";
 import { BUILTIN_EXEC_TEMPLATES, matchExecSpec } from "./exec-templates.ts";
@@ -60,9 +61,19 @@ export interface KubeImportOptions {
   readonly execCatalog?: readonly ExecTemplate[];
   readonly resolveBinary?: (command: string) => Promise<ResolvedBinary>;
   readonly context?: string;
-  /** Göreli dosya başvurularının çözüleceği dizin (kubeconfig'in bulunduğu dizin). */
+  /** Göreli dosya başvurularının çözüleceği dizin (kubeconfig'in bulunduğu dizin). `tokenFile` bu dizinin dışına çıkamaz. */
   readonly baseDir?: string;
+  /** Test: dosya okuyucu. Varsayılan yalnız normal dosyaları, boyut sınırıyla okur. */
   readonly readFile?: (path: string) => Promise<Buffer>;
+  /** Test: symlink çözücü (varsayılan `fs.realpath`). Dizin sınırı symlink'in HEDEFİNE göre denetlenir. */
+  readonly realpath?: (path: string) => Promise<string>;
+  /**
+   * `tokenFile` kubeconfig dizininin DIŞINDAYSA (symlink hedefi dahil; kubeconfig ev dizininde veya üstündeyse her
+   * konum dış sayılır) içe aktarma reddedilir: başkasının hazırladığı bir kubeconfig yerel bir secret'ı (ör.
+   * `~/.vault-token`) kendi sunucusuna Bearer olarak taşıtamasın. Dış bir belirteç dosyasını bilerek kullanan (ör.
+   * in-cluster `/var/run/secrets/...`) kullanıcı açıkça `true` verir; okunan yol yine uyarılarda raporlanır.
+   */
+  readonly allowExternalTokenFile?: boolean;
 }
 
 export interface KubeImportResult {
@@ -103,11 +114,107 @@ function decodeData(b64: string, what: string): string {
   return s;
 }
 
+// ---- Başvurulan dosyalar (düşmanca olabilir: paylaşılan kubeconfig) ----------------------------------
+
+type RefField = "certificate-authority" | "client-certificate" | "client-key" | "tokenFile";
+
+/** Satır içine alınabilecek dosyanın üst sınırı (büyük CA demetleri dahil). */
+const MAX_REF_FILE_BYTES = 1024 * 1024;
+/** Taşıyıcı belirteç üst sınırı (JWT'ler birkaç KiB). */
+const MAX_TOKEN_CHARS = 16 * 1024;
+/** Gövde yalnız base64 + boşluk: blok içine/arasına karışmış başka içerik eşleşmez. */
+const CERT_PEM = /-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----/g;
+const KEY_PEM = /-----BEGIN (RSA |EC |ENCRYPTED )?PRIVATE KEY-----[A-Za-z0-9+/=\s]+?-----END \1PRIVATE KEY-----/g;
+
+/** Uyarı/hata metnine giren yol parçaları: denetim ve görünmez biçim karakterleri (ANSI kaçışı, bidi) görünür kaçışa çevrilir. */
+const shown = (s: string): string => s.replace(/[\p{Cc}\p{Cf}]/gu, (ch) => `\\u{${(ch.codePointAt(0) ?? 0).toString(16)}}`);
+
+/** `p`, `dir`'in kendisi veya altında mı (ikisi de mutlak ve symlink'leri çözülmüş). */
+function inside(dir: string, p: string): boolean {
+  const rel = relative(dir, p);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Varsayılan okuyucu: yalnız NORMAL dosya. FIFO/aygıt/dizin açılırken bloklanmaz (O_NONBLOCK) ve reddedilir; son
+ * bileşen symlink olamaz (yol zaten realpath'ten gelir). stat boyutuna güvenilmez (procfs dosyaları 0 bildirip
+ * sınırsız akabilir): okuma sınırda kesilir.
+ */
+async function readRegularFile(path: string): Promise<Buffer> {
+  const fh = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  try {
+    if (!(await fh.stat()).isFile()) throw new Error("normal dosya değil");
+    const buf = Buffer.alloc(MAX_REF_FILE_BYTES + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const { bytesRead } = await fh.read(buf, n, buf.length - n, null);
+      if (bytesRead === 0) break;
+      n += bytesRead;
+    }
+    return buf.subarray(0, n);
+  } finally {
+    await fh.close();
+  }
+}
+
+const invalidFile = (field: RefField, name: string, why: string): OpsError =>
+  new OpsError("kubeconfig_file_invalid", `başvurulan dosya beklenen türde değil (${field}: ${name}): ${why}`);
+
+/**
+ * Sertifika dosyasından YALNIZ `CERTIFICATE` PEM blokları alınır ve her biri ayrıştırılır; blok dışındaki içerik
+ * kasaya girmez. Hiç blok yoksa veya biri ayrıştırılamazsa ret: başka bir yerel dosya sertifika diye satır içine alınamaz.
+ */
+function certificatesFrom(text: string, field: RefField, name: string): string {
+  const blocks = text.match(CERT_PEM) ?? [];
+  if (blocks.length === 0) throw invalidFile(field, name, "PEM sertifika (CERTIFICATE) bloğu yok");
+  for (const b of blocks) {
+    try {
+      new X509Certificate(b);
+    } catch {
+      throw invalidFile(field, name, "sertifika ayrıştırılamadı");
+    }
+  }
+  return `${blocks.join("\n")}\n`;
+}
+
+/** İstemci anahtarı dosyasından TEK özel anahtar bloğu (PKCS#8, PKCS#1 RSA veya SEC1 EC) alınır ve ayrıştırılır. */
+function privateKeyFrom(text: string, field: RefField, name: string): string {
+  const blocks = text.match(KEY_PEM) ?? [];
+  const [block] = blocks;
+  if (blocks.length !== 1 || block === undefined) {
+    throw invalidFile(field, name, blocks.length === 0 ? "PEM özel anahtar bloğu yok (PKCS#8, RSA veya EC; parolasız)" : "birden fazla özel anahtar bloğu");
+  }
+  try {
+    createPrivateKey({ key: block, format: "pem" });
+  } catch {
+    throw invalidFile(field, name, "özel anahtar ayrıştırılamadı (parolalı anahtar desteklenmez)");
+  }
+  return `${block}\n`;
+}
+
+/** Belirteç dosyası tek bir taşıyıcı belirteç olmalı: boşluk/denetim karakteri yok (çok satırlı kimlik dosyaları ret). Boş dosya: belirteç yok. */
+function tokenFrom(text: string, field: RefField, name: string): string | undefined {
+  const t = text.trim();
+  if (t === "") return undefined;
+  if (t.length > MAX_TOKEN_CHARS || /[\s\p{Cc}]/u.test(t)) throw invalidFile(field, name, "tek satırlık bir belirteç değil");
+  return t;
+}
+
+/** Alanın beklediği içerik türü: dosyadan yalnız bu doğrulayıcının döndürdüğü kasaya girer. */
+const ACCEPT: Readonly<Record<RefField, (text: string, field: RefField, name: string) => string | undefined>> = {
+  "certificate-authority": certificatesFrom,
+  "client-certificate": certificatesFrom,
+  "client-key": privateKeyFrom,
+  tokenFile: tokenFrom,
+};
+
 /**
  * Kubeconfig'i içe aktarma ve normalleştirme. Yalnız TEK bağlam çıkarılır; harici dosyalar
  * (CA, istemci sertifikası/anahtarı, tokenFile) satır içine alınır ki kasa kendi kendine yeterli
- * olsun. Reddedilenler: TLS doğrulamasını kapatma, proxy, düz http, şablon dışı exec, auth-provider, basic
- * auth. Hata ve uyarı mesajları secret veya dosya içeriği taşımaz.
+ * olsun. Başvurular düşmanca olabilir (paylaşılan kubeconfig): sertifika/anahtar dosyasından yalnız ayrıştırılan,
+ * beklenen türdeki PEM blokları alınır; `tokenFile` kubeconfig dizinine hapsedilir (açık izin hariç); okunan her
+ * dosya uyarılarda YALNIZ yoluyla raporlanır. Reddedilenler: TLS doğrulamasını kapatma, proxy, düz http, şablon dışı
+ * exec, auth-provider, basic auth. Hata ve uyarı mesajları secret veya dosya içeriği taşımaz.
  */
 export async function importKubeconfig(text: string, opts: KubeImportOptions = {}): Promise<KubeImportResult> {
   let doc: unknown;
@@ -174,35 +281,81 @@ export async function importKubeconfig(text: string, opts: KubeImportOptions = {
     const bin = await (opts.resolveBinary ?? resolveBinaryDefault)(command);
     execTemplate = m.template;
     execSpec = { templateId: m.template.id, binaryPath: bin.path, binarySha256: bin.sha256, args: m.args, env: m.env };
-    warnings.push(`kimlik exec eklentisiyle üretilir: ${m.template.id}. Bulut CLI'sının kendi kimlik deposu kasa DIŞINDA kalır (ortam kimliği); eklenti yalnız OS sandbox içinde çalışır`);
+    warnings.push(`kimlik exec eklentisiyle üretilir: ${m.template.id} (ikili ${shown(bin.path)}, SHA-256 pinli). Bulut CLI'sının kendi kimlik deposu kasa DIŞINDA kalır (ortam kimliği); eklenti yalnız OS sandbox içinde çalışır`);
   }
 
-  const baseDir = opts.baseDir ?? process.cwd();
-  const read = opts.readFile ?? ((p: string) => readFile(p));
-  const fromFile = async (p: string): Promise<string> => {
-    const full = isAbsolute(p) ? p : resolve(baseDir, p);
+  const baseDir = resolve(opts.baseDir ?? process.cwd());
+  const read = opts.readFile ?? readRegularFile;
+  const real = opts.realpath ?? ((p: string) => realpath(p));
+
+  /** `tokenFile` kubeconfig dizininde (veya altında) değilse yalnız açık izinle; kubeconfig ev dizinindeyse/üstündeyse sınır bir şey korumaz. */
+  const guardTokenFile = async (full: string, name: string): Promise<void> => {
+    let base: string;
     try {
-      return (await read(full)).toString("utf8");
+      base = await real(baseDir);
     } catch {
-      throw new OpsError("kubeconfig_file_unreadable", `başvurulan dosya okunamadı: ${basename(p)}`);
+      throw new OpsError("kubeconfig_file_unreadable", "kubeconfig dizini çözülemedi");
     }
+    let homeUnderBase = false;
+    try {
+      homeUnderBase = inside(base, await real(homedir()));
+    } catch {
+      /* ev dizini yok/çözülemedi: yalnız dizin sınırı */
+    }
+    if (!homeUnderBase && full !== base && inside(base, full)) return;
+    if (!opts.allowExternalTokenFile) {
+      throw new OpsError(
+        "kubeconfig_token_file_outside",
+        `tokenFile kubeconfig dizininin dışında (symlink hedefi dahil${homeUnderBase ? "; kubeconfig ev dizininde veya üstünde olduğundan her konum dış sayılır" : ""}): ${name}. ` +
+          "Başkasının hazırladığı bir kubeconfig yerel bir secret dosyasını kendi sunucusuna Bearer olarak taşıtabilir; dosyayı bilerek kullanıyorsanız açıkça izin verin (`ops profile add k8s --allow-external-token-file`)",
+      );
+    }
+    warnings.push(`tokenFile kubeconfig dizininin DIŞINDA; açık izinle kabul edildi: ${shown(full)}`);
+  };
+
+  /**
+   * Başvurulan dosyayı okur ve alanın beklediği türe göre doğrular (yalnız doğrulananı döndürür). Yol symlink'leri
+   * çözülerek raporlanır: okunan her dosya uyarılara YALNIZ yoluyla girer (içerik asla); hata iletileri yalnız dosya
+   * adını taşır.
+   */
+  const fromFile = async (field: RefField, p: string): Promise<string | undefined> => {
+    const name = shown(basename(p));
+    const unreadable = (): OpsError => new OpsError("kubeconfig_file_unreadable", `başvurulan dosya okunamadı veya normal bir dosya değil (${field}): ${name}`);
+    let full: string;
+    try {
+      full = await real(resolve(baseDir, p));
+    } catch {
+      throw unreadable();
+    }
+    if (field === "tokenFile") await guardTokenFile(full, name);
+    let buf: Buffer;
+    try {
+      buf = await read(full);
+    } catch {
+      throw unreadable();
+    }
+    const text = buf.length > MAX_REF_FILE_BYTES ? null : buf.toString("utf8");
+    buf.fill(0);
+    if (text === null) throw unreadable();
+    warnings.push(`başvurulan dosya okundu ve satır içine alındı (${field}): ${shown(full)}`);
+    return ACCEPT[field](text, field, name);
   };
 
   let caPem: string | undefined;
   if (str(cl["certificate-authority-data"])) caPem = decodeData(cl["certificate-authority-data"] as string, "CA");
-  else if (str(cl["certificate-authority"])) caPem = await fromFile(cl["certificate-authority"] as string);
+  else if (str(cl["certificate-authority"])) caPem = await fromFile("certificate-authority", cl["certificate-authority"] as string);
   let caFingerprint: string | undefined;
   if (caPem) caFingerprint = fingerprintOf(caPem);
   else warnings.push("CA verisi yok: sistem kök sertifikaları kullanılır ve CA parmak izi pini oluşturulamaz");
 
   let token = str(us["token"]);
-  if (!token && str(us["tokenFile"])) token = (await fromFile(us["tokenFile"] as string)).trim();
+  if (!token && str(us["tokenFile"])) token = await fromFile("tokenFile", us["tokenFile"] as string);
   let clientCertPem: string | undefined;
   let clientKeyPem: string | undefined;
   if (str(us["client-certificate-data"])) clientCertPem = decodeData(us["client-certificate-data"] as string, "istemci sertifikası");
-  else if (str(us["client-certificate"])) clientCertPem = await fromFile(us["client-certificate"] as string);
+  else if (str(us["client-certificate"])) clientCertPem = await fromFile("client-certificate", us["client-certificate"] as string);
   if (str(us["client-key-data"])) clientKeyPem = decodeData(us["client-key-data"] as string, "istemci anahtarı");
-  else if (str(us["client-key"])) clientKeyPem = await fromFile(us["client-key"] as string);
+  else if (str(us["client-key"])) clientKeyPem = await fromFile("client-key", us["client-key"] as string);
   if (Boolean(clientCertPem) !== Boolean(clientKeyPem)) throw new OpsError("kubeconfig_invalid", "istemci sertifikası ve anahtarı birlikte olmalı");
   if (clientCertPem) {
     try {

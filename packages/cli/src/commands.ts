@@ -69,7 +69,7 @@ const USAGE = [
   "kullanım: ops <komut>",
   "  init                               OPS_HOME ve kasayı oluştur",
   "  profile add k8s --id ID --kubeconfig YOL --env dev|stage|prod|sandbox [--context C] [--scope a,b] [--ceiling read]",
-  "              [--name AD] [--ambient-env ADLAR] [--ambient-path DİZİN]",
+  "              [--name AD] [--ambient-env ADLAR] [--ambient-path DİZİN] [--allow-external-token-file]  (kubeconfig dizini dışındaki tokenFile yalnız bu açık izinle)",
   "  profile add db --id ID --env E --host H [--port 5432] --database D --user U --scope public,sales [--ca-file PEM] [--ceiling read|mutate|deploy|destroy]  (read olmayan tavan = writer profili)",
   "              [--default-schema S] [--datasource AD] [--name AD] [--tls verify-full|disable] [--replace]",
   "              (parola: OPS_DB_PASSWORD_FILE ile 0600 dosya veya yankısız TTY istemi; bağlantı DİZESİ kabul edilmez)",
@@ -591,7 +591,7 @@ export async function runCli(c: CliEnv): Promise<number> {
           if (kind !== "k8s") throw new OpsError("usage", "profil türü: 'k8s', 'db', 'pipeline' veya 'scm' (bu sürümde)");
           const { values } = parseArgs({
             args: r2,
-            options: { id: { type: "string" }, kubeconfig: { type: "string" }, env: { type: "string" }, context: { type: "string" }, scope: { type: "string" }, ceiling: { type: "string" }, name: { type: "string" }, "ambient-env": { type: "string" }, "ambient-path": { type: "string" }, replace: { type: "boolean" } },
+            options: { id: { type: "string" }, kubeconfig: { type: "string" }, env: { type: "string" }, context: { type: "string" }, scope: { type: "string" }, ceiling: { type: "string" }, name: { type: "string" }, "ambient-env": { type: "string" }, "ambient-path": { type: "string" }, "allow-external-token-file": { type: "boolean" }, replace: { type: "boolean" } },
             strict: true,
           });
           if (!values.id || !values.kubeconfig || !values.env) throw new OpsError("usage", "--id, --kubeconfig ve --env gerekli");
@@ -613,11 +613,13 @@ export async function runCli(c: CliEnv): Promise<number> {
               ...(values.name ? { displayName: values.name } : {}),
               ...(values["ambient-env"] ? { ambientOptInEnv: list(values["ambient-env"]) } : {}),
               ...(values["ambient-path"] ? { ambientPaths: list(values["ambient-path"]) } : {}),
+              ...(values["allow-external-token-file"] ? { allowExternalTokenFile: true } : {}),
               ...(values.replace ? { replace: true } : {}),
             }),
           );
           out(c, `Profil eklendi: ${res.profile.id} (${res.profile.environment}, tavan ${res.profile.classCeiling}, kapsam ${res.profile.allowedScopes.join("|")}, kimlik ${res.profile.credentialSource.kind})`);
-          for (const w of res.warnings) out(c, `⚠ ${w}`);
+          // uyarılar kubeconfig'ten gelen adlar/yollar taşır (üçüncü taraf girdisi): terminal kaçışları basılmaz
+          for (const w of res.warnings) out(c, `⚠ ${stripControlChars(w)}`);
           out(c, "Kimlik materyali yalnız kasada. Orijinal kubeconfig dosyası ürünün denetimi dışında kalır: güvenle taşıyın/silin. `ops profile doctor` ile fiili yetkiyi doğrulayın.");
           return 0;
         }
