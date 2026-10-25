@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
+import { OpsError } from "@ops/contracts";
 import type { AnchorRecord } from "./anchor.ts";
 import { acquireFileLock } from "./lock.ts";
 import type { FileLock, FileLockOptions } from "./lock.ts";
@@ -64,9 +65,9 @@ export class FileAuditStorage implements AuditStorage {
   }
 
   async append(line: string): Promise<void> {
-    // Kilit altındaysa yazmadan hemen önce hâlâ bizim mi bakılır: uzun duraklama sonrası bayat sayılıp
-    // kırılmışsa eski başla yazmak zinciri çatallar.
-    if (this.lock && !(await this.lock.held())) throw new Error("denetim kilidi kaybedildi: kayıt yazılmadı");
+    // Kilit altındaysa yazmadan hemen önce hâlâ bizim mi bakılır: uzun duraklama (SIGSTOP, uyku) sonrası bayat
+    // sayılıp kırılmışsa eski başla yazmak zinciri çatallar. Hiçbir şey yazılmadığı için hata kalıcı değildir.
+    if (this.lock && !(await this.lock.held())) throw new OpsError("audit_lock_lost", "denetim kilidi kaybedildi: kayıt yazılmadı");
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const fh = await open(this.path, "a", 0o600);
     try {

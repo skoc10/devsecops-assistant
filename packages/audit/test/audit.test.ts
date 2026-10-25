@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isOpsError } from "@ops/contracts";
+import { isOpsError, OpsError } from "@ops/contracts";
 import {
   AuditLog,
   canonicalJson,
@@ -476,7 +476,9 @@ describe("eşzamanlı yazıcılar: süreçler arası kilit (S-08)", () => {
   it("ayrı süreçler aynı günlüğe eşzamanlı yazar: zincir geçerli", async () => {
     const worker = fileURLToPath(new URL("./fixtures/append-worker.ts", import.meta.url));
     const run = promisify(execFile);
-    await Promise.all(["p1", "p2", "p3"].map((s) => run(process.execPath, [worker, logPath(), anchorPath(), Buffer.from(key).toString("hex"), s, "15"])));
+    // bayrak Node 22.18+ için varsayılan; `engines` alt sınırı (22.13) için açıkça verilir
+    const args = (s: string) => ["--experimental-strip-types", worker, logPath(), anchorPath(), Buffer.from(key).toString("hex"), s, "15"];
+    await Promise.all(["p1", "p2", "p3"].map((s) => run(process.execPath, args(s))));
     expect(await verifyFile()).toMatchObject({ ok: true, records: 45 });
     expect(await seqs()).toEqual(Array.from({ length: 45 }, (_, i) => i));
   });
@@ -525,6 +527,35 @@ describe("eşzamanlı yazıcılar: süreçler arası kilit (S-08)", () => {
     await plantLock({ pid: process.ppid, token: "yaşlı" });
     const old = new Date(Date.now() - 60_000);
     await utimes(`${logPath()}.lock`, old, old);
+    await expect(log.append({ ...base })).resolves.toMatchObject({ seq: 0 });
+  });
+
+  it("kilit yazmadan önce kaybedildiyse (bayat sayılıp kırıldı) kayıt yazılmaz; günlük bozuk işaretlenmez", async () => {
+    const storage = new FileAuditStorage(logPath(), { fsync: false });
+    const err = await storage.withLock(async () => {
+      // uzun duraklama sırasında başka bir süreç kilidi kırıp aldı
+      await writeFile(`${logPath()}.lock`, JSON.stringify({ pid: process.ppid, host: hostname(), token: "başkası" }));
+      return storage.append("{}").catch((e: unknown) => e);
+    });
+    expect(isOpsError(err) && err.code).toBe("audit_lock_lost");
+    expect(await new FileAuditStorage(logPath()).readLines()).toEqual([]);
+    await rm(`${logPath()}.lock`); // başkasının kilidine dokunulmadı
+    // yazıcı düzeyinde: yalnız o kayıt reddedilir, sonraki ekleme yapılır
+    class LosingStorage extends MemoryAuditStorage {
+      loseNext = false;
+      override async append(line: string): Promise<void> {
+        if (this.loseNext) {
+          this.loseNext = false;
+          throw new OpsError("audit_lock_lost", "kilit kaybedildi (simüle)");
+        }
+        return super.append(line);
+      }
+    }
+    const mem = new LosingStorage();
+    const log = await AuditLog.open({ storage: mem, key });
+    mem.loseNext = true;
+    await expect(log.append({ ...base })).rejects.toMatchObject({ code: "audit_unavailable" });
+    expect(log.broken).toBe(false);
     await expect(log.append({ ...base })).resolves.toMatchObject({ seq: 0 });
   });
 

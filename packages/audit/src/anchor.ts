@@ -15,6 +15,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  *
  * Sınır: çapa sahteciliğe karşı korur, geri almaya (rollback) karşı değil. Daha önce yazılmış geçerli bir
  * çapa kopyası geri yüklenirse o noktadan sonraki kesme tespit edilemez; çapa günlükle aynı dizindedir.
+ * Günlük ve çapa birlikte silinirse durum yeni kurulumdan ayırt edilemez.
  */
 export interface AnchorRecord {
   readonly v: 2;

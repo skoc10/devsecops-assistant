@@ -156,6 +156,10 @@ export class AuditLog implements AuditSink {
       if (this.o.anchor) await this.o.anchor.write(signAnchor(this.o.key, record, since));
       return record;
     } catch (e) {
+      // Kilit yazmadan önce kaybedildiyse hiçbir şey yazılmadı: yalnız bu kayıt reddedilir.
+      if (isOpsError(e) && e.code === "audit_lock_lost") {
+        throw new OpsError("audit_unavailable", "denetim kaydı yazılamadı", { cause: e.message });
+      }
       // Depolama/çapa hatası: zincir durumu belirsiz → fail-closed, günlük artık kayıt kabul etmez.
       this.failure = errMessage(e);
       throw new OpsError("audit_unavailable", "denetim kaydı yazılamadı", { cause: this.failure });
