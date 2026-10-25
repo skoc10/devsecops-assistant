@@ -1,5 +1,9 @@
+import { homedir } from "node:os";
+import { dirname } from "node:path";
 import { describe, expect, it } from "vitest";
-import { McpBridgeAdapter, McpManifestError, buildInputSchema, mcpToolName, parseMcpManifest } from "../src/index.ts";
+import type { AdapterCall } from "@ops/contracts";
+import type { Sandbox } from "@ops/sandbox";
+import { McpBridgeAdapter, McpManifestError, buildInputSchema, mcpToolName, parseMcpManifest, roBindProblem } from "../src/index.ts";
 
 const SHA = "a".repeat(64);
 const base = (extra = "", tool = ""): string => `
@@ -67,6 +71,90 @@ describe("parseMcpManifest", () => {
     expect(() => parseMcpManifest(alias)).toThrow(McpManifestError);
     expect(() => parseMcpManifest("servers: []\nservers: []\n")).toThrow(McpManifestError);
     expect(() => parseMcpManifest("x: " + "a".repeat(70_000))).toThrow(/çok büyük/);
+  });
+});
+
+describe("roBinds: kimlik/secret/IPC konumları bağlanamaz (network: host sunucusu okuyup dışarı taşıyabilirdi)", () => {
+  const H = homedir();
+  const withBinds = (binds: readonly string[]): string => base(`roBinds: [${binds.map((b) => JSON.stringify(b)).join(", ")}]`);
+
+  it("reddeder: kök, ev dizini ve ataları, kimlik dizinleri (harfe duyarsız) ve ataları, ürün durum dizini, IPC/soket konumları", () => {
+    const bad = [
+      "/",
+      H,
+      `${H}/`,
+      dirname(H),
+      `${H}/.ssh`,
+      `${H}/.SSH/id_ed25519`,
+      `${H}/.aws/credentials`,
+      `${H}/.kube/config`,
+      `${H}/.docker`,
+      `${H}/.gnupg`,
+      `${H}/.config`,
+      `${H}/.config/gcloud`,
+      `${H}/.Azure`,
+      `${H}/Library`,
+      `${H}/library/keychains/login.keychain-db`,
+      `${H}/.ops-assistant`,
+      `${H}/.ops-assistant/vault/vault.json`,
+      "/root/.ssh",
+      "/srv/x/.aws",
+      "/Library/Keychains",
+      "/var/run/docker.sock",
+      "/run/user/1000",
+      "/var",
+      "/proc",
+      "/proc/1/environ",
+      "/tmp",
+      "/private/tmp/com.apple.launchd.x/Listeners",
+      "/dev",
+      `${H}/.colima/default/docker.sock`,
+      "/opt/x/agent.socket",
+    ];
+    for (const b of bad) {
+      expect(() => parseMcpManifest(withBinds([b])), b).toThrow(McpManifestError);
+      expect(() => parseMcpManifest(withBinds([b])), b).toThrow(/roBinds\.0: salt-okunur bağ reddedildi/);
+    }
+  });
+
+  it("izin verir: kurulum önekleri ve ev dizini altındaki kimlik dışı yollar", () => {
+    const ok = ["/opt/node", "/usr/local/lib/node_modules", `${H}/.nvm/versions/node/v22.0.0`, "/etc/ssl/certs", `${H}/tools/bin`];
+    expect(parseMcpManifest(withBinds(ok)).servers[0]!.roBinds).toEqual(ok);
+  });
+
+  it("OPS_HOME (ve ataları) reddedilir; sembolik bağın gerçek yolu da denetlenir; NFKC katlama", () => {
+    const ctx = { home: "/home/u", opsHome: "/srv/ops-state" };
+    expect(roBindProblem("/srv/ops-state/vault", ctx)).toMatch(/ürün durum/);
+    expect(roBindProblem("/srv", ctx)).toMatch(/ürün durum/);
+    expect(roBindProblem("/srv/other", ctx)).toBeNull();
+    const links: Record<string, string> = { "/opt/innocent": "/home/u/.ssh", "/opt/home-link": "/home/u" };
+    const linked = { home: "/home/u", realpath: (p: string): string | undefined => links[p] };
+    expect(roBindProblem("/opt/innocent", linked)).toMatch(/kimlik/);
+    expect(roBindProblem("/opt/home-link", linked)).toMatch(/ev dizini/);
+    expect(roBindProblem("/opt/plain", linked)).toBeNull();
+    expect(roBindProblem("/home/u/.ſsh", { home: "/home/u" })).not.toBeNull(); // ſ → s (harfe duyarsız dosya sisteminde .ssh)
+    const prev = process.env["OPS_HOME"];
+    process.env["OPS_HOME"] = "/srv/ops-manifest-test";
+    try {
+      expect(() => parseMcpManifest(withBinds(["/srv/ops-manifest-test/audit"]))).toThrow(/ürün durum/);
+    } finally {
+      if (prev === undefined) delete process.env["OPS_HOME"];
+      else process.env["OPS_HOME"] = prev;
+    }
+  });
+
+  it("şemayı atlayan manifestte de adapter bağlamadan önce reddeder; sunucu hiç başlamaz", async () => {
+    const m = parseMcpManifest(base());
+    const manifest = { servers: [{ ...m.servers[0]!, roBinds: [`${H}/.aws`] }] };
+    let spawned = 0;
+    const never = async (): Promise<never> => {
+      spawned++;
+      throw new Error("sunucu başlamamalıydı");
+    };
+    const sandbox: Sandbox = { kind: "bwrap", run: never, spawn: never };
+    const a = new McpBridgeAdapter({ manifest, sandbox });
+    await expect(a.invoke({ tool: "mcp.tfdocs.search_providers", args: { query: "x" } } as unknown as AdapterCall)).rejects.toMatchObject({ code: "mcp_bind_denied" });
+    expect(spawned).toBe(0);
   });
 });
 

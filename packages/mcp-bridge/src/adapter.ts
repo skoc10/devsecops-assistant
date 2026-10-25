@@ -5,7 +5,7 @@ import type { Adapter, AdapterCall, AdapterManifest, Profile, RawToolOutput, Tar
 import { KnownSecrets, scrubText } from "@ops/redaction";
 import type { Sandbox } from "@ops/sandbox";
 import { McpProtocolError, McpSession } from "./client.ts";
-import { buildInputSchema, mcpToolName, toolsetOf } from "./manifest.ts";
+import { buildInputSchema, mcpToolName, roBindProblem, toolsetOf } from "./manifest.ts";
 import type { McpManifest, McpServerSpec, McpToolSpec } from "./manifest.ts";
 
 export const MCP_HOME = "/home/ops-mcp";
@@ -126,6 +126,11 @@ export class McpBridgeAdapter implements Adapter {
   private async open(s: McpServerSpec, signal?: AbortSignal): Promise<McpSession> {
     const sb = this.o.sandbox;
     if (!sb || sb.kind === "none") throw new OpsError("sandbox_required", "MCP sunucuları yalnız OS sandbox içinde çalışır (bubblewrap/seatbelt)");
+    // Manifest doğrulaması bunu zaten reddeder; şemayı atlayarak kurulan adapter için ikinci savunma hattı
+    for (const b of s.roBinds) {
+      const why = roBindProblem(b);
+      if (why) throw new OpsError("mcp_bind_denied", `salt-okunur bağ reddedildi (${why}): ${b.slice(0, 120)}`);
+    }
     await this.verifyPins(s);
     const proc = await sb.spawn({
       argv: [s.command, ...s.args],
