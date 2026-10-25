@@ -1,5 +1,6 @@
 export * from "./vault/index.ts";
 export { ProfileRegistry } from "./profiles.ts";
+export { writeFileAtomic } from "./atomic-write.ts";
 export type { ProfileRegistryOptions } from "./profiles.ts";
 export { importKubeconfig, hashFile, resolveBinaryDefault } from "./kubeconfig.ts";
 export type { KubeCredentialBlob, KubeExecSpec, KubeImportOptions, KubeImportResult, ResolvedBinary } from "./kubeconfig.ts";

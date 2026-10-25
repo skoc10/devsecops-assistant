@@ -1,10 +1,10 @@
-import { chmod, copyFile, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Readable, Writable } from "node:stream";
 import { generateReadOnlyRbac } from "@ops/adapter-kubernetes";
 import { FileAuditStorage, FileHeadAnchor, verifyAudit } from "@ops/audit";
-import { ensureAuditKey, scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
+import { ensureAuditKey, scanAmbientCredentials, scanAmbientEnv, writeFileAtomic } from "@ops/broker";
 import { ENVIRONMENTS, OpsError, RISK_CLASSES } from "@ops/contracts";
 import type { Environment, ModelProvider, RiskClass, SecretStore } from "@ops/contracts";
 import { ChangeStore, breakGlassBanner, buildReplay, formatUsage, lastSessionId, renderBreakGlassReview, renderReplay, usageFromAudit } from "@ops/core";
@@ -504,11 +504,9 @@ async function policyCommand(c: CliEnv, sub: string | undefined, rest: string[])
     await rt.audit.append({ event: "policy_change", sessionId: rt.session.id, message: `${what}; sürüm ${before.slice(0, 12)}→${after.slice(0, 12)}` }).catch(() => {
       throw new OpsError("audit_unavailable", "denetim kaydı yazılamadı: politika değişmedi");
     });
-    if (userText !== null) await copyFile(c.paths.policyFile, `${c.paths.policyFile}.bak`).catch(() => undefined);
-    const tmp = `${c.paths.policyFile}.${process.pid}.tmp`;
-    await writeFile(tmp, next, { mode: 0o600 });
-    await chmod(tmp, 0o600);
-    await rename(tmp, c.paths.policyFile);
+    // Yedek ve politika atomik yazılır: sabit adlı geçici/yedek yola dikilmiş symlink izlenmez (O_EXCL + rename).
+    if (userText !== null) await writeFileAtomic(`${c.paths.policyFile}.bak`, userText).catch(() => undefined);
+    await writeFileAtomic(c.paths.policyFile, next);
     out(c, `Politika yazıldı: ${c.paths.policyFile}${userText !== null ? " (önceki sürüm .bak)" : ""}`);
     return 0;
   });
@@ -626,7 +624,7 @@ export async function runCli(c: CliEnv): Promise<number> {
         }
         if (sub === "list") {
           const rows = await withRuntime(c, async (rt) => rt.registry.list());
-          out(c, rows.length === 0 ? "(profil yok)" : rows.map((p) => `${p.id}\t${p.kind}\t${p.environment}\ttavan ${p.classCeiling}\tkapsam ${p.allowedScopes.join("|")}\t${p.credentialSource.kind}\t${p.displayName}`).join("\n"));
+          out(c, rows.length === 0 ? "(profil yok)" : rows.map((p) => `${p.id}\t${p.kind}\t${p.environment}\ttavan ${p.classCeiling}\tkapsam ${p.allowedScopes.join("|")}\t${p.credentialSource.kind}\t${stripControlChars(p.displayName)}`).join("\n"));
           return 0;
         }
         if (sub === "rm") {
