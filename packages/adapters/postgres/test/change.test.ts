@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FakeApprovalGate } from "@ops/testkit";
 import type { ApprovalGate, ApprovalOutcome, ApprovalRequest, RiskClass, ToolResult } from "@ops/contracts";
 import { parseMaskingConfig } from "../src/index.ts";
@@ -393,4 +393,9 @@ describe("db.change sınıf eşlemesi (adapter.classify, bağlantısız)", () =>
     expect(await risk("COPY t TO PROGRAM 'id'")).toBe("destroy");
     expect(await risk("")).toBe("destroy");
   });
+});
+
+// Dosyanın sunucusu: durdurulmazsa her koşu bir PostgreSQL süreci (ve SysV paylaşımlı bellek) sızdırır.
+afterAll(async () => {
+  await pg?.stop();
 });
