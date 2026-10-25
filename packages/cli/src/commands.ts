@@ -531,7 +531,8 @@ async function breakGlassCommand(c: CliEnv, sub: string | undefined, rest: strin
     out(c, md ?? `Bu oturumda break-glass kaydı yok: ${sid}`);
     return md ? 0 : 1;
   }
-  const client = await OpsdClient.connect(c.paths.socket).catch(() => {
+  const client = await OpsdClient.connect(c.paths.socket).catch((e: unknown) => {
+    if (e instanceof OpsError) throw e; // güvensiz/çok uzun soket yolu: asıl sebep gösterilir
     throw new OpsError("opsd_unreachable", `opsd'ye bağlanılamadı (${c.paths.socket}). Break-glass çalışan bir oturumun tavanını yükseltir: önce \`ops daemon\`; gömülü sohbette \`/breakglass\` kullanın`);
   });
   try {
@@ -799,7 +800,8 @@ export async function runCli(c: CliEnv): Promise<number> {
           }, gate, cv.workspace, cv["local-only"], cq);
           return 0;
         }
-        const client = await OpsdClient.connect(c.paths.socket).catch(() => {
+        const client = await OpsdClient.connect(c.paths.socket).catch((e: unknown) => {
+          if (e instanceof OpsError) throw e; // güvensiz/çok uzun soket yolu: asıl sebep gösterilir
           throw new OpsError("opsd_unreachable", `opsd'ye bağlanılamadı (${c.paths.socket}). \`ops daemon\` çalıştırın veya \`ops chat --embedded\` kullanın`);
         });
         try {

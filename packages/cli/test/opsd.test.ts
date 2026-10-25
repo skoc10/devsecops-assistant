@@ -1,10 +1,12 @@
-import { createConnection } from "node:net";
-import { stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { createConnection, createServer } from "node:net";
+import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ScriptedProvider, say } from "@ops/testkit";
 import type { OrchestratorEvent } from "@ops/core";
 import { Opsd, OpsdClient } from "../src/index.ts";
+import { MAX_SOCKET_PATH_BYTES } from "../src/paths.ts";
 import { e01Script, makeFixture } from "./fixture.ts";
 import type { Fixture } from "./fixture.ts";
 
@@ -109,5 +111,73 @@ describe("opsd (UDS)", () => {
     c.close();
     await d.close();
     await expect(stat(fx.rt.paths.socket)).rejects.toThrow();
+  });
+
+  describe("soket yolu ve izinleri", () => {
+    let base: string;
+    beforeEach(async () => {
+      base = await mkdtemp(join(tmpdir(), "ops-uds-"));
+    });
+    afterEach(async () => {
+      await rm(base, { recursive: true, force: true });
+    });
+    const opsdAt = (socketPath: string): Opsd => new Opsd({ runtime: fx.rt, orchestrator: fx.rt.createOrchestrator(new ScriptedProvider([say("x")])), socketPath });
+    const umaskNow = (): number => {
+      const m = process.umask(0o022);
+      process.umask(m);
+      return m;
+    };
+
+    it("UDS sınırını aşan yol: sunucu başlamaz (kesik yola bağlanmaz), istemci kesik yolda dinleyen sahteye bağlanmaz", async () => {
+      const long = join(base, "d".repeat(MAX_SOCKET_PATH_BYTES), "opsd.sock");
+      await expect(opsdAt(long).listen()).rejects.toMatchObject({ code: "socket_path_too_long", message: expect.stringContaining("OPS_HOME") });
+      expect(await readdir(base)).toEqual([]); // ne dizin ne 0700 dışında kesik adlı soket
+      // libuv yolu keser: sahte dinleyici kesik adda (0700 dizin DIŞINDA) dinler; istemci bağlantı denemez
+      let hits = 0;
+      const impostor = createServer((s) => {
+        hits++;
+        s.destroy();
+      });
+      await new Promise<void>((r) => {
+        impostor.once("error", () => r());
+        impostor.listen(long, () => r());
+      });
+      try {
+        await expect(OpsdClient.connect(long)).rejects.toMatchObject({ code: "socket_path_too_long" });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(hits).toBe(0);
+      } finally {
+        await new Promise<void>((r) => impostor.close(() => r()));
+      }
+    });
+
+    it("tam sınırdaki yol çalışır: soket 0600 doğar, süreç umask'ı geri yüklenir", async () => {
+      const pad = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(join(base, "", "opsd.sock")) - 1;
+      expect(pad).toBeGreaterThan(0);
+      const exact = join(base, "r".repeat(pad), "opsd.sock");
+      expect(Buffer.byteLength(exact)).toBe(MAX_SOCKET_PATH_BYTES);
+      const before = umaskNow();
+      d = opsdAt(exact);
+      await d.listen();
+      expect(umaskNow()).toBe(before);
+      const st = await lstat(exact);
+      expect(st.isSocket()).toBe(true);
+      expect(st.mode & 0o777).toBe(0o600);
+      expect((await stat(dirname(exact))).mode & 0o777).toBe(0o700);
+      const c = await OpsdClient.connect(exact);
+      expect(await c.ping()).toMatchObject({ pong: true });
+      c.close();
+    });
+
+    it("soket dizini sembolik bağsa dinlenmez; istemci bu kullanıcıya ait olmayan/soket olmayan yola bağlanmaz", async () => {
+      const target = await mkdtemp(join(base, "hedef-"));
+      await symlink(target, join(base, "run"));
+      await expect(opsdAt(join(base, "run", "opsd.sock")).listen()).rejects.toMatchObject({ code: "home_insecure" });
+      expect(await readdir(target)).toEqual([]);
+
+      await mkdir(join(base, "run2"), { mode: 0o700 });
+      await writeFile(join(base, "run2", "opsd.sock"), "soket değil");
+      await expect(OpsdClient.connect(join(base, "run2", "opsd.sock"))).rejects.toMatchObject({ code: "socket_insecure" });
+    });
   });
 });

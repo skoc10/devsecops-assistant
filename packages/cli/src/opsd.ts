@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { dirname } from "node:path";
@@ -9,9 +9,38 @@ import { breakGlassBanner, usageFromAudit, formatUsage } from "@ops/core";
 import type { Sender } from "./backend.ts";
 import { readAuditRecords } from "./backend.ts";
 import type { ProfileRow } from "./chat.ts";
+import { assertPrivateDir, assertSocketPathFits } from "./paths.ts";
 import type { Runtime } from "./runtime.ts";
 
 const MAX_LINE = 1 << 20;
+
+/**
+ * `fn`'i geçici umask ile EŞZAMANLI çalıştırır. umask süreç genelidir: await boyunca açık bırakılmaz (araya giren
+ * başka bir dosya/dizin oluşturma etkilenmesin). Worker iş parçacığında umask değiştirilemez; orada 0700 dizin ve
+ * dinleme sonrası doğrulama yeterlidir.
+ */
+function withUmask(mask: number, fn: () => void): void {
+  let prev: number | undefined;
+  try {
+    prev = process.umask(mask);
+  } catch {
+    prev = undefined;
+  }
+  try {
+    fn();
+  } finally {
+    if (prev !== undefined) process.umask(prev);
+  }
+}
+
+/** Soket BEKLENEN yolda, bu kullanıcıya ait ve 0600 mü? (kesik/başka yere bağlanma, izin uyuşmazlığı) */
+async function assertOwnSocket(path: string): Promise<void> {
+  const st = await lstat(path).catch(() => null);
+  const uid = process.getuid?.();
+  if (!st?.isSocket() || (uid !== undefined && st.uid !== uid) || (st.mode & 0o777) !== 0o600) {
+    throw new OpsError("socket_insecure", `opsd soketi beklenen yolda/izinlerde değil (${path}${st ? `, mod ${(st.mode & 0o777).toString(8)}, sahip uid ${st.uid}` : ": yok"}): dinleme durduruldu`);
+  }
+}
 
 const BreakGlassStart = z.strictObject({
   profile: z.string().min(1).max(100),
@@ -50,16 +79,33 @@ export class Opsd {
     this.o = opts;
   }
 
+  /**
+   * Sıra: yol uzunluğu (kesilmez) → dizin 0700 ve bu kullanıcıya ait → soket 0600 DOĞAR (bind sırasında umask) →
+   * son durum doğrulanır (beklenen yolda, bu kullanıcıya ait, 0600); uyuşmazlıkta dinleme bırakılır.
+   */
   async listen(): Promise<void> {
-    await mkdir(dirname(this.o.socketPath), { recursive: true, mode: 0o700 });
-    await chmod(dirname(this.o.socketPath), 0o700);
-    await rm(this.o.socketPath, { force: true }); // eski soket (süreç ölmüş olabilir)
-    this.server = createServer((sock) => this.onConnection(sock));
-    await new Promise<void>((resolve, reject) => {
-      this.server?.once("error", reject);
-      this.server?.listen(this.o.socketPath, resolve);
-    });
-    await chmod(this.o.socketPath, 0o600);
+    const path = this.o.socketPath;
+    assertSocketPathFits(path);
+    const dir = dirname(path);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await chmod(dir, 0o700);
+    await assertPrivateDir(dir, { forbiddenMode: 0o077 });
+    await rm(path, { force: true }); // eski soket (süreç ölmüş olabilir)
+    const server = createServer((sock) => this.onConnection(sock));
+    this.server = server;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        // bind, listen() içinde eşzamanlıdır: dosya 0600 doğar, chmod'a kadar açık pencere kalmaz
+        withUmask(0o177, () => server.listen(path, resolve));
+      });
+      await chmod(path, 0o600).catch(() => undefined); // umask uygulanamadıysa; asıl karar aşağıdaki doğrulamada
+      await assertOwnSocket(path);
+    } catch (e) {
+      this.server = undefined;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw e;
+    }
   }
 
   async close(): Promise<void> {

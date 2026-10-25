@@ -94,6 +94,20 @@ export async function ensureHome(p: OpsPaths): Promise<void> {
   }
 }
 
+/**
+ * UDS yolunun bayt sınırı (sondaki NUL hariç): `sun_path` macOS/BSD'de 104, Linux'ta 108 bayttır. Daha uzun yolu
+ * libuv SESSİZCE KESER: sunucu 0700 dizinin DIŞINDA kesik bir ada bağlanır (ardından chmod ENOENT ile düşer, soket
+ * herkese açık kalır), istemci de aynı kesik ada — orada dinleyen sahte bir sürece — bağlanır. Kesilmez, reddedilir.
+ */
+export const MAX_SOCKET_PATH_BYTES = process.platform === "linux" ? 107 : 103;
+
+export function assertSocketPathFits(socketPath: string): void {
+  const n = Buffer.byteLength(socketPath, "utf8");
+  if (n > MAX_SOCKET_PATH_BYTES) {
+    throw new OpsError("socket_path_too_long", `opsd soket yolu çok uzun (${n} bayt; bu platformda UDS sınırı ${MAX_SOCKET_PATH_BYTES}): ${socketPath} — kesik yola bağlanılmaz; daha kısa bir OPS_HOME kullanın (ör. ~/.ops-assistant)`);
+  }
+}
+
 /** Depodaki yerleşik varlıklar (kaynak ağacından çalışırken). */
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 export const BUILTIN_SKILLS_DIR = join(REPO_ROOT, "skills");
