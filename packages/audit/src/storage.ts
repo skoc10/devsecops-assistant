@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AnchorRecord } from "./anchor.ts";
@@ -184,8 +184,19 @@ export class FileHeadAnchor implements HeadAnchor {
   async write(anchor: AnchorRecord): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(anchor), { mode: 0o600 });
-    await chmod(tmp, 0o600);
+    // Önceden konmuş geçici dosya izlenmez: bayatı (sembolik bağ dahil; unlink bağı izlemez) kaldırılır ve
+    // O_EXCL ile yeniden oluşturulur. Arada yeniden konursa oluşturma EEXIST ile düşer → yazım başarısız
+    // (fail-closed); yazma hiçbir zaman bağın hedefine yönlenmez. İzin, yol değil tanıtıcı üzerinden.
+    await unlink(tmp).catch((e: unknown) => {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    });
+    const fh = await open(tmp, "wx", 0o600);
+    try {
+      await fh.writeFile(JSON.stringify(anchor), "utf8");
+      await fh.chmod(0o600);
+    } finally {
+      await fh.close();
+    }
     await rename(tmp, this.path);
   }
 }

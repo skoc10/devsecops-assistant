@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -304,6 +304,24 @@ describe("dosya depolama", () => {
     await writeFile(path, text.replace('"allow"', '"deny"'));
     const v = await verifyAudit(new FileAuditStorage(path), key);
     expect(v.ok).toBe(false);
+  });
+
+  it("çapa geçici dosyası önceden konmuş sembolik bağı izlemez; bayat geçici dosya temizlenir", async () => {
+    const path = join(dir, "audit.jsonl");
+    const anchorPath = join(dir, "head.anchor");
+    const victim = join(dir, "kurban.txt");
+    await writeFile(victim, "dokunulmamalı\n", { mode: 0o600 });
+    await symlink(victim, `${anchorPath}.tmp`);
+    const log = await AuditLog.open({ storage: new FileAuditStorage(path), key, anchor: new FileHeadAnchor(anchorPath) });
+    await fill(log, 1);
+    expect(await readFile(victim, "utf8")).toBe("dokunulmamalı\n");
+    expect((await lstat(anchorPath)).isFile()).toBe(true);
+    expect((await stat(anchorPath)).mode & 0o777).toBe(0o600);
+    await expect(lstat(`${anchorPath}.tmp`)).rejects.toMatchObject({ code: "ENOENT" });
+    // çökme artığı düz geçici dosya da engel olmaz
+    await writeFile(`${anchorPath}.tmp`, "yarım", { mode: 0o644 });
+    await fill(log, 1);
+    expect(await verifyAudit(new FileAuditStorage(path), key, new FileHeadAnchor(anchorPath))).toMatchObject({ ok: true, records: 2 });
   });
 
   it("son satır sondan okunur: sondaki boş satırlar ve parça sınırını aşan uzun satır", async () => {
