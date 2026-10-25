@@ -36,6 +36,20 @@ describe("okuma/yazma politikası", () => {
     expect(writeCheck(p, P).ok, p).toBe(false);
   });
 
+  it.each([".GitHub/workflows/deploy.yml", ".GITHUB/workflows/ci.yml", "JenkinsFile", "ci/JENKINSFILE", ".Envrc", "roles/x/Library/mod.py", ".Terraformrc", "Ansible.cfg", ".GitLab-CI.yml"])(
+    "yazma yasağı harfe duyarsız (APFS'te aynı dosya): %s",
+    (p) => {
+      expect(writeCheck(p, P).ok, p).toBe(false);
+    },
+  );
+
+  it("denyPaths harfe duyarsız, writePaths duyarlı (güvenli yön)", () => {
+    const narrow = { writePaths: ["modules/**"], denyPaths: ["modules/legacy/**"] };
+    expect(readCheck("modules/Legacy/x.tf", narrow).ok).toBe(false);
+    expect(writeCheck("MODULES/LEGACY/x.tf", narrow).ok).toBe(false);
+    expect(writeCheck("Modules/vpc/main.tf", narrow).ok).toBe(false);
+  });
+
   it("serbest yollar yazılabilir; writePaths ve denyPaths globları", () => {
     for (const ok of ["main.tf", "modules/vpc/variables.tf", "playbooks/site.yml", "terraform.tfvars.example", "environment.md", "key-concepts.md", "secretary.tf"]) {
       expect(writeCheck(ok, P).ok, ok).toBe(true);
