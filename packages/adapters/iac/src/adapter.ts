@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError } from "@ops/contracts";
 import type { Adapter, AdapterCall, AdapterManifest, Profile, RawToolOutput, Target, ToolDefinition } from "@ops/contracts";
@@ -7,6 +8,7 @@ import { parseInventory, scanAnsible } from "./ansible.ts";
 import type { AnsibleScan } from "./ansible.ts";
 import { IAC_HOME, cleanWorkDir, ensureDir, readIfExists, resolveTool, runInSandbox, writeTfRc } from "./runner.ts";
 import type { ResolvedTool } from "./runner.ts";
+import { summarizePlan } from "./plan.ts";
 import { scanTerraform } from "./terraform.ts";
 import type { PrescanFinding, TerraformScan } from "./terraform.ts";
 import { IAC_TOOLS } from "./tools.ts";
@@ -24,6 +26,52 @@ function ansibleMessage(text: string, max = 240): string {
   return (where ? `${err} (${where.replace(/^The error appears to be in /i, "")})` : err).slice(0, max);
 }
 const clip = (s: unknown, max = 200): string | undefined => (typeof s === "string" && s !== "" ? s.replace(/\s+/g, " ").trim().slice(0, max) : undefined);
+
+interface AnsibleRecap {
+  host: string;
+  ok: number;
+  changed: number;
+  unreachable: number;
+  failed: number;
+  skipped: number;
+}
+
+/** Varsayılan geri çağrının (`default` stdout callback) görev düzeyi sonuçları + PLAY RECAP. Diff/ayrıntı alınmaz. */
+function parseAnsibleRun(out: string): { recap: AnsibleRecap[]; tasks: { task: string; host: string; status: string; msg?: string }[] } {
+  const recap: AnsibleRecap[] = [];
+  const tasks: { task: string; host: string; status: string; msg?: string }[] = [];
+  let task = "";
+  let inRecap = false;
+  for (const raw of out.split("\n")) {
+    const line = raw.trimEnd();
+    const t = /^TASK \[(.*)\] \*+$/.exec(line);
+    if (t) {
+      task = (t[1] as string).slice(0, 100);
+      continue;
+    }
+    if (/^PLAY RECAP \*+$/.test(line)) {
+      inRecap = true;
+      continue;
+    }
+    if (inRecap) {
+      const m = /^(\S+)\s*:\s*ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)\s+skipped=(\d+)/.exec(line);
+      if (m) recap.push({ host: (m[1] as string).slice(0, 80), ok: Number(m[2]), changed: Number(m[3]), unreachable: Number(m[4]), failed: Number(m[5]), skipped: Number(m[6]) });
+      continue;
+    }
+    const r = /^(ok|changed|skipping|failed|fatal|unreachable): \[([^\]]+)\](?::\s*(?:FAILED|UNREACHABLE)! => (.*))?/.exec(line);
+    if (r && task) {
+      let msg: string | undefined;
+      if (r[3]) {
+        const mm = /"msg":\s*"((?:[^"\\]|\\.)*)"/.exec(r[3]);
+        msg = (mm?.[1] ?? "").replace(/\\n/g, " ").slice(0, 200) || undefined;
+      }
+      tasks.push({ task, host: (r[2] as string).slice(0, 80), status: r[1] === "fatal" ? "failed" : (r[1] as string), ...(msg ? { msg } : {}) });
+    }
+  }
+  const rank = (s: string): number => (s === "failed" || s === "unreachable" ? 0 : s === "changed" ? 1 : s === "ok" ? 2 : 3);
+  tasks.sort((a, b) => rank(a.status) - rank(b.status));
+  return { recap, tasks };
+}
 
 export interface IacAdapterOptions {
   readonly manager: WorkspaceManager;
@@ -130,6 +178,10 @@ export class IacAdapter implements Adapter {
         return this.docs(cur, a["type"] as string, (a["kind"] as "resource" | "data" | undefined) ?? "resource");
       case "ansible.inventory.list":
         return this.inventory(cur, typeof a["path"] === "string" ? a["path"] : undefined);
+      case "iac.plan":
+        return this.plan(cur, a["vars"] as Record<string, string> | undefined);
+      case "ansible.check":
+        return this.ansibleCheck(cur, a["playbook"] as string, typeof a["inventory"] === "string" ? a["inventory"] : undefined, typeof a["limit"] === "string" ? a["limit"] : undefined);
       default:
         throw new OpsError("unknown_tool", `bilinmeyen araç: ${call.tool}`);
     }
@@ -450,6 +502,140 @@ export class IacAdapter implements Adapter {
       return { data: { provider: provider.slice(0, 80), kind, type, attributes: attrs.slice(0, 60), blocks: blocks.slice(0, 20), truncated: attrs.length > 60 || undefined }, summary: `${kind} ${type}: ${attrs.length} öznitelik, ${blocks.length} blok`, subjects: [`Workspace/${cur.ws.id}`] };
     }
     throw new OpsError("schema_not_found", `${kind} '${type}' yüklü sağlayıcılarda bulunamadı (sağlayıcı required_providers ve yerel aynada olmalı)`);
+  }
+
+  // ---- plan ---------------------------------------------------------------------------------
+
+  /**
+   * `plan` — KİMLİKSİZ, ağsız, BOŞ state'e karşı (`init -backend=false`): yapılandırmanın tam olarak ne
+   * yaratacağını ve risk etiketlerini gösterir. Plan JSON'unun hassas değerleri özete GİRMEZ (`plan.ts`);
+   * plan dosyası işlemden sonra silinir. Gerçek altyapıya/uzak state'e karşı plan hedefin pipeline'ındadır.
+   */
+  private async plan(cur: ReturnType<IacAdapter["current"]>, vars: Record<string, string> | undefined): Promise<RawToolOutput> {
+    const engine = this.requireTfEngine(cur);
+    const sandbox = this.requireSandbox();
+    const scan = await this.scanTf(cur);
+    if (scan.blocked) {
+      const { blocking, other } = summarizeFindings(scan.findings);
+      return {
+        data: { executed: false, blocked: true, reason: "ön-tarama kod çalıştıran/doğrulanamayan yapı buldu: init/plan ÇALIŞTIRILMADI", findings: [...blocking, ...other].slice(0, 20).map(findingOut) },
+        summary: `plan ÇALIŞMADI: ${blocking.length} engelleyici bulgu`,
+        subjects: [`Workspace/${cur.ws.id}`],
+      };
+    }
+    const tool = await this.tool(ENGINE_BIN[engine]);
+    const e = await this.tfEnv(cur);
+    const env: Record<string, string> = { ...e.env, ...Object.fromEntries(Object.entries(vars ?? {}).map(([k, v]) => [`TF_VAR_${k}`, v])) };
+    const init = await runInSandbox({ sandbox, tool, args: ["init", "-backend=false", "-input=false", "-no-color"], cwd: cur.fs.root, rwBinds: e.rwBinds, roBinds: e.roBinds, env, timeoutMs: 90_000, maxOutputBytes: 400_000 });
+    if (init.timedOut) throw new OpsError("tool_timeout", "init zaman aşımına uğradı");
+    if (init.code !== 0) {
+      await cleanWorkDir(cur.fs.root);
+      const diags = this.parseTfStderr(init.stderr.toString("utf8") || init.stdout.toString("utf8"));
+      const hint = /provider|plugin|registry|install/i.test(init.stderr.toString("utf8")) ? "sağlayıcı kurulamadı: sandbox ağsız; sağlayıcıları yerel aynaya koyun (providerMirror / OPS_IAC_PROVIDER_MIRROR)" : undefined;
+      return { data: { executed: true, initOk: false, diagnostics: diags, ...(hint ? { hint } : {}) }, summary: `init başarısız: ${diags[0]?.message ?? "?"}`.slice(0, 200), subjects: [`Workspace/${cur.ws.id}`] };
+    }
+    const planFile = join(e.tfdata, "plan.tfplan");
+    try {
+      const pl = await runInSandbox({ sandbox, tool, args: ["plan", "-input=false", "-no-color", "-lock=false", "-refresh=false", "-detailed-exitcode", `-out=${planFile}`], cwd: cur.fs.root, rwBinds: e.rwBinds, roBinds: e.roBinds, env, timeoutMs: 100_000, maxOutputBytes: 1_000_000 });
+      if (pl.timedOut) throw new OpsError("tool_timeout", "plan zaman aşımına uğradı");
+      if (pl.code !== 0 && pl.code !== 2) {
+        const diags = this.parseTfStderr(pl.stderr.toString("utf8") || pl.stdout.toString("utf8"));
+        return { data: { executed: true, planned: false, diagnostics: diags }, summary: `plan başarısız: ${diags[0]?.message ?? "?"}`.slice(0, 200), subjects: [`Workspace/${cur.ws.id}`] };
+      }
+      const show = await runInSandbox({ sandbox, tool, args: ["show", "-json", "-no-color", planFile], cwd: cur.fs.root, rwBinds: e.rwBinds, roBinds: e.roBinds, env, timeoutMs: 60_000, maxOutputBytes: 30_000_000 });
+      if (show.timedOut) throw new OpsError("tool_timeout", "show zaman aşımına uğradı");
+      let doc: unknown;
+      try {
+        doc = JSON.parse(show.stdout.toString("utf8"));
+      } catch {
+        throw new OpsError("tool_output_invalid", `plan çıktısı JSON değil (çıkış kodu ${show.code ?? "?"})`);
+      }
+      const sum = summarizePlan(doc, { maxChanges: 40 });
+      const c = sum.counts;
+      return {
+        data: {
+          executed: true,
+          planned: true,
+          noChanges: pl.code === 0,
+          counts: { create: c.create, update: c.update, delete: c.delete, replace: c.replace },
+          changes: sum.changes,
+          ...(sum.omitted > 0 ? { omitted: sum.omitted } : {}),
+          outputs: sum.outputs,
+          risks: sum.risks,
+          note: "BOŞ state'e karşı plan (yerel, kimliksiz, ağsız): yapılandırmanın sıfırdan ne yaratacağını gösterir; gerçek altyapıya karşı diff için hedefin pipeline'ındaki plan geçerlidir. Hassas değerler gösterilmez.",
+        },
+        summary: `plan: +${c.create} ~${c.update} -${c.delete} ±${c.replace}${sum.risks.length ? ` · risk: ${sum.risks.map((r) => r.label).join(",")}` : ""}`,
+        truncated: sum.omitted > 0,
+        subjects: [`Workspace/${cur.ws.id}`, ...sum.changes.slice(0, 20).map((x) => `Resource/${x.address}`)],
+      };
+    } finally {
+      await rm(planFile, { force: true }).catch(() => undefined);
+      await cleanWorkDir(cur.fs.root);
+    }
+  }
+
+  // ---- ansible.check ------------------------------------------------------------------------
+
+  /**
+   * `ansible-playbook --check` — ağsız sandbox'ta YEREL bağlantıyla. Check modunun yan etkisiz olduğu GARANTİ
+   * EDİLEMEZ (`check_mode: false`, `lookup('pipe')`, sınıflanamayan modül): ön-tarama bunlardan birini
+   * bulursa ÇALIŞMAZ (fail-closed). Çıktı görev düzeyindedir: `--diff` içeriği (dosya gövdeleri) alınmaz.
+   */
+  private async ansibleCheck(cur: ReturnType<IacAdapter["current"]>, playbook: string, inventory: string | undefined, limit: string | undefined): Promise<RawToolOutput> {
+    if (cur.ws.engine !== "ansible") throw new OpsError("engine_mismatch", "bu araç Ansible çalışma alanları içindir");
+    const sandbox = this.requireSandbox();
+    const an = scanAnsible(await this.collectAnsible(cur, await cur.fs.listFiles()));
+    if (an.blocked) {
+      const { blocking, other } = summarizeFindings(an.findings);
+      return { data: { executed: false, blocked: true, reason: "ön-tarama yerel eklenti/modül dizini veya ayrıştırılamayan YAML buldu: check ÇALIŞTIRILMADI", findings: [...blocking, ...other].slice(0, 20).map(findingOut) }, summary: `check ÇALIŞMADI: ${blocking.length} engelleyici bulgu`, subjects: [`Workspace/${cur.ws.id}`] };
+    }
+    if (!an.model.playbooks.includes(playbook)) throw new OpsError("playbook_not_found", `'${playbook.slice(0, 120)}' bir playbook olarak bulunamadı (iac.project.inspect ile listeleyin)`);
+    if (inventory !== undefined && !an.model.inventories.includes(inventory)) throw new OpsError("inventory_not_found", `'${inventory.slice(0, 120)}' statik bir envanter dosyası olarak bulunamadı (ansible.inventory.list ile listeleyin)`);
+    const unsafe: { code: string; message: string; file?: string; line?: number }[] = [];
+    for (const f of an.findings) if (["lookup_pipe", "module_unclassified", "dynamic_include"].includes(f.code)) unsafe.push({ code: f.code, message: f.message, file: f.file, ...(f.line !== undefined ? { line: f.line } : {}) });
+    for (const t of an.tasks) if (t.flags.includes("check_mode_false")) unsafe.push({ code: "check_mode_false", message: `görev check modunda da GERÇEKTEN çalışır (${t.module})`, file: t.file, line: t.line });
+    if (unsafe.length > 0) {
+      return {
+        data: { executed: false, unsafe: true, reason: "check modunun yan etkisiz olduğu garanti edilemiyor: ÇALIŞTIRILMADI (bulguları giderin ya da kullanıcı kendi ortamında çalıştırsın)", findings: unsafe.slice(0, 15) },
+        summary: `check ÇALIŞMADI: ${unsafe.length} güvensiz yapı`,
+        subjects: [`Workspace/${cur.ws.id}`, `File/${cur.ws.id}/${playbook}`],
+      };
+    }
+    const pb = await resolveTool("ansible-playbook", this.o.toolDirs ?? []);
+    if (!pb) throw new OpsError("tool_missing", "'ansible-playbook' bulunamadı: kurun veya OPS_TOOL_DIRS'e ekleyin");
+    const fsp = await import("node:fs/promises");
+    await ensureDir(cur.fs.snapshot.dir);
+    const cfg = join(cur.fs.snapshot.dir, "ansible.cfg");
+    await fsp.writeFile(cfg, "[defaults]\nhost_key_checking = True\nretry_files_enabled = False\nnocolor = True\nforks = 1\n", { mode: 0o600 });
+    const env: Record<string, string> = {
+      ANSIBLE_CONFIG: cfg, ANSIBLE_HOME: `${IAC_HOME}/.ansible`, ANSIBLE_LOCAL_TEMP: `${IAC_HOME}/tmp`, ANSIBLE_REMOTE_TEMP: `${IAC_HOME}/tmp`, ANSIBLE_NOCOLOR: "1",
+      ANSIBLE_FORCE_COLOR: "0", ANSIBLE_HOST_KEY_CHECKING: "True", ANSIBLE_RETRY_FILES_ENABLED: "0", ANSIBLE_LOOKUP_PLUGINS: "", ANSIBLE_LIBRARY: "", ANSIBLE_ACTION_PLUGINS: "",
+      ANSIBLE_CALLBACK_PLUGINS: "", ANSIBLE_FILTER_PLUGINS: "", ANSIBLE_STDOUT_CALLBACK: "default", NO_COLOR: "1", PYTHONDONTWRITEBYTECODE: "1",
+    };
+    const args = ["--check", "-i", inventory ?? "localhost,", "-e", "ansible_connection=local", ...(limit ? ["--limit", limit] : []), playbook];
+    const r = await runInSandbox({ sandbox, tool: pb, args, cwd: cur.fs.root, rwBinds: [], roBinds: [cur.fs.root, cfg], env, timeoutMs: 180_000, maxOutputBytes: 1_000_000 });
+    await cleanWorkDir(cur.fs.root);
+    if (r.timedOut) throw new OpsError("tool_timeout", "ansible-playbook --check zaman aşımına uğradı");
+    const parsed = parseAnsibleRun(r.stdout.toString("utf8"));
+    const failed = parsed.recap.reduce((n, x) => n + x.failed + x.unreachable, 0);
+    const changed = parsed.recap.reduce((n, x) => n + x.changed, 0);
+    const fatalMsg = r.code !== 0 && parsed.recap.length === 0 ? ansibleMessage(r.stderr.toString("utf8") || r.stdout.toString("utf8")) : undefined;
+    return {
+      data: {
+        executed: true,
+        playbook,
+        inventory: inventory ?? "localhost,",
+        exitCode: r.code,
+        recap: parsed.recap,
+        tasks: parsed.tasks.slice(0, 40),
+        ...(parsed.tasks.length > 40 ? { omitted: parsed.tasks.length - 40 } : {}),
+        ...(fatalMsg ? { error: fatalMsg } : {}),
+        note: "YEREL bağlantı (sandbox, ağsız): görevler sanal host olarak yerelde değerlendirildi; uzak host durumu GÖRÜLMEDİ. Diff içeriği alınmaz.",
+      },
+      summary: fatalMsg ? `check başarısız: ${fatalMsg}`.slice(0, 200) : `check: ${changed} değişecek görev, ${failed} başarısız/ulaşılamaz`,
+      truncated: parsed.tasks.length > 40,
+      subjects: [`Workspace/${cur.ws.id}`, `File/${cur.ws.id}/${playbook}`],
+    };
   }
 
   // ---- ansible.inventory.list ---------------------------------------------------------------

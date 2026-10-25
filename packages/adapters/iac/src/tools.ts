@@ -94,4 +94,31 @@ export const inventoryList = defineTool(
   z.strictObject({ path: p.optional() }),
 );
 
-export const IAC_TOOLS: readonly ToolDefinition[] = [projectInspect, fmt, validate, lint, scan, docsLookup, inventoryList];
+export const plan = defineTool(
+  {
+    ...base,
+    name: "iac.plan",
+    description: "terraform/tofu plan: ağsız, kimliksiz, BOŞ state'e karşı (gerçek altyapıya karşı plan hedefin pipeline'ındadır). Eklenecek/değişecek/silinecek kaynaklar + risk etiketleri; hassas değerler çıkmaz.",
+    limits: { timeoutMs: 270_000, maxBytes: 300_000, maxItems: 60, maxOutputTokens: 1_800 },
+    typicalOutputTokens: 800,
+  },
+  z.strictObject({
+    vars: z
+      .record(z.string().regex(/^[a-z_][a-z0-9_]{0,60}$/), z.string().max(200))
+      .refine((r) => Object.keys(r).length <= 10, "en çok 10 değişken")
+      .optional(),
+  }),
+);
+
+export const ansibleCheck = defineTool(
+  {
+    ...base,
+    name: "ansible.check",
+    description: "ansible-playbook --check: ağsız sandbox, YEREL bağlantı (uzak host durumu görülmez); görev düzeyi sonuç döner (diff içeriği yok). check_mode: false / lookup('pipe') / sınıflanamayan modül varsa ÇALIŞMAZ.",
+    limits: { timeoutMs: 200_000, maxBytes: 200_000, maxItems: 50, maxOutputTokens: 1_500 },
+    typicalOutputTokens: 600,
+  },
+  z.strictObject({ playbook: p, inventory: p.optional(), limit: z.string().regex(/^[A-Za-z0-9_.:\-*!&,]{1,100}$/).optional() }),
+);
+
+export const IAC_TOOLS: readonly ToolDefinition[] = [projectInspect, fmt, validate, lint, scan, docsLookup, inventoryList, plan, ansibleCheck];

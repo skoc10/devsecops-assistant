@@ -7,3 +7,5 @@ export { parseInventory, scanAnsible, SECRET_VAR } from "./ansible.ts";
 export type { AnsibleModel, AnsibleScan, AnsibleTask, InventorySummary } from "./ansible.ts";
 export { HclError, parseHcl, walkBlocks } from "./hcl.ts";
 export { resolveTool, runInSandbox, writeTfRc } from "./runner.ts";
+export { summarizePlan, risksFor } from "./plan.ts";
+export type { PlanAction, PlanAttr, PlanChange, PlanSummary } from "./plan.ts";

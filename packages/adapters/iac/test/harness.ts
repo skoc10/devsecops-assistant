@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuditLog, MemoryAuditStorage, MemoryHeadAnchor } from "@ops/audit";
 import type { ApprovalGate, ApprovalRequest, ToolResult } from "@ops/contracts";
-import { EvidenceStore, Session, ToolGateway, ToolRegistry, createLocalAdapter } from "@ops/core";
+import { EvidenceStore, Session, ToolGateway, ToolRegistry, createLocalAdapter, formatForModel } from "@ops/core";
 import { DEFAULT_POLICY, PolicyEngine } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
 import { detectSandbox } from "@ops/sandbox";
-import { FakeBroker } from "@ops/testkit";
+import { CaptureSink, FakeBroker } from "@ops/testkit";
 import { makeRepo } from "@ops/testkit/git-repo";
 import type { TestRepo } from "@ops/testkit/git-repo";
 import { WorkspaceAdapter, WorkspaceManager, WorkspaceRegistry } from "@ops/workspace";
@@ -62,6 +62,14 @@ export async function makeIacHarness(opts: IacHarnessOpts) {
     if (!e) throw new Error(`kanıt yok: ${JSON.stringify(r)}`);
     return JSON.parse(e.text);
   };
-  return { repo, home, session, manager, fs: active.fs, call, json, gate, evidence, storage, async cleanup() { await repo.cleanup(); await rm(home, { recursive: true, force: true }); } };
+  /** Gözlenebilir kanallar: denetim, kanıt ve modele giden görünüm. */
+  const sinkFor = async (results: readonly ToolResult[]): Promise<CaptureSink> => {
+    const sink = new CaptureSink();
+    sink.push("audit", (await storage.readLines()).join("\n"));
+    for (const e of evidence.all()) sink.push("evidence", e.text);
+    for (const r of results) sink.push("model", formatForModel(r));
+    return sink;
+  };
+  return { repo, home, session, manager, fs: active.fs, call, json, sinkFor, gate, evidence, storage, async cleanup() { await repo.cleanup(); await rm(home, { recursive: true, force: true }); } };
 }
 export type IacHarness = Awaited<ReturnType<typeof makeIacHarness>>;

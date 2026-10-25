@@ -44,6 +44,99 @@ describe.skipIf(!ok)("Ansible araçları (gerçek ansible + gerçek bubblewrap, 
     }
   });
 
+  const LOCAL = [
+    "---",
+    "- name: Local",
+    "  hosts: all",
+    "  gather_facts: false",
+    "  tasks:",
+    "    - name: Say hi",
+    "      ansible.builtin.debug:",
+    "        msg: hello",
+    "    - name: Make file",
+    "      ansible.builtin.file:",
+    "        path: /tmp/ops-check-target",
+    "        state: touch",
+    "    - name: Always fails",
+    "      ansible.builtin.fail:",
+    "        msg: expected-failure-marker",
+    "      ignore_errors: true",
+    "",
+  ].join("\n");
+
+  it("ansible.check: yerel bağlantı, görev düzeyi sonuç (changed/ok/failed), PLAY RECAP; sandbox'ta GERÇEK değişiklik olmaz; diff içeriği çıkmaz", async () => {
+    const h = await makeIacHarness({ engine: "ansible", files: { "local.yml": LOCAL, "inventory/hosts.ini": "[web]\nh1 ansible_host=10.0.0.1\n" } });
+    try {
+      const r = await h.call("ansible.check", { playbook: "local.yml" });
+      expect(r.status, JSON.stringify(r)).toBe("ok");
+      const j = h.json(r);
+      expect(j, JSON.stringify(j)).toMatchObject({ executed: true, playbook: "local.yml", inventory: "localhost,", exitCode: 0 });
+      expect(j.recap).toEqual([expect.objectContaining({ host: "localhost", failed: 0, unreachable: 0 })]);
+      const byTask = Object.fromEntries(j.tasks.map((t: { task: string; status: string }) => [t.task, t.status]));
+      expect(byTask["Say hi"]).toBe("ok");
+      expect(byTask["Make file"]).toBe("changed"); // check modunda "değişecek"
+      expect(j.tasks.find((t: { task: string }) => t.task === "Always fails")).toMatchObject({ status: "failed" });
+      expect(j.note).toMatch(/YEREL bağlantı/);
+      expect(r.summary).toMatch(/1 değişecek görev/);
+      expect(existsSync("/tmp/ops-check-target")).toBe(false); // check gerçekten dokunmadı
+      expect(existsSync(join(h.fs.root, ".ansible"))).toBe(false);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("ansible.check: statik envanter + --limit; envanter/playbook doğrulanır (kayıtlı olmayan yol ret)", async () => {
+    const h = await makeIacHarness({ engine: "ansible", files: { "local.yml": LOCAL.replace("hosts: all", "hosts: web"), "inventory/hosts.ini": "[web]\nh1 ansible_host=10.0.0.1\nh2 ansible_host=10.0.0.2\n" } });
+    try {
+      const r = await h.call("ansible.check", { playbook: "local.yml", inventory: "inventory/hosts.ini", limit: "h2" });
+      expect(r.status, JSON.stringify(r)).toBe("ok");
+      const j = h.json(r);
+      expect(j.recap.map((x: { host: string }) => x.host)).toEqual(["h2"]); // limit uygulandı; h1 dokunulmadı
+      const bad1 = await h.call("ansible.check", { playbook: "nope.yml" });
+      expect(bad1.status).toBe("error");
+      expect(bad1.summary).toMatch(/playbook olarak bulunamadı/);
+      const bad2 = await h.call("ansible.check", { playbook: "local.yml", inventory: "../etc/hosts" });
+      expect(bad2.summary).toMatch(/envanter dosyası olarak bulunamadı/);
+      expect((await h.call("ansible.check", { playbook: "local.yml", limit: "h1; id" })).reasonCode).toBe("schema_invalid");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("ansible.check: check modunda yan etkisiz olduğu garanti edilemeyen yapılar ÇALIŞTIRMAYI ENGELLER (check_mode: false, lookup pipe, sınıflanamayan modül, şablonlu include)", async () => {
+    const mk = (task: string) => ["---", "- hosts: all", "  gather_facts: false", "  tasks:", ...task.split("\n").map((l) => `    ${l}`), ""].join("\n");
+    const cases: [string, string, string][] = [
+      ["check_mode_false", "- name: real\n  ansible.builtin.file:\n    path: /tmp/ops-should-not-exist\n    state: touch\n  check_mode: false", "check_mode_false"],
+      ["lookup_pipe", "- name: pipe\n  ansible.builtin.debug:\n    msg: \"{{ lookup('pipe', 'id') }}\"", "lookup_pipe"],
+      ["unclassified", "- name: weird\n  community.unknown.thing:\n    a: 1", "module_unclassified"],
+      ["dynamic_include", "- name: inc\n  ansible.builtin.include_tasks: \"{{ which }}.yml\"", "dynamic_include"],
+    ];
+    for (const [name, task, code] of cases) {
+      const h = await makeIacHarness({ engine: "ansible", files: { "p.yml": mk(task) } });
+      try {
+        const r = await h.call("ansible.check", { playbook: "p.yml" });
+        expect(r.status, name).toBe("ok");
+        const j = h.json(r);
+        expect(j, name).toMatchObject({ executed: false, unsafe: true });
+        expect(j.findings.map((f: { code: string }) => f.code), name).toContain(code);
+        expect(r.summary).toMatch(/check ÇALIŞMADI/);
+        expect(existsSync("/tmp/ops-should-not-exist")).toBe(false);
+      } finally {
+        await h.cleanup();
+      }
+    }
+  });
+
+  it("ansible.check: yerel eklenti dizini (library/) engelleyici bulgu — ÇALIŞMAZ", async () => {
+    const h = await makeIacHarness({ engine: "ansible", files: { "p.yml": "---\n- hosts: all\n  gather_facts: false\n  tasks: []\n", "library/evil.py": "print('x')\n" } });
+    try {
+      const r = await h.call("ansible.check", { playbook: "p.yml" });
+      expect(h.json(r)).toMatchObject({ executed: false, blocked: true });
+    } finally {
+      await h.cleanup();
+    }
+  });
+
   it("iac.lint: --syntax-check geçer; çalışma kopyasında artık dosya kalmaz; kullanıcının deposu değişmez", async () => {
     const h = await makeIacHarness({ engine: "ansible", files: BASE });
     try {

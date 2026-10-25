@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { makeCanary } from "@ops/testkit";
 import { makeIacHarness, sandbox } from "./harness.ts";
 import { findTool } from "./tools.ts";
 
@@ -127,6 +128,74 @@ describe.skipIf(!ok)("Terraform/OpenTofu araçları (gerçek tofu + gerçek bubb
       expect(h.gate.requests.map((q) => q.summary.tool)).toEqual(["fs.write", "iac.fmt"]);
       // fmt yalnız çalışma kopyasını değiştirdi
       expect(existsSync(join(h.repo.dir, "ugly.tf"))).toBe(false);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("iac.plan: BOŞ state'e karşı plan, kompakt özet; hassas değer çıkmaz; plan dosyası ve .terraform kalmaz; depo değişmez", async () => {
+    const secret = makeCanary("plan-sensitive");
+    const files = {
+      "main.tf":
+        'variable "token" {\n  type      = string\n  sensitive = true\n  default   = "' + secret.value + '"\n}\n\nresource "terraform_data" "a" {\n  input = "visible-input"\n}\n\nresource "terraform_data" "b" {\n  input = var.token\n}\n\noutput "tok" {\n  value     = var.token\n  sensitive = true\n}\n\noutput "aid" {\n  value = terraform_data.a.id\n}\n',
+    };
+    const h = await makeIacHarness({ engine: "opentofu", files });
+    try {
+      const r = await h.call("iac.plan", {});
+      expect(r.status, JSON.stringify(r)).toBe("ok");
+      const j = h.json(r);
+      expect(j).toMatchObject({ executed: true, planned: true, noChanges: false, counts: { create: 2, update: 0, delete: 0, replace: 0 } });
+      expect(j.changes.map((c: { address: string }) => c.address)).toEqual(["terraform_data.a", "terraform_data.b"]);
+      expect(j.changes[0].attrs).toEqual(expect.arrayContaining([{ name: "input", value: "visible-input" }]));
+      // hassas girdi değeri HİÇBİR yerde yok (özet, kanıt, denetim)
+      const input = j.changes[1].attrs.find((a: { name: string }) => a.name === "input");
+      expect(input).toEqual({ name: "input", note: "hassas" });
+      expect(j.outputs).toEqual(expect.arrayContaining([{ name: "tok", action: "create", sensitive: true }, { name: "aid", action: "create", sensitive: false }]));
+      const sink = await h.sinkFor([r]);
+      expect(sink.leaks([secret])).toEqual([]);
+      expect(j.note).toMatch(/BOŞ state/);
+      expect(existsSync(join(h.fs.root, ".terraform"))).toBe(false);
+      expect(existsSync(join(h.repo.dir, ".terraform"))).toBe(false);
+      expect(existsSync(join(h.repo.dir, "plan.tfplan"))).toBe(false);
+      // deponun (atlanan) state/tfvars/.env dosyaları plana HİÇ girmedi
+      expect(JSON.stringify(j)).not.toMatch(/state-secret|should-never-be-copied/);
+      expect(r.subjects).toContain("Resource/terraform_data.a");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("iac.plan: değişken değerleri TF_VAR ile geçer; eksik değişken ve plan hatası kompakt tanı olarak döner", async () => {
+    const h = await makeIacHarness({
+      engine: "opentofu",
+      files: { "main.tf": 'variable "who" {\n  type = string\n}\n\nresource "terraform_data" "x" {\n  input = var.who\n}\n' },
+    });
+    try {
+      const bad = await h.call("iac.plan", {});
+      expect(bad.status, JSON.stringify(bad)).toBe("ok");
+      expect(h.json(bad)).toMatchObject({ planned: false });
+      expect(h.json(bad).diagnostics[0].message).toMatch(/variable|value/i);
+      const good = await h.call("iac.plan", { vars: { who: "from-var" } });
+      const j = h.json(good);
+      expect(j).toMatchObject({ planned: true, counts: { create: 1 } });
+      expect(j.changes[0].attrs).toEqual([{ name: "input", value: "from-var" }]);
+      // değişken adı biçimi ve sayısı sınırlı
+      expect((await h.call("iac.plan", { vars: { "Bad Name": "x" } })).reasonCode).toBe("schema_invalid");
+      expect((await h.call("iac.plan", { vars: Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`v${i}`, "x"])) })).reasonCode).toBe("schema_invalid");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("iac.plan: ön-tarama engelleyici yapı (provisioner) varsa ÇALIŞMAZ", async () => {
+    const h = await makeIacHarness({
+      engine: "opentofu",
+      files: { "main.tf": 'resource "terraform_data" "x" {\n  provisioner "local-exec" {\n    command = "id"\n  }\n}\n' },
+    });
+    try {
+      const r = await h.call("iac.plan", {});
+      expect(h.json(r)).toMatchObject({ executed: false, blocked: true });
+      expect(r.summary).toMatch(/plan ÇALIŞMADI/);
     } finally {
       await h.cleanup();
     }

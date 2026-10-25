@@ -182,7 +182,7 @@ export function scanAnsible(files: readonly { path: string; text: string }[]): A
         add("warn", "module_unclassified", `modül '${norm.slice(0, 60)}' kataloğda yok: destroy muamelesi görür`, f.path, line);
         flags.push("unclassified");
       }
-      if (/\{\{/.test(String(toJs(get(norm)) ?? "")) && ["include_tasks", "import_tasks", "include_role", "import_role"].includes(norm)) {
+      if (/\{\{/.test(String(toJs(get(module)) ?? "")) && ["include_tasks", "import_tasks", "include_role", "import_role"].includes(norm)) {
         add("warn", "dynamic_include", `${norm} şablonlu yol içeriyor`, f.path, line);
         flags.push("dynamic_include");
       }
