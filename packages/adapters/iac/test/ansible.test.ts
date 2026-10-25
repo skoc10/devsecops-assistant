@@ -1,4 +1,12 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { OpsError } from "@ops/contracts";
+import type { AdapterCall } from "@ops/contracts";
+import type { Sandbox } from "@ops/sandbox";
+import type { WorkspaceManager } from "@ops/workspace";
+import { IacAdapter } from "../src/adapter.ts";
 import { parseInventory, scanAnsible } from "../src/ansible.ts";
 
 const pb = (tasks: string, extra = ""): { path: string; text: string }[] => [
@@ -6,6 +14,11 @@ const pb = (tasks: string, extra = ""): { path: string; text: string }[] => [
 ];
 const scan = (tasks: string, extra = "") => scanAnsible(pb(tasks, extra));
 const codes = (tasks: string, extra = ""): string[] => scan(tasks, extra).findings.map((f) => f.code);
+/** Çok dosyalı tarama: `null` içerik = okunamayan (ikili) dosya. */
+const scanFiles = (files: Record<string, string | null>) => scanAnsible(Object.entries(files).map(([path, text]) => ({ path, text })));
+const play = (task: string): string => `- hosts: all\n  tasks:\n    - ${task}\n`;
+/** Bulgu PoC'si: include_tasks ile yüklenen, hiçbir playbook/rol kalıbına uymayan bağımsız görev dosyası. */
+const EXTRA = "- shell: touch /tmp/pwned\n  check_mode: false\n- file: path=/etc/important state=absent\n";
 
 describe("scanAnsible: modül sınıf kataloğu (S-18)", () => {
   it("okuma / mutasyon / keyfî komut / yıkıcı sınıfları", () => {
@@ -128,6 +141,219 @@ describe("scanAnsible: ön-tarama işaretleri", () => {
   it("özyinelemeli alias (billion laughs) çökertmez", () => {
     const bomb = ["a: &a [x, x, x, x, x, x, x, x, x]", ...Array.from({ length: 9 }, (_, i) => `${String.fromCharCode(98 + i)}: &${String.fromCharCode(98 + i)} [${Array(9).fill(`*${String.fromCharCode(97 + i)}`).join(",")}]`)].join("\n");
     expect(() => scanAnsible([{ path: "site.yml", text: `- hosts: all\n  vars: {}\n  tasks:\n    - debug: { msg: x }\n` }, { path: "bomb.yml", text: bomb }])).not.toThrow();
+  });
+});
+
+describe("scanAnsible: include/import ve rollerle yüklenen dosyalar aynı ziyaretçiyle sınıflanır", () => {
+  it("PoC: include_tasks ile yüklenen bağımsız görev dosyası (shell + check_mode: false + state=absent) görünür", () => {
+    const r = scanFiles({ "site.yml": play("include_tasks: extra.yml"), "extra.yml": EXTRA });
+    expect(r.tasks.map((t) => [t.file, t.module, t.class])).toEqual([
+      ["site.yml", "include_tasks", "read"],
+      ["extra.yml", "shell", "deploy"],
+      ["extra.yml", "file", "destroy"], // serbest biçimli k=v `state=absent` de yakalanır
+    ]);
+    expect(r.tasks[1]?.flags).toEqual(expect.arrayContaining(["check_mode_false", "arbitrary_command"]));
+    expect(r.model.maxClass).toBe("destroy");
+    expect(r.findings.map((f) => f.code)).not.toContain("include_unresolved");
+  });
+
+  it("tüm yazım biçimleri: FQCN, import_tasks, eski include, file=, sözlük, args:, action:, ./ öneki, harf farkı", () => {
+    const forms = [
+      "ansible.builtin.include_tasks: extra.yml",
+      "ansible.builtin.import_tasks: extra.yml",
+      "ansible.legacy.include_tasks: extra.yml",
+      "include: extra.yml",
+      "include_tasks: file=extra.yml",
+      "include_tasks: { file: ./extra.yml, apply: { tags: [x] } }",
+      "include_tasks:\n      args:\n        file: extra.yml",
+      "action: include_tasks extra.yml",
+      "action: { module: ansible.builtin.import_tasks, file: extra.yml }",
+      "include_tasks: EXTRA.yml", // macOS dosya sistemi harfe duyarsız: aday sayılır
+    ];
+    for (const form of forms) {
+      const r = scanFiles({ "site.yml": play(form), "extra.yml": EXTRA });
+      expect(r.tasks.filter((t) => t.file === "extra.yml").map((t) => t.module), form).toEqual(["shell", "file"]);
+      expect(r.findings.map((f) => f.code), form).not.toContain("include_unresolved");
+    }
+  });
+
+  it("iç içe include: alt dizindeki playbook, '../' hedefi, üst dosyaya göreli hedef, JSON görev dosyası (metin işaretleri dahil)", () => {
+    const r = scanFiles({
+      "playbooks/site.yml": "- hosts: all\n  tasks:\n    - import_tasks: ../tasks/a.yml\n",
+      "tasks/a.yml": "- include_tasks: b.yml\n",
+      "tasks/b.yml": "- include_tasks: c.json\n",
+      "tasks/c.json": '[{"shell": "id", "check_mode": false}, {"debug": {"msg": "{{ lookup(\'pipe\', \'id\') }}"}}]',
+    });
+    expect(r.tasks.map((t) => [t.file, t.module])).toEqual([
+      ["playbooks/site.yml", "import_tasks"],
+      ["tasks/a.yml", "include_tasks"],
+      ["tasks/b.yml", "include_tasks"],
+      ["tasks/c.json", "shell"],
+      ["tasks/c.json", "debug"],
+    ]);
+    expect(r.tasks[3]?.flags).toContain("check_mode_false");
+    expect(r.findings).toContainEqual(expect.objectContaining({ code: "lookup_pipe", file: "tasks/c.json" }));
+  });
+
+  it("aynı sonekli her görev dosyası taranır (Ansible arama yollarının üst kümesi); playbook dosyası görev hedefi sayılmaz", () => {
+    const r = scanFiles({
+      "site.yml": play("include_tasks: setup.yml"),
+      "other/setup.yml": "- hosts: db\n  tasks: []\n",
+      "lib/setup.yml": "- command: id\n",
+    });
+    expect(r.tasks.map((t) => [t.file, t.module])).toEqual([["site.yml", "include_tasks"], ["lib/setup.yml", "command"]]);
+    expect(r.model.playbooks).toEqual(["other/setup.yml", "site.yml"]);
+  });
+
+  it("roller: roles/ dışındaki rol dizini (play roles:, include_role, import_role + tasks_from/handlers_from), JSON main, meta bağımlılığı", () => {
+    const evil = "- shell: touch /tmp/pwned\n  check_mode: false\n";
+    const cases: Record<string, string>[] = [
+      { "site.yml": "- hosts: all\n  roles: [evil]\n", "evil/tasks/main.yml": evil },
+      { "site.yml": "- hosts: all\n  roles:\n    - { role: evil, tags: x }\n", "evil/tasks/main.yml": evil },
+      { "site.yml": play("include_role: { name: evil }"), "evil/tasks/main.yml": evil },
+      { "site.yml": play("ansible.builtin.import_role:\n        name: evil\n        tasks_from: setup"), "evil/tasks/setup.yml": evil },
+      { "site.yml": play("include_role: name=evil tasks_from=setup.yml"), "evil/tasks/setup.yml": evil },
+      { "site.yml": play("include_role: { name: evil, handlers_from: h }"), "evil/handlers/h.yml": evil },
+      { "site.yml": "- hosts: all\n  roles: [web]\n", "roles/web/tasks/main.json": '[{"shell": "id", "check_mode": false}]' },
+      { "site.yml": "- hosts: all\n  roles: [web]\n", "roles/web/tasks/main.yml": "- debug: { msg: x }\n", "roles/web/meta/main.yml": "dependencies:\n  - role: evil\n", "evil/tasks/main.yml": evil },
+    ];
+    for (const files of cases) {
+      const r = scanFiles(files);
+      const label = JSON.stringify(files);
+      expect(r.tasks.some((t) => t.module === "shell" && t.flags.includes("check_mode_false")), label).toBe(true);
+      expect(r.findings.map((f) => f.code), label).not.toContain("include_unresolved");
+    }
+  });
+
+  it("import_playbook: uzantısı ne olursa olsun içe aktarılan playbook'un görevleri taranır; FQCN içe aktarma playbook sayılır", () => {
+    const r = scanFiles({ "site.yml": "- ansible.builtin.import_playbook: other.json\n", "other.json": '[{"hosts": "all", "tasks": [{"shell": "id", "check_mode": false}]}]' });
+    expect(r.model.playbooks).toEqual(["site.yml"]);
+    expect(r.tasks.map((t) => [t.file, t.module, t.flags.includes("check_mode_false")])).toEqual([["other.json", "shell", true]]);
+  });
+
+  it("döngüler sonlanır: kendini ve birbirini yükleyen dosyalar, döngüsel rol bağımlılığı; her görev bir kez sayılır", () => {
+    const r = scanFiles({
+      "site.yml": "- hosts: all\n  tasks:\n    - include_tasks: a.yml\n  roles: [r1]\n",
+      "a.yml": "- include_tasks: b.yml\n- include_tasks: a.yml\n- debug: { msg: a }\n",
+      "b.yml": "- import_tasks: a.yml\n",
+      "roles/r1/meta/main.yml": "dependencies: [r2]\n",
+      "roles/r2/meta/main.yml": "dependencies:\n  - role: r1\n",
+    });
+    expect(r.tasks.filter((t) => t.module === "debug")).toHaveLength(1);
+    expect(r.findings.map((f) => f.code)).not.toContain("include_unresolved");
+    expect(r.model.maxClass).toBe("read");
+  });
+
+  it("derinlik sınırı: çok uzun include zinciri fail-closed", () => {
+    const files: Record<string, string> = { "site.yml": play("include_tasks: t0.yml") };
+    for (let i = 0; i < 40; i++) files[`t${i}.yml`] = `- include_tasks: t${i + 1}.yml\n`;
+    files["t40.yml"] = "- debug: { msg: son }\n";
+    const r = scanFiles(files);
+    expect(r.findings.find((f) => f.code === "include_unresolved")?.message).toMatch(/derin/);
+    expect(r.model.maxClass).toBe("destroy");
+  });
+});
+
+describe("scanAnsible: çözülemeyen veya şablonlu include/rol hedefi fail-closed", () => {
+  it("eksik dosya, mutlak/ev/ağaç dışı yol, okunamayan içerik, eksik rol/tasks_from, rolden kaçan tasks_from, hedefsiz/çözülemeyen argüman", () => {
+    const cases: [string, Record<string, string | null>][] = [
+      ["eksik dosya", { "site.yml": play("include_tasks: missing.yml") }],
+      ["mutlak yol", { "site.yml": play("include_tasks: /etc/ansible/x.yml") }],
+      ["ev dizini", { "site.yml": play("import_tasks: ~/x.yml") }],
+      ["ağaç dışı", { "site.yml": play("include_tasks: ../../outside.yml") }],
+      ["okunamayan içerik", { "site.yml": play("include_tasks: blob.yml"), "blob.yml": null }],
+      ["rol dizini yok", { "site.yml": play("include_role: { name: nope }") }],
+      ["tasks_from yok", { "site.yml": play("include_role: { name: web, tasks_from: nope }"), "roles/web/tasks/main.yml": "- debug: {}\n" }],
+      ["rolden kaçan tasks_from", { "site.yml": play("import_role: { name: web, tasks_from: ../../../x }"), "roles/web/tasks/main.yml": "- debug: {}\n", "x.yml": "- debug: {}\n" }],
+      ["hedefsiz include", { "site.yml": play("include_tasks: { apply: { tags: [x] } }") }],
+      ["çözülemeyen serbest biçim", { "site.yml": play("include_tasks: extra.yml tags=x"), "extra.yml": "- debug: {}\n" }],
+      ["play rolü yok (vendor edilmemiş Galaxy rolü)", { "site.yml": "- hosts: all\n  roles: [geerlingguy.docker]\n" }],
+      ["import_playbook hedefi yok", { "site.yml": "- import_playbook: other.yml\n" }],
+    ];
+    for (const [label, files] of cases) {
+      const r = scanFiles(files);
+      expect(r.findings.map((f) => f.code), label).toContain("include_unresolved");
+      expect(r.model.maxClass, label).toBe("destroy");
+      expect(r.blocked, label).toBe(false); // uyarı: lint yine çalışır; ansible.check ÇALIŞMAZ
+    }
+    expect(scanFiles({ "site.yml": play("include_tasks: missing.yml") }).tasks[0]).toMatchObject({ module: "include_tasks", class: "destroy", flags: ["include_unresolved"] });
+  });
+
+  it("şablonlu hedef: sözlük biçimi, action:, rol adı, tasks_from, play rolü, import_playbook → dynamic_include + destroy", () => {
+    for (const task of ['include_tasks: { file: "{{ x }}.yml" }', "action: include_tasks {{ x }}.yml", 'import_role: { name: "{{ r }}" }', 'include_role: { name: web, tasks_from: "{% if a %}x{% endif %}" }']) {
+      const r = scanFiles({ "site.yml": play(task), "roles/web/tasks/main.yml": "- debug: {}\n" });
+      expect(r.findings.map((f) => f.code), task).toContain("dynamic_include");
+      expect(r.tasks[0], task).toMatchObject({ class: "destroy", flags: ["dynamic_include"] });
+    }
+    expect(scanFiles({ "site.yml": '- hosts: all\n  roles: ["{{ r }}"]\n' }).findings.map((f) => f.code)).toContain("dynamic_include");
+    expect(scanFiles({ "site.yml": '- import_playbook: "{{ pb }}.yml"\n' }).model.maxClass).toBe("destroy");
+  });
+
+  it("rol dosyası yüklenmeyen dizinde tasks/main olmaması sorun değildir (yalnız handlers/vars içeren rol)", () => {
+    const r = scanFiles({ "site.yml": "- hosts: all\n  roles: [web]\n", "roles/web/handlers/main.yml": "- name: h\n  service: { name: x, state: restarted }\n" });
+    expect(r.findings).toEqual([]);
+    expect(r.tasks.map((t) => t.module)).toEqual(["service"]);
+  });
+});
+
+describe("ansible.check güvenlik kapısı (adapter): yüklenen dosyalardaki yapı da çalıştırmayı engeller", () => {
+  async function gate(files: Record<string, string>) {
+    const dir = await mkdtemp(join(tmpdir(), "ops-iac-gate-"));
+    const manager = {
+      current: () => ({
+        ws: { id: "infra", engine: "ansible" },
+        fs: {
+          listFiles: async () => Object.keys(files).sort(),
+          readText: async (p: string) => {
+            const t = files[p];
+            if (t === undefined) throw new OpsError("fs_not_found", p);
+            return t;
+          },
+          snapshot: { dir, manifest: { skipped: [] } },
+          root: join(dir, "work"),
+        },
+      }),
+    } as unknown as WorkspaceManager;
+    // Kapı sandbox'a ULAŞMADAN karar verir; ulaşılırsa ayırt edilebilir hata
+    const reached = async (): Promise<never> => {
+      throw new OpsError("sandbox_reached", "kapı geçildi");
+    };
+    const sandbox: Sandbox = { kind: "bwrap", run: reached, spawn: reached };
+    const adapter = new IacAdapter({ manager, sandbox, toolDirs: [] });
+    return {
+      check: (playbook: string) => adapter.invoke({ tool: "ansible.check", args: { playbook } } as unknown as AdapterCall),
+      cleanup: () => rm(dir, { recursive: true, force: true }),
+    };
+  }
+
+  it("PoC: include_tasks ile gelen check_mode: false → ÇALIŞMAZ; çözülemeyen include ve roles/ dışı rol → ÇALIŞMAZ; temiz playbook kapıdan geçer", async () => {
+    const g = await gate({
+      "site.yml": play("include_tasks: extra.yml"),
+      "extra.yml": EXTRA,
+      "missing.yml": play("include_tasks: nope.yml"),
+      "role.yml": "- hosts: all\n  roles: [evil]\n",
+      "evil/tasks/main.yml": "- command: id\n  check_mode: false\n",
+      "clean.yml": play("debug: { msg: ok }"),
+    });
+    try {
+      // depo genelinde güvensiz yapı varsa hiçbir playbook çalışmaz (bütün depo taranır)
+      for (const pbName of ["site.yml", "missing.yml", "role.yml", "clean.yml"]) {
+        const out = await g.check(pbName);
+        expect(out.data, pbName).toMatchObject({ executed: false, unsafe: true });
+        const found = (out.data as { findings: { code: string; file?: string }[] }).findings;
+        expect(found).toContainEqual(expect.objectContaining({ code: "check_mode_false", file: "extra.yml" }));
+        expect(found).toContainEqual(expect.objectContaining({ code: "check_mode_false", file: "evil/tasks/main.yml" }));
+        expect(found).toContainEqual(expect.objectContaining({ code: "include_unresolved", file: "missing.yml" }));
+      }
+    } finally {
+      await g.cleanup();
+    }
+    const ok = await gate({ "clean.yml": play("debug: { msg: ok }"), "tasks/x.yml": "- debug: { msg: x }\n", "inc.yml": play("include_tasks: tasks/x.yml") });
+    try {
+      for (const pbName of ["clean.yml", "inc.yml"]) await expect(ok.check(pbName), pbName).rejects.toMatchObject({ code: expect.stringMatching(/^(tool_missing|sandbox_reached)$/) });
+    } finally {
+      await ok.cleanup();
+    }
   });
 });
 

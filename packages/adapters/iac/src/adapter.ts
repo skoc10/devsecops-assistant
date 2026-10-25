@@ -5,7 +5,7 @@ import type { Adapter, AdapterCall, AdapterManifest, Profile, RawToolOutput, Tar
 import type { Sandbox } from "@ops/sandbox";
 import type { WorkspaceManager } from "@ops/workspace";
 import { parseInventory, scanAnsible } from "./ansible.ts";
-import type { AnsibleScan } from "./ansible.ts";
+import type { AnsibleFile } from "./ansible.ts";
 import { IAC_HOME, cleanWorkDir, ensureDir, readIfExists, resolveTool, runInSandbox, writeTfRc } from "./runner.ts";
 import type { ResolvedTool } from "./runner.ts";
 import { summarizePlan } from "./plan.ts";
@@ -232,18 +232,14 @@ export class IacAdapter implements Adapter {
     };
   }
 
-  private async collectAnsible(cur: ReturnType<IacAdapter["current"]>, files: readonly string[]): Promise<{ path: string; text: string }[]> {
-    const out: { path: string; text: string }[] = [];
+  private async collectAnsible(cur: ReturnType<IacAdapter["current"]>, files: readonly string[]): Promise<AnsibleFile[]> {
+    const out: AnsibleFile[] = [];
     for (const f of files) {
-      if (/\.(ya?ml|ini)$/.test(f)) {
-        try {
-          out.push({ path: f, text: await cur.fs.readText(f) });
-        } catch {
-          out.push({ path: f, text: "" });
-        }
-      } else {
-        // varlık işaretleri (ansible.cfg, eklenti dizinleri) için içerik gerekmez
-        out.push({ path: f, text: "" });
+      // İçerik HER dosya için okunur: include/rol hedefi uzantısından bağımsız YAML olarak yüklenir (`.json`, uzantısız `main`...)
+      try {
+        out.push({ path: f, text: await cur.fs.readText(f) });
+      } catch {
+        out.push({ path: f, text: null }); // ikili/okunamayan: include hedefiyse "çözülemedi" (fail-closed)
       }
     }
     return out;
@@ -578,8 +574,9 @@ export class IacAdapter implements Adapter {
 
   /**
    * `ansible-playbook --check` — ağsız sandbox'ta YEREL bağlantıyla. Check modunun yan etkisiz olduğu GARANTİ
-   * EDİLEMEZ (`check_mode: false`, `lookup('pipe')`, sınıflanamayan modül): ön-tarama bunlardan birini
-   * bulursa ÇALIŞMAZ (fail-closed). Çıktı görev düzeyindedir: `--diff` içeriği (dosya gövdeleri) alınmaz.
+   * EDİLEMEZ (`check_mode: false`, `lookup('pipe')`, sınıflanamayan modül, şablonlu/çözülemeyen include veya rol):
+   * ön-tarama bunlardan birini bulursa ÇALIŞMAZ (fail-closed). include/rol ile yüklenen dosyaların görevleri de
+   * sınıflanır. Çıktı görev düzeyindedir: `--diff` içeriği (dosya gövdeleri) alınmaz.
    */
   private async ansibleCheck(cur: ReturnType<IacAdapter["current"]>, playbook: string, inventory: string | undefined, limit: string | undefined): Promise<RawToolOutput> {
     if (cur.ws.engine !== "ansible") throw new OpsError("engine_mismatch", "bu araç Ansible çalışma alanları içindir");
@@ -592,7 +589,7 @@ export class IacAdapter implements Adapter {
     if (!an.model.playbooks.includes(playbook)) throw new OpsError("playbook_not_found", `'${playbook.slice(0, 120)}' bir playbook olarak bulunamadı (iac.project.inspect ile listeleyin)`);
     if (inventory !== undefined && !an.model.inventories.includes(inventory)) throw new OpsError("inventory_not_found", `'${inventory.slice(0, 120)}' statik bir envanter dosyası olarak bulunamadı (ansible.inventory.list ile listeleyin)`);
     const unsafe: { code: string; message: string; file?: string; line?: number }[] = [];
-    for (const f of an.findings) if (["lookup_pipe", "module_unclassified", "dynamic_include"].includes(f.code)) unsafe.push({ code: f.code, message: f.message, file: f.file, ...(f.line !== undefined ? { line: f.line } : {}) });
+    for (const f of an.findings) if (["lookup_pipe", "module_unclassified", "dynamic_include", "include_unresolved"].includes(f.code)) unsafe.push({ code: f.code, message: f.message, file: f.file, ...(f.line !== undefined ? { line: f.line } : {}) });
     for (const t of an.tasks) if (t.flags.includes("check_mode_false")) unsafe.push({ code: "check_mode_false", message: `görev check modunda da GERÇEKTEN çalışır (${t.module})`, file: t.file, line: t.line });
     if (unsafe.length > 0) {
       return {
