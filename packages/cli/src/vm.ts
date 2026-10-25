@@ -7,7 +7,7 @@ import type { Writable } from "node:stream";
 import { OpsError } from "@ops/contracts";
 import { roBindProblem } from "@ops/mcp-bridge";
 import { stripControlChars } from "@ops/redaction";
-import { DEFAULT_GUEST_ROOTS, GUEST_TOOL_DIRS, GUEST_TOOL_ROOT, VM_STATE_FILE, VmSandbox, loadVmState } from "@ops/sandbox";
+import { DEFAULT_GUEST_ROOTS, GUEST_TOOL_DIRS, GUEST_TOOL_ROOT, VM_STATE_FILE, VmSandbox, loadVmState, stripSlash } from "@ops/sandbox";
 import type { VmShare, VmState } from "@ops/sandbox";
 import { WorkspaceRegistry } from "@ops/workspace";
 import { MAX_SOCKET_PATH_BYTES, VM_VAGRANT_DIR, assertPrivateDir, ensureHome } from "./paths.ts";
@@ -127,7 +127,7 @@ export async function computeShares(paths: OpsPaths, env: VmCliOptions["env"], p
   return shares;
 }
 
-const under = (p: string, root: string): boolean => p === root || p.startsWith(`${root.replace(/\/+$/, "")}/`);
+const under = (p: string, root: string): boolean => p === root || p.startsWith(`${stripSlash(root)}/`);
 
 /** Kayıtlı çalışma alanlarının paylaşım durumu (doktor / `vm status`): eksik olan `iac.*` için fail-closed demektir. */
 export async function workspaceShareStatus(paths: OpsPaths, state: VmState): Promise<string[]> {

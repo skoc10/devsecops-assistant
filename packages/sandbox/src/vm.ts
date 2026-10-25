@@ -97,8 +97,11 @@ export function parseVmState(text: string): VmState {
   };
 }
 
-function stripSlash(p: string): string {
-  return p.length > 1 ? p.replace(/\/+$/, "") : p;
+/** Sondaki `/` karakterlerini atar (kök hariç). Döngü: `/\/+$/` düzenli ifadesi uzun `/` dizisinde karesel geri izler (CodeQL js/polynomial-redos). */
+export function stripSlash(p: string): string {
+  let out = p;
+  while (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
+  return out;
 }
 
 /** Durum dosyasını okur; yoksa `null` (VM "yok" sayılır), bozuksa hata. */

@@ -16,6 +16,7 @@ import {
   parseVmState,
   remoteKillCommand,
   shellQuote,
+  stripSlash,
   translateSpec,
   withCallMarker,
 } from "../src/index.ts";
@@ -134,6 +135,15 @@ describe("VM durum dosyası ve tespit", () => {
   const dirs: string[] = [];
   afterAll(async () => {
     for (const d of dirs) await rm(d, { recursive: true, force: true });
+  });
+
+  it("stripSlash: sondaki / atılır, kök korunur, uzun / dizisi doğrusal (ReDoS yok)", () => {
+    expect(stripSlash("/a/b//")).toBe("/a/b");
+    expect(stripSlash("/")).toBe("/");
+    expect(stripSlash("///")).toBe("/");
+    const t0 = Date.now();
+    expect(stripSlash(`/x${"/".repeat(200_000)}`)).toBe("/x");
+    expect(Date.now() - t0).toBeLessThan(2_000);
   });
 
   it("parseVmState: eksik/bozuk alan reddedilir; sondaki / atılır", () => {

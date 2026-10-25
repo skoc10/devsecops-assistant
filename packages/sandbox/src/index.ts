@@ -26,6 +26,7 @@ export {
   parseVmState,
   remoteKillCommand,
   shellQuote,
+  stripSlash,
   translateSpec,
   withCallMarker,
 } from "./vm.ts";
