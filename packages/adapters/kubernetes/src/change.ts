@@ -252,6 +252,34 @@ export async function previewApply(client: K8sClient, manifest: string): Promise
   };
 }
 
+/** Sunucu kaynaklı alan yolu / yönetici adı: yalnız kısa, boşluksuz tanımlayıcı biçimi geçer (serbest metin değil). */
+const SAFE_FIELD = /^[A-Za-z0-9_.\-[\]="/:{}]{1,160}$/;
+const SAFE_MANAGER = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * Server-side apply 409'u: `reason: Conflict` + `details.causes[].reason: FieldManagerConflict` ise alan sahipliği
+ * çakışmasıdır (başka bir alan yöneticisi — ör. GitOps denetleyicisi, kubectl — bu alanları farklı değerle yönetiyor).
+ * Gerçek kümede (kind) doğrulandı; sahte API bu ayrımı yapmıyordu. `force` hiçbir zaman kullanılmaz.
+ */
+export function fieldManagerConflicts(resp: ApiResponse): { field: string; manager: string }[] {
+  let j: unknown;
+  try {
+    j = JSON.parse(resp.body);
+  } catch {
+    return [];
+  }
+  if (!isObj(j) || j["reason"] !== "Conflict" || !isObj(j["details"]) || !Array.isArray(j["details"]["causes"])) return [];
+  return (j["details"]["causes"] as unknown[])
+    .filter(isObj)
+    .filter((c) => c["reason"] === "FieldManagerConflict")
+    .slice(0, 10)
+    .map((c) => {
+      const field = typeof c["field"] === "string" && SAFE_FIELD.test(c["field"]) ? c["field"] : "?";
+      const m = /conflict with "([^"]{1,128})"/.exec(typeof c["message"] === "string" ? c["message"] : "")?.[1] ?? "";
+      return { field, manager: SAFE_MANAGER.test(m) ? m : "?" };
+    });
+}
+
 export async function doApply(client: K8sClient, manifest: string, approvedVersion: string | undefined): Promise<RawToolOutput> {
   const parsed = parseManifest(manifest);
   if (approvedVersion === undefined) throw new OpsError("approval_version_missing", "onaylanan hedef sürümü yok; uygulama reddedildi");
@@ -263,7 +291,17 @@ export async function doApply(client: K8sClient, manifest: string, approvedVersi
   } else {
     const body = { ...obj, metadata: { ...(obj["metadata"] as Obj), resourceVersion: approvedVersion } };
     resp = await client.patch(resourcePath(kind, namespace, name), body, "application/apply-patch+yaml", { fieldManager: FIELD_MANAGER, force: false });
-    if (resp.status === 409) throw new OpsError("target_changed", `${ref} onaydan sonra değişti veya başka bir yönetici alanıyla çakışıyor (409); hiçbir şey uygulanmadı`);
+    if (resp.status === 409) {
+      const conflicts = fieldManagerConflicts(resp);
+      if (conflicts.length > 0) {
+        throw new OpsError(
+          "field_manager_conflict",
+          `${ref}: alan sahipliği çakışması (server-side apply, 409): ${conflicts.map((c) => `${c.field} → '${c.manager}'`).join(", ")}. ` +
+            "Bu alanları başka bir yönetici farklı değerle yönetiyor; hiçbir şey uygulanmadı (zorla devralma yapılmaz). Değişikliği o yöneticinin kaynağında (ör. GitOps deposu) yapın veya alanı manifestten çıkarın",
+        );
+      }
+      throw new OpsError("target_changed", `${ref} onaydan sonra değişti (resourceVersion ön koşulu, 409); hiçbir şey uygulanmadı`);
+    }
   }
   const j = jsonOf(resp, `${ref} uygulama`);
   return {
