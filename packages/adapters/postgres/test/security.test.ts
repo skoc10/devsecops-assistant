@@ -303,7 +303,10 @@ describe.skipIf(!pg)("limitler ve sürücü davranışı", () => {
     const d = await h.openSession({ maxRows: 10, maxBytes: 10_000, timeoutMs: 400 });
     try {
       const t0 = Date.now();
-      await expect(d.session.executeRead("SELECT count(*) FROM generate_series(1, 1000000000)", d.limits)).rejects.toThrow(/\[57014\]|statement timeout/);
+      // pg_sleep iptal sinyaline hemen yanıt verir. Eskiden `count(*) FROM generate_series(1, 1e9)` kullanılıyordu: FROM'daki
+      // küme döndüren fonksiyon satırları önce tuplestore'a yazar, iptal gecikmesi runner G/Ç'sine bağlıydı (CI'da 3–5,5 sn;
+      // 400 ms zaman aşımına rağmen 5 sn sınırı ara sıra aşılıyordu). 30 sn'lik uyku ancak sunucu iptal ederse erken biter.
+      await expect(d.session.executeRead("SELECT pg_sleep(30)", d.limits)).rejects.toThrow(/\[57014\]|statement timeout/);
       expect(Date.now() - t0).toBeLessThan(5_000);
       // bağlantı hata sonrası kullanılabilir
       const ok = await d.session.executeRead("SELECT 1 AS one", d.limits);

@@ -306,10 +306,13 @@ describe.skipIf(!cluster)("gerçek küme (kind)", () => {
       expect((j.findings as Obj[]).filter((f) => f.severity === "critical")).toEqual([]);
     });
 
-    it("salt okunur SA Secret listeleyemez (gerçek 403) ve k8s.auth.can_i gerçek kurallarla tutarlı", async () => {
+    it("salt okunur SA Secret listeleyemez: PEP önce durdurur (taint + secret-adjacent), küme de gerçek 403 verir; can_i tutarlı", async () => {
+      // Birinci hat (tasarım gereği): bağlam güvenilmez ConfigMap/olay içeriği aldı; secret-adjacent okuma onay ister,
+      // bu çalışma zamanında onay kapısı yok → API'ye hiç gidilmez.
       const s = await call(rt, "reader", "k8s.resources.list", { kind: "Secret", namespace: NS });
-      expect(s.status).toBe("error");
-      expect(s.summary).toMatch(/403|yetki yok/);
+      expect(s).toMatchObject({ status: "denied", reasonCode: "approval_unavailable" });
+      // İkinci hat: AYNI ServiceAccount kimliğiyle API'ye doğrudan gidildiğinde kümenin RBAC'ı reddeder (gerçek 403)
+      await expect(direct(rt, "reader", "k8s.resources.list", { kind: "Secret", namespace: NS })).rejects.toThrow(/403/);
       const yes = evidence(rt, await call(rt, "reader", "k8s.auth.can_i", { namespace: NS, verb: "list", resource: "pods" }));
       const no = evidence(rt, await call(rt, "reader", "k8s.auth.can_i", { namespace: NS, verb: "delete", resource: "pods" }));
       const sec = evidence(rt, await call(rt, "reader", "k8s.auth.can_i", { namespace: NS, verb: "get", resource: "secrets" }));
@@ -350,14 +353,21 @@ describe.skipIf(!cluster)("gerçek küme (kind)", () => {
       await rt.close();
     });
 
-    it("k8s.apply: yeni nesne POST ile oluşur, sonraki değişiklik gerçek server-side apply ile uygulanır (alan yöneticisi ops-assistant)", async () => {
+    it("k8s.apply: yeni nesne de server-side apply ile oluşur; sonraki değişiklik kendi alanlarıyla çakışmaz (alan yöneticisi ops-assistant/Apply)", async () => {
       const m1 = manifestOf(deployment("ops-new", { version: "v1" }));
       const d = await call(rt, W, "k8s.apply.diff", { manifest: m1 });
       expect(d.status, JSON.stringify(d)).toBe("ok");
       expect(evidence(rt, d)).toMatchObject({ exists: false, version: "yok" });
       const c = await call(rt, W, "k8s.apply", { manifest: m1 }, [d.evidenceId as string]);
       expect(c.status, JSON.stringify(c)).toBe("ok");
-      expect((await settled("ops-new")).spec.template.spec.containers[0].env).toEqual([{ name: "VERSION", value: "v1" }]);
+      const created = await settled("ops-new");
+      expect(created.spec.template.spec.containers[0].env).toEqual([{ name: "VERSION", value: "v1" }]);
+      // oluşturma Apply işlemiyle: ops-assistant için Update girdisi YOK (POST+Apply aynı yöneticiyle çakışıyordu)
+      expect((created.metadata.managedFields as Obj[]).filter((f) => f.manager === "ops-assistant").map((f) => f.operation)).toEqual(["Apply"]);
+
+      // "yalnız yoksa oluştur": 'yok' onayıyla var olan nesneye gidilirse gerçek sunucu uid koşuluyla reddeder, nesne değişmez
+      await expect(direct(rt, W, "k8s.apply", { manifest: manifestOf(deployment("ops-new", { version: "v9" })) }, "yok")).rejects.toMatchObject({ code: "target_changed" });
+      expect((await live("Deployment", "ops-new"))?.spec?.template?.spec?.containers?.[0]?.env).toEqual([{ name: "VERSION", value: "v1" }]);
 
       const m2 = manifestOf(deployment("ops-new", { version: "v2" }));
       const u = await call(rt, W, "k8s.apply", { manifest: m2 }, [await getEv("Deployment", "ops-new")]);
