@@ -74,6 +74,24 @@ describe("M4 tablo maskeleme", () => {
     expect(String(out.rows[0]?.[0])).toMatch(/^h:/);
   });
 
+  it("`g`/`y` bayraklı sütun kuralı ve ek dedektör durum taşımaz (aynı adlı ikinci sütun, ikinci geçiş)", () => {
+    const rules = {
+      columns: [{ match: /^email$/g, action: "hash" as const }],
+      extraDetectors: [{ id: "musteri-no", regex: /\bMN-\d{6}\b/ }],
+    };
+    const t = {
+      columns: [{ name: "email" }, { name: "email" }, { name: "note" }],
+      rows: [
+        ["a@example.invalid", "b@example.invalid", "MN-123456 ve MN-654321"],
+        ["c@example.invalid", "d@example.invalid", "MN-111111"],
+      ],
+    };
+    for (let pass = 0; pass < 2; pass++) {
+      const out = maskTable(t, rules, new MaskingContext(), new Counter());
+      expect(JSON.stringify(out.rows)).not.toMatch(/example\.invalid|MN-\d/);
+    }
+  });
+
   it("drop eylemi sütunu kaldırır", () => {
     const rules = { columns: [{ match: /^note$/, action: "drop" as const }] };
     const out = maskTable(table, rules, new MaskingContext(), new Counter());

@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { ColumnInfo } from "@ops/contracts";
 import { Counter, redacted } from "./counter.ts";
+import { globalRegExp, statelessRegExp } from "./regex.ts";
 
 /**
  * M4: alan/kolon maskesi. Sütun adı kuralları + değer dedektörleri.
@@ -102,7 +103,8 @@ export function maskByDetectors(text: string, counter: Counter, rules: MaskingRu
     return redacted("phone");
   });
   for (const d of rules.extraDetectors ?? []) {
-    out = out.replace(d.regex, () => {
+    // `g`siz/`y`li dedektör yalnız ilk/ardışık geçişi maskelerdi
+    out = out.replace(globalRegExp(d.regex), () => {
       counter.add(`m4:${d.id}`);
       return redacted(d.id);
     });
@@ -140,7 +142,8 @@ export interface Table {
 export function maskTable(table: Table, rules: MaskingRules, ctx: MaskingContext, counter: Counter): Table {
   const ruleFor = (c: ColumnInfo): ColumnRule | undefined => {
     const names = [c.name, c.origin ? `${c.origin.relation}.${c.origin.column}` : ""];
-    return rules.columns.find((r) => names.some((n) => n !== "" && r.match.test(n)));
+    // `g`/`y`li kural `lastIndex` taşır: aynı adlı ikinci sütun maskesiz kalırdı
+    return rules.columns.find((r) => names.some((n) => n !== "" && statelessRegExp(r.match).test(n)));
   };
   const plan = table.columns.map((c) => ({ col: c, rule: ruleFor(c) }));
   const keepIdx = plan.map((p, i) => ({ p, i })).filter(({ p }) => p.rule?.action !== "drop");
