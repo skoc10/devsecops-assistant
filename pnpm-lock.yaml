@@ -251,6 +251,9 @@ importers:
       '@ops/core':
         specifier: workspace:*
         version: link:../core
+      '@ops/diff':
+        specifier: workspace:*
+        version: link:../diff
       '@ops/mcp-bridge':
         specifier: workspace:*
         version: link:../mcp-bridge
@@ -278,6 +281,9 @@ importers:
       '@ops/workspace':
         specifier: workspace:*
         version: link:../workspace
+      yaml:
+        specifier: ^2.0.0
+        version: 2.9.1
       zod:
         specifier: ^4.0.0
         version: 4.6.7
@@ -285,9 +291,6 @@ importers:
       '@ops/testkit':
         specifier: workspace:*
         version: link:../testkit
-      yaml:
-        specifier: ^2.0.0
-        version: 2.9.1
 
   packages/contracts:
     dependencies:

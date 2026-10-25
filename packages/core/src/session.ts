@@ -17,6 +17,22 @@ export interface ActiveSkill {
   readonly toolsets: readonly string[];
 }
 
+/** Geçici tavan yükseltmesi (break-glass): oturuma özgü, süreli, gerekçeli. */
+export interface BreakGlassGrant {
+  readonly id: string;
+  readonly profileId: string;
+  readonly kind: ProfileKind;
+  /** Yükseltmeden önceki profil (süre bitince/elle bitince bağlanan). */
+  readonly original: Profile;
+  /** Yalnız `classCeiling` yükseltilmiş kopya. */
+  readonly raised: Profile;
+  readonly reason: string;
+  readonly startedAt: string;
+  readonly expiresAt: string;
+  /** Yeniden kimlik doğrulama yöntemi (ör. `vault-passphrase`). */
+  readonly reauth: string;
+}
+
 export interface SessionUsage {
   toolCalls: number;
   /** Model çağrılarının raporladığı toplam (girdi+çıktı) token. */
@@ -47,6 +63,8 @@ export class Session {
    */
   readonly writeGrants = new Set<string>();
   static readonly BASE_TOOLSETS: readonly string[] = ["core"];
+  /** Etkin break-glass hibeleri (profil kimliği → hibe). Süre denetimi PEP'te (gateway) yapılır. */
+  readonly breakGlass = new Map<string, BreakGlassGrant>();
   private readonly bound = new Map<ProfileKind, Profile>();
 
   constructor(id: string = randomUUID()) {
@@ -65,6 +83,23 @@ export class Session {
       this.epoch += 1;
     }
     this.bound.set(profile.kind, profile);
+  }
+
+  /** Bağlı profilin yerine tavanı yükseltilmiş kopyayı koyar (çağ DEĞİŞMEZ: aynı profil, aynı kanıtlar). */
+  startBreakGlass(grant: BreakGlassGrant): void {
+    const cur = this.bound.get(grant.kind);
+    if (!cur || cur.id !== grant.profileId) throw new OpsError("profile_not_bound", `profil oturuma bağlı değil: ${grant.profileId}`);
+    this.bound.set(grant.kind, grant.raised);
+    this.breakGlass.set(grant.profileId, grant);
+  }
+
+  /** Hibeyi kaldırır ve özgün profili geri bağlar. Hibe yoksa `undefined`. */
+  endBreakGlass(profileId: string): BreakGlassGrant | undefined {
+    const g = this.breakGlass.get(profileId);
+    if (!g) return undefined;
+    this.breakGlass.delete(profileId);
+    if (this.bound.get(g.kind)?.id === profileId) this.bound.set(g.kind, g.original);
+    return g;
   }
 
   unbind(kind: ProfileKind): void {

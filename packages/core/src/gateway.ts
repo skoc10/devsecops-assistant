@@ -89,6 +89,7 @@ interface CallState {
   profile?: Profile;
   target?: Target;
   cls?: RiskClass;
+  breakGlass?: string;
 }
 
 /**
@@ -103,15 +104,33 @@ export class ToolGateway {
   private readonly now: () => Date;
   private readonly newId: () => string;
 
+  /** Uçuştaki çağrı → break-glass hibe kimliği: o çağrının TÜM denetim kayıtları etiketlenir. */
+  private readonly bg = new Map<string, string>();
+
   constructor(deps: GatewayDeps) {
-    this.d = deps;
     this.now = deps.now ?? (() => new Date());
     this.newId = deps.newId ?? (() => randomUUID());
+    const base = deps.audit;
+    const tagged: AuditSink = {
+      append: (e) => {
+        const id = e.callId ? this.bg.get(e.callId) : undefined;
+        return base.append(id && !e.breakGlass ? { ...e, breakGlass: id } : e);
+      },
+    };
+    this.d = { ...deps, audit: tagged };
   }
 
   async invoke(req: InvokeRequest): Promise<ToolResult> {
-    const { registry, session, policy, audit, evidence, known } = this.d;
     const st: CallState = { callId: this.newId(), req };
+    try {
+      return await this.invokeInner(req, st);
+    } finally {
+      this.bg.delete(st.callId);
+    }
+  }
+
+  private async invokeInner(req: InvokeRequest, st: CallState): Promise<ToolResult> {
+    const { registry, session, policy, audit, evidence, known } = this.d;
 
     const reg = registry.get(req.tool);
     if (!reg) return this.deny(st, "unknown_tool", `bilinmeyen araç: ${req.tool}`);
@@ -134,8 +153,24 @@ export class ToolGateway {
     let profile: Profile | null = null;
     if (desc.profileKind !== null) {
       if (!req.profile) return this.deny(st, "profile_unknown", "profil belirtilmedi");
-      const p = session.getBound(req.profile);
+      let p = session.getBound(req.profile);
       if (!p) return this.deny(st, "profile_not_bound", `profil oturuma bağlı değil: ${req.profile}`);
+      // Break-glass: süresi dolduysa tavan ÖNCE düşürülür (fail-safe), sonra denetlenir; etkinse çağrı etiketlenir.
+      const grant = session.breakGlass.get(p.id);
+      if (grant) {
+        if (this.now().getTime() >= Date.parse(grant.expiresAt)) {
+          session.endBreakGlass(p.id);
+          try {
+            await audit.append({ event: "break_glass", sessionId: session.id, profile: p.id, environment: grant.original.environment, breakGlass: grant.id, decision: "deny", message: "bitir neden=expired" });
+          } catch {
+            return this.deny(st, "audit_unavailable", "break-glass bitiş kaydı yazılamadı; çağrı çalıştırılmadı", { skipAudit: true });
+          }
+          p = session.getBound(req.profile) ?? p;
+        } else {
+          this.bg.set(st.callId, grant.id);
+          st.breakGlass = grant.id;
+        }
+      }
       if (p.kind !== desc.profileKind) {
         return this.deny(st, "kind_mismatch", `araç '${desc.profileKind}' profili ister, '${p.id}' '${p.kind}'`);
       }
@@ -263,6 +298,12 @@ export class ToolGateway {
         }),
         taintedContext: session.context.tainted,
         why: decision.reasonCode,
+        ...(profile && session.breakGlass.get(profile.id)
+          ? (() => {
+              const g = session.breakGlass.get(profile.id) as NonNullable<ReturnType<typeof session.breakGlass.get>>;
+              return { breakGlass: { id: g.id, reason: scrubText(g.reason, known), expiresAt: g.expiresAt, originalCeiling: g.original.classCeiling } };
+            })()
+          : {}),
         ...(preview
           ? {
               preview: {
@@ -299,6 +340,14 @@ export class ToolGateway {
       if (!hashOk) return this.deny(st, "approval_denied", "onay başka bir eyleme ait (eylem hash'i uyuşmuyor)");
       approvalId = outcome.approvalId;
       if (isLocalWrite && decision.reasonCode === "approval_required" && st.cls === "read" && !session.context.tainted) session.writeGrants.add(desc.name);
+    }
+
+    // Break-glass onay beklerken bitmiş/süresi dolmuş olabilir: yükseltilmiş tavanla verilen karar GEÇERSİZ.
+    if (st.breakGlass && profile) {
+      const live = session.breakGlass.get(profile.id);
+      if (!live || live.id !== st.breakGlass || this.now().getTime() >= Date.parse(live.expiresAt)) {
+        return this.deny(st, "ceiling_exceeded", "break-glass süresi/izni bu çağrı beklerken sona erdi; çağrı çalıştırılmadı");
+      }
     }
 
     // 8. Denetim: intent (write-ahead). Yazılamazsa ÇALIŞTIRMA.

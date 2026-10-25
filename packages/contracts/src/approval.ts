@@ -24,6 +24,8 @@ export interface CanonicalActionSummary {
   };
   /** Onayın kapsamı hakkında PEP'in kendi notu (ör. oturum boyunca çalışma alanı yazımları). */
   readonly note?: string;
+  /** Profilin tavanı break-glass ile GEÇİCİ yükseltilmiş: onay ekranında belirgin gösterilir. */
+  readonly breakGlass?: { readonly id: string; readonly reason: string; readonly expiresAt: string; readonly originalCeiling: RiskClass };
 }
 
 export interface ApprovalRequest {

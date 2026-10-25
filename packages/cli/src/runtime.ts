@@ -1,4 +1,5 @@
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { initSqlClassifier, mergeCatalogs, parseCatalog, shellCommandClassifier } from "@ops/classifiers";
 import type { CommandCatalog } from "@ops/classifiers";
 import { TerminalAdapter, assertSafeWorkdir } from "@ops/terminal";
@@ -20,13 +21,14 @@ import {
 } from "@ops/broker";
 import type { ProfileRegistryOptions } from "@ops/broker";
 import type { AgentRuntime, ApprovalGate, DoctorReport, ModelProvider, Profile, SecretStore } from "@ops/contracts";
-import { ChangeStore, EvidenceStore, Orchestrator, RuntimeOrchestrator, Session, ToolGateway, ToolRegistry, createChangeAdapter, createLocalAdapter } from "@ops/core";
+import { BreakGlassController, ChangeStore, EvidenceStore, Orchestrator, RuntimeOrchestrator, Session, ToolGateway, ToolRegistry, createChangeAdapter, createLocalAdapter, renderBreakGlassReview } from "@ops/core";
 import { DEFAULT_POLICY, PolicyEngine, loadPolicyFile } from "@ops/policy";
 import type { PolicyDocument } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { SkillRegistry, createSkillAdapter } from "@ops/skills";
+import { readAuditRecords } from "./backend.ts";
 import { BUILTIN_CATALOG_FILE, BUILTIN_POLICY_FILE, BUILTIN_SKILLS_DIR, ensureHome } from "./paths.ts";
 import type { OpsPaths } from "./paths.ts";
 
@@ -77,6 +79,8 @@ export interface Runtime {
   /** `mcp-servers.yaml` varsa MCP istemci köprüsü; yoksa `null`. */
   readonly mcp: McpBridgeAdapter | null;
   readonly sandbox: Sandbox | null;
+  /** Geçici tavan yükseltme (break-glass); başlatma çağıranın yeniden kimlik doğrulama kanıtını ister. */
+  readonly breakGlass: BreakGlassController;
   /** Profili doktordan geçirir (bağlamaz). */
   diagnose(id: string): Promise<DoctorReport>;
   /** Profili doktordan geçirip oturuma bağlar; `bindable=false` ise BAĞLAMAZ. */
@@ -230,9 +234,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     message: `sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
   });
 
-  const diagnoseProfile = async (id: string): Promise<{ report: DoctorReport; profile: Profile }> => {
-    const profile: Profile | undefined = registry.get(id);
-    if (!profile) throw new Error(`profil bulunamadı: ${id}`);
+  const diagnoseWith = async (profile: Profile): Promise<{ report: DoctorReport; profile: Profile }> => {
     const doctorAdapter =
       profile.kind === "k8s" ? adapter : profile.kind === "db" ? postgres : profile.kind === "pipeline" ? githubActions : profile.kind === "scm" ? githubScm : null;
     if (!doctorAdapter) throw new Error(`bu sürümde yalnız 'k8s', 'db', 'pipeline' ve 'scm' profilleri bağlanabilir: ${profile.kind}`);
@@ -253,6 +255,16 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     });
     return { report, profile };
   };
+  const diagnoseProfile = async (id: string): Promise<{ report: DoctorReport; profile: Profile }> => {
+    const profile: Profile | undefined = registry.get(id);
+    if (!profile) throw new Error(`profil bulunamadı: ${id}`);
+    return diagnoseWith(profile);
+  };
+
+  // Break-glass: yükseltilmiş kopya, FİİLİ yetkiye karşı (doktor) sınanır; denetim yazılamazsa başlamaz.
+  const breakGlass = new BreakGlassController({ session, audit, doctor: async (raised) => (await diagnoseWith(raised)).report, ...(o.now ? { now: o.now } : {}) });
+  const sweeper = setInterval(() => void breakGlass.sweep(), 15_000);
+  sweeper.unref();
 
   let closed = false;
   const rt: Runtime = {
@@ -277,12 +289,18 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     iac,
     mcp,
     sandbox,
+    breakGlass,
     async diagnose(id: string): Promise<DoctorReport> {
       return (await diagnoseProfile(id)).report;
     },
     async bindProfile(id: string): Promise<DoctorReport> {
       const { report, profile } = await diagnoseProfile(id);
-      if (report.bindable) session.bind(profile, { replace: true });
+      if (report.bindable) {
+        // Yeniden bağlama / başka profile geçiş: aynı türdeki etkin break-glass biter (yükseltme taşınmaz).
+        const cur = session.boundByKind(profile.kind);
+        if (cur && session.breakGlass.has(cur.id)) await breakGlass.end(cur.id, "rebind");
+        session.bind(profile, { replace: true });
+      }
       return report;
     },
     createOrchestrator(provider, options) {
@@ -321,6 +339,18 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     async close() {
       if (closed) return;
       closed = true;
+      clearInterval(sweeper);
+      await breakGlass.endAll("session_end");
+      // İnceleme dosyası denetim kayıtlarından üretilir (hash zinciriyle korunan kaynak).
+      try {
+        const md = renderBreakGlassReview(await readAuditRecords(o.paths.auditLog), session.id);
+        if (md) {
+          await mkdir(o.paths.breakGlassDir, { recursive: true, mode: 0o700 });
+          await writeFile(join(o.paths.breakGlassDir, `${session.id}.md`), md, { mode: 0o600 });
+        }
+      } catch {
+        /* inceleme dosyası yazılamadıysa kayıtlar denetimde zaten durur */
+      }
       await audit.append({ event: "session_end", sessionId: session.id, message: `toolCalls=${session.usage.toolCalls}` }).catch(() => undefined);
       broker.clearExecCache();
       if ("close" in store && typeof (store as { close?: unknown }).close === "function") (store as { close(): void }).close();

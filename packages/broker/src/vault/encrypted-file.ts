@@ -120,6 +120,28 @@ export class EncryptedFileStore implements SecretStore {
     }
   }
 
+  /**
+   * Parolanın kasayı AÇTIĞINI doğrular (yeniden kimlik doğrulama: break-glass, politika düzenleme). Kasayı
+   * açmaz, durum değiştirmez; yanlış parola/yok/bozuk dosya `false` döner (hata ayrıntısı sızdırmaz).
+   */
+  static async verify(path: string, passphrase: Uint8Array): Promise<boolean> {
+    try {
+      const existing = JSON.parse(await readFile(path, "utf8")) as VaultFile;
+      if (existing.version !== 1 || existing.kdf?.name !== "scrypt") return false;
+      const key = await deriveKey(passphrase, existing.kdf);
+      try {
+        open(key, CHECK_NAME, existing.check);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        key.fill(0);
+      }
+    } catch {
+      return false;
+    }
+  }
+
   private requireKey(): Buffer {
     if (!this.key) throw new OpsError("vault_locked", "kasa kilitli");
     return this.key;

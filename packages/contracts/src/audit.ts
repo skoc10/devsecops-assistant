@@ -11,6 +11,8 @@ export const AUDIT_EVENTS = [
   "model_call",
   "approval",
   "alarm",
+  "break_glass",
+  "policy_change",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
@@ -35,6 +37,8 @@ export const AuditBodySchema = z.strictObject({
   decision: z.enum(POLICY_EFFECTS).optional(),
   reasonCode: z.enum(REASON_CODES).optional(),
   approvalId: z.string().optional(),
+  /** Bu kayıt bir break-glass izni (hibe kimliği) süresince yazıldı. */
+  breakGlass: z.string().optional(),
   actionHash: z.string().optional(),
   argsRedacted: z.unknown().optional(),
   exitStatus: z.string().optional(),

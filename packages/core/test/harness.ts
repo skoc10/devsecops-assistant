@@ -57,6 +57,8 @@ export interface HarnessOpts {
   classifiers?: readonly CommandClassifier[];
   handlers?: Partial<Record<string, (args: Record<string, unknown>) => RawToolOutput | Promise<RawToolOutput>>>;
   providerSecret?: string;
+  /** Saat enjeksiyonu (break-glass süre testleri). */
+  now?: () => Date;
 }
 
 export async function makeHarness(opts: HarnessOpts = {}) {
@@ -108,6 +110,7 @@ export async function makeHarness(opts: HarnessOpts = {}) {
     registry, session, policy, audit, broker, evidence, known,
     ...(opts.approval ? { approval: opts.approval } : {}),
     ...(opts.classifiers ? { classifiers: opts.classifiers } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
   });
 
   const profile: Profile = makeTestProfile({ id: "test-k8s", ...(opts.profile ?? {}) });

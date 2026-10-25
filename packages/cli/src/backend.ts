@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { AuditRecordSchema } from "@ops/contracts";
 import type { AuditRecord, DoctorReport } from "@ops/contracts";
-import { formatUsage, usageFromAudit } from "@ops/core";
+import { breakGlassBanner, formatUsage, usageFromAudit } from "@ops/core";
 import type { OrchestratorEvent } from "@ops/core";
-import type { ChatBackend, ProfileRow } from "./chat.ts";
+import type { BreakGlassStartArgs, ChatBackend, ProfileRow } from "./chat.ts";
 import type { Runtime } from "./runtime.ts";
 
 export async function readAuditRecords(path: string): Promise<AuditRecord[]> {
@@ -48,5 +48,17 @@ export class LocalBackend implements ChatBackend {
   }
   async usage(): Promise<string> {
     return formatUsage(usageFromAudit(await readAuditRecords(this.rt.paths.auditLog), this.rt.session.id));
+  }
+  async breakGlassStatus(): Promise<string[]> {
+    await this.rt.breakGlass.sweep();
+    return this.rt.breakGlass.status().map(breakGlassBanner);
+  }
+  async breakGlassStart(a: BreakGlassStartArgs): Promise<string[]> {
+    await this.rt.breakGlass.start({ profileId: a.profile, ceiling: a.ceiling, ttlSec: a.ttlSec, reason: a.reason, reauth: { method: a.reauth.method, verifiedAt: new Date(a.reauth.verifiedAtMs) } });
+    return this.rt.breakGlass.status().map(breakGlassBanner);
+  }
+  async breakGlassEnd(profileId: string): Promise<string> {
+    const g = await this.rt.breakGlass.end(profileId, "user");
+    return g ? `break-glass bitti: ${g.profileId} (tavan ${g.original.classCeiling}'a döndü)` : `'${profileId}' için etkin break-glass yok`;
   }
 }

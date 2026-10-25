@@ -38,7 +38,8 @@ export const PATTERN_RULES: readonly PatternRule[] = [
   { id: "github-token", regex: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,})\b/g },
   { id: "gitlab-token", regex: /\bglpat-[A-Za-z0-9_-]{20,}\b/g },
   { id: "slack-token", regex: /\bxox[abposr]-[A-Za-z0-9-]{10,}\b/g },
-  { id: "google-api-key", regex: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  // sondaki \b DEĞİL: anahtar `-` ile bitebilir (\b yalnız kelime karakterinde sınır sayar) ve {35} geri izleme yapamaz
+  { id: "google-api-key", regex: /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g },
   { id: "stripe-key", regex: /\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}\b/g },
   { id: "npm-token", regex: /\bnpm_[A-Za-z0-9]{36}\b/g },
   { id: "bearer-token", regex: /\b(Bearer\s+)([A-Za-z0-9._~+/=-]{16,})/gi, group: 2 },

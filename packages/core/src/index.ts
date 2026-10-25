@@ -29,3 +29,6 @@ export type { Timeline, TimelineEvent, TimelineLink, TimelineOptions, TimelineSo
 
 export { ChangeStore, createChangeAdapter, CHANGE_KINDS } from "./changeset.ts";
 export type { ChangeAdapterOptions, ChangeKind, ChangeSet } from "./changeset.ts";
+export { BREAK_GLASS_MAX_TTL_SEC, BREAK_GLASS_MIN_TTL_SEC, BreakGlassController, breakGlassBanner, renderBreakGlassReview } from "./breakglass.ts";
+export type { BreakGlassDeps, BreakGlassRequest, BreakGlassStatus, ReauthProof } from "./breakglass.ts";
+export type { BreakGlassGrant } from "./session.ts";

@@ -53,6 +53,9 @@ describe("policy.yaml şeması", () => {
   it.each([
     ["süresiz allow", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 1, hardSessionTokens: 2}\nrules:\n  - {id: a, when: {tool: "k8s.scale", profile: "p"}, effect: allow}`, /expires/],
     ["deploy için allow", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 1, hardSessionTokens: 2}\nrules:\n  - {id: a, when: {tool: "k8s.apply", profile: "p", class: [deploy]}, effect: allow, expires: "2099-01-01T00:00:00Z"}`, /deploy\/destroy/],
+    ["joker araç adıyla allow", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 1, hardSessionTokens: 2}\nrules:\n  - {id: a, when: {tool: "k8s.*", profile: "p"}, effect: allow, expires: "2099-01-01T00:00:00Z"}`, /araç adı tam/],
+    ["joker profille allow", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 1, hardSessionTokens: 2}\nrules:\n  - {id: a, when: {tool: "k8s.scale", profile: "*"}, effect: allow, expires: "2099-01-01T00:00:00Z"}`, /profil kimliği tam/],
+    ["prod için allow", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 1, hardSessionTokens: 2}\nrules:\n  - {id: a, when: {tool: "k8s.scale", profile: "p", environment: [prod]}, effect: allow, expires: "2099-01-01T00:00:00Z"}`, /prod için allow/],
     ["geniş allow (profilsiz)", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 1, hardSessionTokens: 2}\nrules:\n  - {id: a, when: {tool: "*"}, effect: allow, expires: "2099-01-01T00:00:00Z"}`, /daraltılmalı/],
     ["soft > hard", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 5, hardSessionTokens: 2}\nrules: []`, /soft/],
     ["yinelenen id", `version: 1\nbudgets: {maxToolCalls: 1, maxResultTokens: 1, softSessionTokens: 1, hardSessionTokens: 2}\nrules:\n  - {id: a, when: {}, effect: deny}\n  - {id: a, when: {}, effect: deny}`, /yinelenen/],
@@ -139,6 +142,13 @@ describe("kurallar", () => {
     expect(engine(allow()).decide(tainted)).toMatchObject({ effect: "ask" });
     const noCeiling = mut({ profile: makeTestProfile({ classCeiling: "read" }) });
     expect(engine(allow()).decide(noCeiling)).toMatchObject({ effect: "deny", reasonCode: "ceiling_exceeded" });
+  });
+
+  it("prod profilinde allow kuralı eşleşse bile mutasyon HER ZAMAN sorar (şema when.environment'ı yasaklar, motor profili kendisi denetler)", () => {
+    const prod = mut({ profile: makeTestProfile({ classCeiling: "mutate", environment: "prod" }) });
+    expect(engine(allow()).decide(prod)).toMatchObject({ effect: "ask", reasonCode: "approval_required" });
+    const stage = mut({ profile: makeTestProfile({ classCeiling: "mutate", environment: "stage" }) });
+    expect(engine(allow()).decide(stage)).toMatchObject({ effect: "allow" });
   });
 
   it("deploy için allow kuralı etkisiz (şema da engeller, motor da gevşetmez)", () => {

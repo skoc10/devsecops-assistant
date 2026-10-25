@@ -3,7 +3,7 @@ import type { Socket } from "node:net";
 import { createInterface } from "node:readline";
 import type { DoctorReport } from "@ops/contracts";
 import type { OrchestratorEvent } from "@ops/core";
-import type { ChatBackend, ProfileRow } from "./chat.ts";
+import type { BreakGlassStartArgs, ChatBackend, ProfileRow } from "./chat.ts";
 
 interface Frame {
   id: number;
@@ -95,6 +95,15 @@ export class OpsdClient implements ChatBackend {
   }
   usage(): Promise<string> {
     return this.call<string>("usage.get");
+  }
+  breakGlassStatus(): Promise<string[]> {
+    return this.call<string[]>("breakglass.status");
+  }
+  breakGlassStart(a: BreakGlassStartArgs): Promise<string[]> {
+    return this.call<string[]>("breakglass.start", { ...a });
+  }
+  breakGlassEnd(profileId: string): Promise<string> {
+    return this.call<string>("breakglass.end", { profile: profileId });
   }
   ping(): Promise<{ pong: boolean; session: string }> {
     return this.call("ping");

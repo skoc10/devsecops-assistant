@@ -118,7 +118,8 @@ export class PolicyEngine {
     if (escalation && effect === "allow") return mk("ask", "taint_escalation", escalation);
 
     // 6. Dar allow kuralı yalnız sınıf kaynaklı taban `ask`'ı gevşetebilir (yalnız mutate, taint dışı)
-    if (effect === "ask" && baseAskFromClass && cls === "mutate" && tool.scope === "target" && !escalation) {
+    // prod'da "hep izin" YOK: kural eşleşse bile (şema yalnız when.environment'ı yasaklar) mutasyon her zaman sorar.
+    if (effect === "ask" && baseAskFromClass && cls === "mutate" && tool.scope === "target" && !escalation && profile?.environment !== "prod") {
       const allowRule = matching.find((r) => r.effect === "allow");
       if (allowRule) return mk("allow", "allowed", `kural: ${allowRule.id}`);
     }

@@ -26,6 +26,17 @@ describe("M2 desen kuralları", () => {
     }
   });
 
+  it("google-api-key: '-' ile biten anahtar da maskelenir (sondaki \\b kelime karakteri ister; eskiden kaçıyordu)", () => {
+    for (const tail of ["-", "_", "A", "9"]) {
+      const key = `AIza${"x".repeat(34)}${tail}`;
+      const { out } = run(`k: ${key} bitti`);
+      expect(out, tail).toContain("‹redacted:google-api-key›");
+      expect(out, tail).not.toContain(key.slice(4));
+    }
+    // 36 karakterlik gövde anahtar değildir (yanlış pozitif yok)
+    expect(run(`AIza${"x".repeat(36)}`).out).not.toContain("‹redacted:google-api-key›");
+  });
+
   it("kırpılmış (END'siz) özel anahtar bloğunu da maskeler", () => {
     const block = fake.privateKeyBlock();
     const truncated = block.slice(0, block.indexOf("-----END"));

@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Readable, Writable } from "node:stream";
@@ -7,21 +7,24 @@ import { FileAuditStorage, FileHeadAnchor, verifyAudit } from "@ops/audit";
 import { scanAmbientCredentials, scanAmbientEnv } from "@ops/broker";
 import { ENVIRONMENTS, OpsError, RISK_CLASSES } from "@ops/contracts";
 import type { Environment, ModelProvider, RiskClass, SecretStore } from "@ops/contracts";
-import { ChangeStore, formatUsage, usageFromAudit } from "@ops/core";
+import { ChangeStore, breakGlassBanner, formatUsage, renderBreakGlassReview, usageFromAudit } from "@ops/core";
 import { McpBridgeAdapter, parseMcpManifest } from "@ops/mcp-bridge";
 import { stripControlChars } from "@ops/redaction";
 import { WORKSPACE_ENGINES, WorkspaceManager, WorkspaceRegistry } from "@ops/workspace";
 import type { WorkspaceEngine } from "@ops/workspace";
-import { explainReason } from "@ops/policy";
+import { explainReason, parsePolicy } from "@ops/policy";
 import { detectSandbox } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { readAuditRecords, LocalBackend } from "./backend.ts";
 import type { Sender } from "./backend.ts";
 import { OpsdClient } from "./client.ts";
 import { renderDoctor, runChat } from "./chat.ts";
-import { TtyApprovalGate, openDevTty } from "./approval.ts";
+import { TtyApprovalGate, openDevTty, openDevTtyRaw } from "./approval.ts";
+import type { TtyIo } from "./approval.ts";
+import { parseDurationSec, reauthVaultPassphrase } from "./reauth.ts";
+import { DEFAULT_ALLOW_TTL_SEC, addRuleToText, buildAllowRule, parseTtlSec, policyHash, removeRuleFromText, renderPolicyDiff, renderRuleList } from "./policy-edit.ts";
 import { Opsd } from "./opsd.ts";
-import { ensureHome } from "./paths.ts";
+import { BUILTIN_POLICY_FILE, ensureHome } from "./paths.ts";
 import type { OpsPaths } from "./paths.ts";
 import { readPassphrase } from "./prompt.ts";
 import { registerBuiltinProviders } from "./builtin-providers.ts";
@@ -50,6 +53,10 @@ export interface CliEnv {
   readonly approval?: TtyApprovalGate;
   /** `daemon` komutunun beklemesini durduran sinyal (test). */
   readonly stop?: AbortSignal;
+  /** Kontrol terminali (yeniden kimlik doğrulama, politika düzenleme onayı). Varsayılan `/dev/tty`; açılamazsa işlem REDDEDİLİR. */
+  readonly openTty?: () => Promise<TtyIo | null>;
+  /** Test: kasa parolası doğrulayıcı (varsayılan: kasa dosyasına karşı). */
+  readonly reauthVerify?: (passphrase: Uint8Array) => Promise<boolean>;
 }
 
 const USAGE = [
@@ -75,6 +82,9 @@ const USAGE = [
   "  workspace export ID --out DOSYA [--session S]   değişiklikleri `git apply` ile uygulanabilir yama olarak yaz (depoya YAZMAZ)",
   "  change list | show ID | export ID --out DOSYA   ajanın önerdiği değişiklikler (ChangeSet); uygulamak size aittir",
   "  mcp check [SUNUCU]                 OPS_HOME/mcp-servers.yaml sunucularını sandbox'ta başlatıp manifestle karşılaştır (araç çağırmaz)",
+  "  break-glass --profile ID --ceiling mutate|deploy|destroy --ttl 30m --reason \"…\"   çalışan opsd oturumunda GEÇİCİ tavan yükseltme (yeniden kimlik doğrulama; sohbette /breakglass da olur)",
+  "  break-glass end --profile ID | status | review [--session S]",
+  "  policy list | allow --tool T --profile P [--scope a,b] [--ttl 8h] | add --effect ask|deny --id ID [--tool T --profile P --environment e,.. --class c,..] | rm ID   politika düzenleme (diff + TTY onayı + denetim)",
   "  daemon [--workspace ID]            opsd'yi başlat (UDS)",
   "  chat [--embedded] [--workspace ID] sohbet (opsd'ye bağlanır; --embedded süreç içi)",
   "  (ortam) OPS_WORKDIR=DİZİN          shell.run iş alanı (salt-okunur; OS sandbox gerekir; ev dizini olamaz)",
@@ -314,6 +324,158 @@ async function mcpCommand(c: CliEnv, sub: string | undefined, rest: string[]): P
   return bad === 0 ? 0 : 1;
 }
 
+/** Kontrol terminalinden tek satır okur (politika düzenleme onayı). TTY yoksa REDDEDİLİR. */
+async function confirmOnTty(c: CliEnv, question: string, want: string): Promise<boolean> {
+  const tty = await (c.openTty ?? openDevTty)().catch(() => null);
+  if (!tty) throw new OpsError("tty_required", "kontrol terminali (TTY) yok: onay verilemez");
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: tty.input, crlfDelay: Infinity });
+  try {
+    tty.output.write(question);
+    const next = await Promise.race([
+      rl[Symbol.asyncIterator]().next(),
+      new Promise<null>((r) => setTimeout(() => r(null), 120_000).unref()),
+    ]);
+    return next !== null && !next.done && String(next.value).trim() === want;
+  } finally {
+    rl.close();
+    tty.close?.();
+  }
+}
+
+async function readIfExists(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Yeniden kimlik doğrulama: kasa parolası kontrol terminalinden (yankısız); sohbet/opsd'ye parola GİTMEZ, yalnız kanıt. */
+function makeReauth(c: CliEnv): () => Promise<{ method: string; verifiedAtMs: number }> {
+  return async () => {
+    const p = await reauthVaultPassphrase({ openTty: c.openTty ?? openDevTtyRaw, vaultFile: c.paths.vaultFile, ...(c.reauthVerify ? { verify: c.reauthVerify } : {}) });
+    return { method: p.method, verifiedAtMs: p.verifiedAt.getTime() };
+  };
+}
+
+async function policyCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
+  const userText = await readIfExists(c.paths.policyFile);
+  const baseText = userText ?? (await readFile(BUILTIN_POLICY_FILE, "utf8"));
+  const source = userText === null ? "yerleşik varsayılan (henüz kullanıcı dosyası yok)" : c.paths.policyFile;
+  if (sub === undefined || sub === "list") {
+    out(c, `Politika kaynağı: ${source}`);
+    out(c, renderRuleList(parsePolicy(baseText), new Date()));
+    return 0;
+  }
+  if (!["allow", "add", "rm"].includes(sub)) throw new OpsError("usage", "kullanım: ops policy list | allow … | add … | rm ID");
+  const now = new Date();
+  return await withRuntime(c, async (rt) => {
+    // Kasa parolası withRuntime'da zaten istendi (yeniden kimlik doğrulama); değişiklik denetime yazılır.
+    let next: string;
+    let what: string;
+    if (sub === "allow") {
+      const { values } = parseArgs({ args: rest, options: { tool: { type: "string" }, profile: { type: "string" }, scope: { type: "string" }, ttl: { type: "string" }, id: { type: "string" }, description: { type: "string" } }, strict: true });
+      if (!values.tool || !values.profile) throw new OpsError("usage", "--tool ve --profile gerekli (tam ad; joker yok)");
+      const reg = rt.registry.get(values.profile);
+      const rule = buildAllowRule({
+        tool: values.tool,
+        profile: values.profile,
+        ...(values.scope ? { scope: list(values.scope) } : {}),
+        ttlSec: values.ttl ? parseTtlSec(values.ttl) : DEFAULT_ALLOW_TTL_SEC,
+        ...(values.description ? { description: values.description } : {}),
+        ...(values.id ? { id: values.id } : {}),
+        now,
+        registered: reg ? { environment: reg.environment, classCeiling: reg.classCeiling } : undefined,
+      });
+      next = addRuleToText(baseText, rule);
+      what = `ekle ${rule.id} (allow ${values.tool} @ ${values.profile}, bitiş ${rule.expires})`;
+    } else if (sub === "add") {
+      const { values } = parseArgs({ args: rest, options: { effect: { type: "string" }, id: { type: "string" }, tool: { type: "string" }, profile: { type: "string" }, environment: { type: "string" }, class: { type: "string" }, scope: { type: "string" }, description: { type: "string" } }, strict: true });
+      if ((values.effect !== "ask" && values.effect !== "deny") || !values.id) throw new OpsError("usage", "--effect ask|deny ve --id gerekli (gevşetici 'allow' için `ops policy allow`)");
+      const when = {
+        ...(values.tool ? { tool: values.tool } : {}),
+        ...(values.profile ? { profile: values.profile } : {}),
+        ...(values.environment ? { environment: list(values.environment) as Environment[] } : {}),
+        ...(values.class ? { class: list(values.class) as RiskClass[] } : {}),
+        ...(values.scope ? { scope: list(values.scope) } : {}),
+      };
+      if (Object.keys(when).length === 0) throw new OpsError("usage", "en az bir koşul gerekli (--tool/--profile/--environment/--class/--scope): her şeyi kapsayan kural yazılmaz");
+      next = addRuleToText(baseText, { id: values.id, ...(values.description ? { description: values.description } : {}), when, effect: values.effect });
+      what = `ekle ${values.id} (${values.effect})`;
+    } else {
+      const id = rest[0];
+      if (!id) throw new OpsError("usage", "kullanım: ops policy rm KURAL-ID");
+      next = removeRuleFromText(baseText, id);
+      what = `sil ${id}`;
+    }
+    const before = policyHash(parsePolicy(baseText));
+    const after = policyHash(parsePolicy(next));
+    out(c, `Politika kaynağı: ${source}\n${renderPolicyDiff(baseText, next)}`);
+    out(c, `Politika sürümü ${before.slice(0, 12)} → ${after.slice(0, 12)}. Değişiklik YALNIZ yeni oturumda geçerli olur (oturum başında anlık görüntü).`);
+    if (!(await confirmOnTty(c, "Bu değişiklik uygulansın mı? 'evet' yazın: ", "evet"))) {
+      out(c, "Uygulanmadı (onay verilmedi).");
+      return 1;
+    }
+    // denetim ÖNCE: yazılamıyorsa dosya değişmez (fail-closed)
+    await rt.audit.append({ event: "policy_change", sessionId: rt.session.id, message: `${what}; sürüm ${before.slice(0, 12)}→${after.slice(0, 12)}` }).catch(() => {
+      throw new OpsError("audit_unavailable", "denetim kaydı yazılamadı: politika değişmedi");
+    });
+    if (userText !== null) await copyFile(c.paths.policyFile, `${c.paths.policyFile}.bak`).catch(() => undefined);
+    const tmp = `${c.paths.policyFile}.${process.pid}.tmp`;
+    await writeFile(tmp, next, { mode: 0o600 });
+    await chmod(tmp, 0o600);
+    await rename(tmp, c.paths.policyFile);
+    out(c, `Politika yazıldı: ${c.paths.policyFile}${userText !== null ? " (önceki sürüm .bak)" : ""}`);
+    return 0;
+  });
+}
+
+async function breakGlassCommand(c: CliEnv, sub: string | undefined, rest: string[]): Promise<number> {
+  const verbs = ["start", "end", "status", "review"];
+  const verb = sub && verbs.includes(sub) ? sub : "start";
+  const args = sub && verbs.includes(sub) ? rest : sub ? [sub, ...rest] : rest;
+  if (verb === "review") {
+    const { values } = parseArgs({ args, options: { session: { type: "string" } }, strict: true });
+    const recs = await readAuditRecords(c.paths.auditLog);
+    const sessions = [...new Set(recs.filter((r) => r.event === "break_glass").map((r) => r.sessionId))];
+    const sid = values.session ?? sessions.at(-1);
+    if (!sid) {
+      out(c, "Break-glass kaydı yok.");
+      return 0;
+    }
+    const md = renderBreakGlassReview(recs, sid);
+    out(c, md ?? `Bu oturumda break-glass kaydı yok: ${sid}`);
+    return md ? 0 : 1;
+  }
+  const client = await OpsdClient.connect(c.paths.socket).catch(() => {
+    throw new OpsError("opsd_unreachable", `opsd'ye bağlanılamadı (${c.paths.socket}). Break-glass çalışan bir oturumun tavanını yükseltir: önce \`ops daemon\`; gömülü sohbette \`/breakglass\` kullanın`);
+  });
+  try {
+    if (verb === "status") {
+      const st = await client.breakGlassStatus();
+      out(c, st.length ? st.map(stripControlChars).join("\n") : "(etkin break-glass yok)");
+      return 0;
+    }
+    if (verb === "end") {
+      const { values } = parseArgs({ args, options: { profile: { type: "string" } }, strict: true });
+      if (!values.profile) throw new OpsError("usage", "kullanım: ops break-glass end --profile ID");
+      out(c, stripControlChars(await client.breakGlassEnd(values.profile)));
+      return 0;
+    }
+    const { values } = parseArgs({ args, options: { profile: { type: "string" }, ceiling: { type: "string" }, ttl: { type: "string" }, reason: { type: "string" } }, strict: true });
+    if (!values.profile || !values.ceiling || !values.ttl || !values.reason) throw new OpsError("usage", "--profile, --ceiling, --ttl ve --reason gerekli (gerekçe ve süre zorunlu)");
+    if (!RISK_CLASSES.includes(values.ceiling as RiskClass)) throw new OpsError("usage", `--ceiling şunlardan biri olmalı: ${RISK_CLASSES.join(", ")}`);
+    const proof = await makeReauth(c)();
+    const lines = await client.breakGlassStart({ profile: values.profile, ceiling: values.ceiling as RiskClass, ttlSec: parseDurationSec(values.ttl), reason: values.reason, reauth: proof });
+    for (const l of lines) out(c, stripControlChars(l));
+    out(c, "Denetim, redaksiyon ve onay kapıları AÇIK kalır; yalnız sınıf tavanı geçici yükseldi. Süre bitince otomatik düşer; inceleme dosyası oturum sonunda yazılır.");
+    return 0;
+  } finally {
+    client.close();
+  }
+}
+
 export async function runCli(c: CliEnv): Promise<number> {
   const [cmd, sub, ...rest] = c.argv;
   try {
@@ -478,6 +640,12 @@ export async function runCli(c: CliEnv): Promise<number> {
       case "mcp":
         return await mcpCommand(c, sub, rest);
 
+      case "policy":
+        return await policyCommand(c, sub, rest);
+
+      case "break-glass":
+        return await breakGlassCommand(c, sub, rest);
+
       case "daemon": {
         const { values: dv } = parseArgs({ args: c.argv.slice(1), options: { workspace: { type: "string" } }, strict: true });
         const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
@@ -501,7 +669,7 @@ export async function runCli(c: CliEnv): Promise<number> {
         if (embedded) {
           const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
           await withRuntime(c, async (rt) => {
-            await runChat(new LocalBackend(rt, await engineFor(c, rt)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events });
+            await runChat(new LocalBackend(rt, await engineFor(c, rt)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events, reauth: makeReauth(c) });
             out(c, gate.summaryLine());
           }, gate, cv.workspace);
           return 0;
@@ -510,7 +678,7 @@ export async function runCli(c: CliEnv): Promise<number> {
           throw new OpsError("opsd_unreachable", `opsd'ye bağlanılamadı (${c.paths.socket}). \`ops daemon\` çalıştırın veya \`ops chat --embedded\` kullanın`);
         });
         try {
-          await runChat(client, { input: c.io.input, output: c.io.output });
+          await runChat(client, { input: c.io.input, output: c.io.output }, { reauth: makeReauth(c) });
         } finally {
           client.close();
         }

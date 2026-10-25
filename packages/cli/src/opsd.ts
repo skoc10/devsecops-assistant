@@ -4,7 +4,8 @@ import type { Server, Socket } from "node:net";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
-import { usageFromAudit, formatUsage } from "@ops/core";
+import { OpsError, RISK_CLASSES } from "@ops/contracts";
+import { breakGlassBanner, usageFromAudit, formatUsage } from "@ops/core";
 import type { Sender } from "./backend.ts";
 import { readAuditRecords } from "./backend.ts";
 import type { ProfileRow } from "./chat.ts";
@@ -12,9 +13,17 @@ import type { Runtime } from "./runtime.ts";
 
 const MAX_LINE = 1 << 20;
 
+const BreakGlassStart = z.strictObject({
+  profile: z.string().min(1).max(100),
+  ceiling: z.enum(RISK_CLASSES),
+  ttlSec: z.number(),
+  reason: z.string().max(1000),
+  reauth: z.strictObject({ method: z.string().min(1).max(60), verifiedAtMs: z.number() }),
+});
+
 const Request = z.strictObject({
   id: z.number().int().nonnegative(),
-  method: z.enum(["ping", "profile.list", "profile.bind", "chat.send", "usage.get", "shutdown"]),
+  method: z.enum(["ping", "profile.list", "profile.bind", "chat.send", "usage.get", "breakglass.start", "breakglass.end", "breakglass.status", "shutdown"]),
   params: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -113,6 +122,24 @@ export class Opsd {
           send({ id, ok: true, result: formatUsage(usageFromAudit(await readAuditRecords(rt.paths.auditLog), rt.session.id)) });
           return;
         }
+        case "breakglass.status": {
+          await rt.breakGlass.sweep();
+          send({ id, ok: true, result: rt.breakGlass.status().map(breakGlassBanner) });
+          return;
+        }
+        case "breakglass.start": {
+          // Yeniden kimlik doğrulama İSTEMCİDE (kontrol terminali) yapılır; soket 0600 ve modele kapalıdır.
+          const a = BreakGlassStart.parse(req.params ?? {});
+          await rt.breakGlass.start({ profileId: a.profile, ceiling: a.ceiling, ttlSec: a.ttlSec, reason: a.reason, reauth: { method: a.reauth.method, verifiedAt: new Date(a.reauth.verifiedAtMs) } });
+          send({ id, ok: true, result: rt.breakGlass.status().map(breakGlassBanner) });
+          return;
+        }
+        case "breakglass.end": {
+          const pid = String(req.params?.["profile"] ?? "");
+          const g = await rt.breakGlass.end(pid, "user");
+          send({ id, ok: true, result: g ? `break-glass bitti: ${g.profileId} (tavan ${g.original.classCeiling}'a döndü)` : `'${pid}' için etkin break-glass yok` });
+          return;
+        }
         case "chat.send": {
           if (this.busy) {
             send({ id, ok: false, error: { code: "busy", message: "başka bir mesaj işleniyor" } });
@@ -134,7 +161,7 @@ export class Opsd {
           return;
       }
     } catch (e) {
-      send({ id, ok: false, error: { code: "internal", message: e instanceof Error ? e.message.slice(0, 300) : "hata" } });
+      send({ id, ok: false, error: { code: e instanceof OpsError ? e.code : "internal", message: e instanceof Error ? e.message.slice(0, 300) : "hata" } });
     }
   }
 }

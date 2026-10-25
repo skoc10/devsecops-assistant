@@ -63,6 +63,10 @@ export const PolicyDocumentSchema = z
         if (!r.when.tool || !r.when.profile) {
           ctx.addIssue({ code: "custom", message: "allow kuralı araç ve profil ile daraltılmalı", path: ["rules", i, "when"] });
         }
+        // "Hep izin" yalnız TAM araç adı + TAM profil kimliği için olabilir (desen/joker yok) ve prod'a uygulanamaz.
+        if (r.when.tool && /[*?]/.test(r.when.tool)) ctx.addIssue({ code: "custom", message: "allow kuralında araç adı tam olmalı (joker yok)", path: ["rules", i, "when", "tool"] });
+        if (r.when.profile && /[*?]/.test(r.when.profile)) ctx.addIssue({ code: "custom", message: "allow kuralında profil kimliği tam olmalı (joker yok)", path: ["rules", i, "when", "profile"] });
+        if (r.when.environment?.includes("prod")) ctx.addIssue({ code: "custom", message: "prod için allow kuralı yazılamaz (prod mutasyonu her zaman sorar)", path: ["rules", i, "when", "environment"] });
       }
       if (r.expires !== undefined && Number.isNaN(Date.parse(r.expires))) {
         ctx.addIssue({ code: "custom", message: "expires geçerli bir tarih olmalı", path: ["rules", i, "expires"] });

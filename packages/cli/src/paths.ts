@@ -25,6 +25,8 @@ export interface OpsPaths {
   readonly changesDir: string;
   /** Dış MCP sunucuları için kullanıcı manifesti (`mcp-servers.yaml`); yoksa köprü kapalı. */
   readonly mcpManifestFile: string;
+  /** Break-glass inceleme dosyaları: `<oturum>.md` (denetim kayıtlarından üretilir). */
+  readonly breakGlassDir: string;
 }
 
 /** `OPS_HOME` (varsayılan `~/.ops-assistant`). Tüm durum burada: tek kullanıcı, yerel. */
@@ -45,6 +47,7 @@ export function resolvePaths(home: string = process.env["OPS_HOME"] ?? join(home
     worktreesDir: join(home, "worktrees"),
     changesDir: join(home, "changes"),
     mcpManifestFile: join(home, "mcp-servers.yaml"),
+    breakGlassDir: join(home, "breakglass-review"),
   };
 }
 

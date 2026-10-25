@@ -20,6 +20,7 @@
     "@ops/classifiers": "workspace:*",
     "@ops/contracts": "workspace:*",
     "@ops/core": "workspace:*",
+    "@ops/diff": "workspace:*",
     "@ops/mcp-bridge": "workspace:*",
     "@ops/policy": "workspace:*",
     "@ops/providers": "workspace:*",
@@ -29,10 +30,10 @@
     "@ops/skills": "workspace:*",
     "@ops/terminal": "workspace:*",
     "@ops/workspace": "workspace:*",
+    "yaml": "^2.0.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@ops/testkit": "workspace:*",
-    "yaml": "^2.0.0"
+    "@ops/testkit": "workspace:*"
   }
 }

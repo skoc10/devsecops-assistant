@@ -56,6 +56,10 @@ node packages/cli/src/bin.ts workspace export infra --out infra.patch   # git ap
 # (isteğe bağlı) dış MCP sunucuları: OPS_HOME/mcp-servers.yaml (ikili sha256 pini, yalnız read); `ops mcp check`
 node packages/cli/src/bin.ts doctor                    # sandbox + ortam kimlikleri (içerik okunmaz)
 node packages/cli/src/bin.ts audit verify
+# politika: "hep izin" yalnız dar + süreli + prod dışı; diff gösterilir, kontrol terminalinde 'evet' ister, denetlenir
+node packages/cli/src/bin.ts policy allow --tool k8s.scale --profile dev --scope default --ttl 8h
+# acil durum: çalışan opsd/sohbette geçici tavan yükseltme (gerekçe + süre + kasa parolası; denetim/onay AÇIK kalır)
+node packages/cli/src/bin.ts break-glass --profile dev --ceiling mutate --ttl 15m --reason "INC-123 payments api ölçekleme"
 ```
 
 `ops chat` için bir model sağlayıcısı gerekir (`OPS_PROVIDER`: `openai-compatible` veya `cursor`; ayrıntı ve doğrulanmamış kısımlar [docs/STATUS.md](docs/STATUS.md)'da). Sohbet döngüsü scripted sağlayıcıyla uçtan uca test edilir (E-01).

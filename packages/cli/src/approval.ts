@@ -163,3 +163,35 @@ export async function openDevTty(): Promise<TtyIo | null> {
     return null;
   }
 }
+
+/**
+ * Gerçek kontrol terminali, TTY AKIŞLARIYLA (`isTTY`/`setRawMode`): parola gibi YANKISIZ girdi gerektiren
+ * istemler (yeniden kimlik doğrulama) için. Açılamazsa `null` (fail-closed).
+ */
+export async function openDevTtyRaw(): Promise<TtyIo | null> {
+  try {
+    const { openSync, closeSync } = await import("node:fs");
+    const { ReadStream, WriteStream } = await import("node:tty");
+    const rfd = openSync("/dev/tty", "r");
+    const wfd = openSync("/dev/tty", "w");
+    const input = new ReadStream(rfd);
+    const output = new WriteStream(wfd);
+    return {
+      input,
+      output,
+      close: () => {
+        input.destroy();
+        output.destroy();
+        for (const fd of [rfd, wfd]) {
+          try {
+            closeSync(fd);
+          } catch {
+            /* zaten kapalı */
+          }
+        }
+      },
+    };
+  } catch {
+    return null;
+  }
+}
