@@ -22,7 +22,7 @@ async function setup() {
         if (!nested) throw new Error("nested yok");
         for (const t of (c.args as { plan: string[] }).plan) {
           const [tool, ns] = t.split("@");
-          results.push(await nested({ tool: tool as string, args: tool === "demo.chain.run" ? { plan: [] } : tool === "k8s.resources.list" ? { kind: "Deployment", namespace: ns ?? "payments" } : {} }));
+          results.push(await nested({ tool: tool as string, args: tool === "demo.chain.run" ? { plan: [] } : tool === "k8s.resources.list" ? { kind: "Deployment", namespace: ns ?? "payments" } : tool === "k8s.scale" ? { namespace: "payments", name: "api", replicas: 2 } : {} }));
         }
         return { data: { n: results.length }, summary: `${results.length} iç çağrı` };
       },
@@ -91,13 +91,15 @@ describe("bileşik araç (composite): iç çağrılar tam PEP'ten geçer", () =>
     expect(seen).toEqual([{ nested: undefined }]);
   });
 
-  it("iç çağrı mutasyon sınıfındaysa onay kapısı olmadan çalışmaz (approval_unavailable): bileşik araç yetki kazandırmaz", async () => {
+  it("iç çağrı okuma dışıysa PEP YAPISAL olarak reddeder (policy_deny): bileşik araç ne onay isteyebilir ne yetki kazanır; ret üst çağrıya bağlıdır", async () => {
     const { results, h, invoke } = await setup();
-    h.session.activeToolsets.add("k8s-core");
-    // harness'ın scale aracı: mutate, onay kapısı yok
     await invoke("demo.chain.run", { plan: ["k8s.scale"] });
-    expect(results[0]!.status).toBe("denied");
-    expect(["approval_unavailable", "schema_invalid", "ceiling_exceeded", "citation_missing"]).toContain(results[0]!.reasonCode);
+    expect(results[0]).toMatchObject({ status: "denied", reasonCode: "policy_deny" });
+    expect(results[0]!.summary).toContain("yalnız okuma sınıfındadır");
     expect(h.k8s.calls.filter((c) => c.tool === "k8s.scale")).toHaveLength(0);
+    // reddedilen iç çağrı da üst çağrıya bağlanır (denetimde izlenebilir)
+    const outer = (await h.records()).find((x) => x["event"] === "intent" && x["tool"] === "demo.chain.run")!;
+    const denied = (await h.records()).find((x) => x["event"] === "result" && x["tool"] === "k8s.scale")!;
+    expect(String(denied["message"])).toContain(`iç çağrı (üst: ${String(outer["callId"])})`);
   });
 });

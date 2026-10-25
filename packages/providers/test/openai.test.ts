@@ -15,7 +15,13 @@ describe("araç adı kodlaması", () => {
     expect(encodeToolName("k8s.auth.can_i")).toBe("k8s__auth__can_i");
     expect(decodeToolName("k8s__auth__can_i")).toBe("k8s.auth.can_i");
     expect(decodeToolName(encodeToolName("evidence.get"))).toBe("evidence.get");
-    expect(() => encodeToolName("a.b__c")).toThrow(/__/);
+    // `__` içeren veya `_` ile biten parçalı adlar TAKMA ADLA taşınır ve geri çözülür (sessiz çakışma yok)
+    for (const n of ["mcp.srv.get__item", "a.b_.c", "x.y__z__w"]) {
+      const w = encodeToolName(n);
+      expect(w, n).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(decodeToolName(w), n).toBe(n);
+    }
+    expect(() => encodeToolName("a b")).toThrow(/biçimi geçersiz/);
     expect(encodeToolName("k8s.workload.health")).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
   });
 });

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError, defineTool } from "@ops/contracts";
 import type { Adapter, AdapterCall, Profile, RawToolOutput, Target, ToolDefinition } from "@ops/contracts";
 import { KnownSecrets, scrubText } from "@ops/redaction";
+import { openToModel } from "./evidence.ts";
 import type { EvidenceStore } from "./evidence.ts";
 
 export const CHANGE_KINDS = ["k8s-manifest", "sql", "iac", "text"] as const;
@@ -163,7 +164,7 @@ export function createChangeAdapter(opts: ChangeAdapterOptions): { adapter: Adap
       return {
         data: { id: cs.id, file: cs.file.name, bytes: cs.file.bytes, sha256: cs.file.sha256, note: "kayıt yerelde (OPS_HOME/changes); uygulamak kullanıcıya aittir: `ops change show/export`" },
         summary: `değişiklik önerisi kaydedildi: ${cs.id}`,
-        taint: ev.some((e) => e.taint === "untrusted") ? "untrusted" : "trusted",
+        taint: ev.some((e) => e.taint === "untrusted" && openToModel(e)) ? "untrusted" : "trusted",
       };
     },
   };

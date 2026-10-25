@@ -1,6 +1,7 @@
 import { riskAtLeast } from "@ops/contracts";
 import type { AuditRecord, PolicyDecision, Profile, RiskClass, ToolDescriptor } from "@ops/contracts";
 import type { PolicyInput } from "@ops/policy";
+import { stripControlChars } from "@ops/redaction";
 
 /**
  * Olay sonrası inceleme ve politika regresyonu (tasarım §3.8 "replay"): denetim kaydından oturumu yeniden kurar.
@@ -89,7 +90,8 @@ const inc = (m: Record<string, number>, k: string): void => {
   m[k] = (m[k] ?? 0) + 1;
 };
 
-const ACTIVITY: ReadonlySet<string> = new Set(["intent", "result", "model_call", "approval", "alarm", "break_glass", "policy_change", "evidence_release"]);
+// Yalnız EYLEM kayıtları "etkinlik" sayılır: `ops policy allow` gibi yönetim komutlarının tek-kayıtlık oturumları hedef seçilmez
+const ACTIVITY: ReadonlySet<string> = new Set(["intent", "result", "model_call", "approval"]);
 
 /**
  * Son oturumun kimliği (kayıtlar `seq` sırasıyla). `activeOnly`: yalnız yaşam döngüsü kaydı olan oturumlar
@@ -117,9 +119,11 @@ export function buildReplay(all: readonly AuditRecord[], opts: { sessionId?: str
   let breakGlass = 0;
   let calls = 0;
   let localOnly = false;
+  const counted = new Set<string>();
 
   const push = (r: AuditRecord, kind: ReplayKind, line: string, noisy = false): void => {
-    timeline.push({ seq: r.seq, ts: r.ts, kind, ...(r.callId ? { callId: r.callId } : {}), line, ...(noisy ? { noisy: true } : {}) });
+    // denetim alanları (ör. model seçimi bilinmeyen araç adı) kontrol/ANSI karakteri taşıyabilir: çizelge satırı terminale güvenle basılır
+    timeline.push({ seq: r.seq, ts: r.ts, kind, ...(r.callId ? { callId: r.callId } : {}), line: stripControlChars(line), ...(noisy ? { noisy: true } : {}) });
   };
 
   for (const r of recs) {
@@ -148,9 +152,13 @@ export function buildReplay(all: readonly AuditRecord[], opts: { sessionId?: str
         break;
       }
       case "intent": {
-        calls += 1;
-        if (r.tool) toolCount.set(r.tool, (toolCount.get(r.tool) ?? 0) + 1);
-        inc(byDecision, r.decision ?? "?");
+        // aynı çağrının hem intent'i hem (onaydan sonra) reddedilen sonucu olabilir (ör. target_changed): çağrı BİR kez sayılır
+        if (!(r.callId && counted.has(r.callId))) {
+          calls += 1;
+          if (r.tool) toolCount.set(r.tool, (toolCount.get(r.tool) ?? 0) + 1);
+          inc(byDecision, r.decision ?? "?");
+          if (r.callId) counted.add(r.callId);
+        }
         push(
           r,
           "intent",
@@ -165,9 +173,17 @@ export function buildReplay(all: readonly AuditRecord[], opts: { sessionId?: str
         break;
       case "result": {
         if (r.exitStatus === "denied") {
-          calls += 1;
-          if (r.tool) toolCount.set(r.tool, (toolCount.get(r.tool) ?? 0) + 1);
-          inc(byDecision, "deny");
+          if (!(r.callId && counted.has(r.callId))) {
+            calls += 1;
+            if (r.tool) toolCount.set(r.tool, (toolCount.get(r.tool) ?? 0) + 1);
+            inc(byDecision, "deny");
+            if (r.callId) counted.add(r.callId);
+          } else {
+            // intent'i sayılmış çağrı sonradan reddedildi: karar dağılımında intent kararı yerine 'deny' say
+            const prev = recs.find((x) => x.event === "intent" && x.callId === r.callId)?.decision;
+            if (prev && (byDecision[prev] ?? 0) > 0) byDecision[prev] = (byDecision[prev] as number) - 1;
+            inc(byDecision, "deny");
+          }
           inc(deniedByReason, r.reasonCode ?? "?");
           push(r, "result", `✗ ${r.tool ?? "?"} REDDEDİLDİ [${r.reasonCode ?? "?"}] ${clip(r.message ?? "", 140)}`);
         } else if (r.exitStatus === "error") {
@@ -328,5 +344,6 @@ export function renderReplay(rep: ReplayReport, opts: { verbose?: boolean; chain
     }
     for (const k of w.skipped.slice(0, 10)) out.push(`  atlandı seq ${k.seq}: ${k.why}`);
   }
-  return out.join("\n");
+  // tüm çıktı (araç adları, kimlikler dahil) terminale basılmadan önce kontrol/ANSI karakterlerinden arındırılır (satır sonları korunur)
+  return out.map((l) => stripControlChars(l)).join("\n");
 }

@@ -58,10 +58,11 @@ const SIGNAL_PATTERNS: readonly (readonly [LogSignal, RegExp])[] = [
   ["crash_loop", /crashloopbackoff|back-off restarting/],
   ["probe_failure", /(?:readiness|liveness|startup) probe failed/],
   ["db_error", /deadlock detected|too many connections|could not connect to server|sqlstate|connection pool (?:exhausted|timeout)/],
-  ["test_failure", /\btests? failed\b|assertionerror|\d+ failing|--- fail/],
+  ["test_failure", /\btests? failed\b|assertionerror|\b\d{1,9} failing|--- fail/],
   ["build_failure", /npm err!|build failed|compilation (?:error|failed)|cannot find module|error ts\d+|exit code [1-9]/],
 ];
 
+const MAX_SCAN_LINE = 2_000;
 const ISO_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const count = z.number().int().min(0).max(100_000_000);
 const isoTs = z.string().regex(ISO_TS);
@@ -120,6 +121,8 @@ export function digestLog(input: unknown): LogDigest | null {
   else if (input !== null && typeof input === "object" && typeof (input as { preview?: unknown }).preview === "string") text = (input as { preview: string }).preview;
   if (text === undefined) return null;
 
+  // Düzenli ifadeler saldırgan kontrollü satırlarda ikinci dereceden sürebilir (eşzamanlı çalışır, zaman aşımı kesemez):
+  // her satır sabit uzunlukta kesilerek taranır; gerçek satır sayısı ve bayt toplamı kesilmemiş girdiden hesaplanır.
   const rawLines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
   const levels = { error: 0, warn: 0, info: 0, debug: 0 };
   const sig = new Map<LogSignal, number>();
@@ -130,7 +133,8 @@ export function digestLog(input: unknown): LogDigest | null {
   let first: string | undefined;
   let last: string | undefined;
 
-  for (const line of rawLines) {
+  for (const full of rawLines) {
+    const line = full.length > MAX_SCAN_LINE ? full.slice(0, MAX_SCAN_LINE) : full;
     const lower = line.toLowerCase();
     const ts = LEADING_TS.exec(line)?.[1];
     if (ts) {
@@ -231,6 +235,7 @@ export const quarantinedTools = (): string[] => Object.keys(DIGESTERS);
 
 // ---- isteğe bağlı model tabanlı özet --------------------------------------------------------------
 
+const SUMMARIZER_TIMEOUT_MS = 20_000;
 const MODEL_NOTE_MAX = 160;
 const MODEL_INPUT_MAX_CHARS = 24_000;
 
@@ -362,12 +367,14 @@ export class Quarantine {
     }
     let res;
     try {
+      // Kendi son tarihi var: üst çağrının zamanlayıcısı bu noktada çoktan temizlenmiştir
+      const deadline = AbortSignal.timeout(SUMMARIZER_TIMEOUT_MS);
       res = await m.provider.generate({
         system: SUMMARIZER_SYSTEM,
         messages: [{ role: "user", content: wrapUntrusted(body, i.tool).text }],
         tools: [],
         maxOutputTokens: 400,
-        ...(i.signal ? { signal: i.signal } : {}),
+        signal: i.signal ? AbortSignal.any([i.signal, deadline]) : deadline,
       });
     } catch {
       return null;

@@ -71,6 +71,8 @@ export function buildPlan(rb: Runbook, overrides: Readonly<Record<string, string
     }
     if (!reg) return { n: st.n, text: st.text, tool: st.tool, status: "unknown_tool", problems: [`araç kayıtlı değil: ${st.tool}`] };
     const d = reg.def.descriptor;
+    // yerel yazma aracı (ör. change.propose) sınıfı `read` olsa da OTOMATİK koşturulmaz: PEP iç çağrıda da reddeder
+    if (d.localWrite) return { n: st.n, text: st.text, tool: st.tool, status: "not_allowed", problems: ["yerel yazma aracı runbook.run ile çalışmaz (normal onay akışıyla ayrıca çağrılmalı)"] };
     const { args, missing } = substituteArgs(st.args ?? {}, params);
     const common = { n: st.n, text: st.text, tool: st.tool, args, class: d.class } as const;
     if (missing.length) return { ...common, status: "missing_param", problems: missing.map((m) => `parametre eksik: ${m} (runbook.plan params ile verin)`) };

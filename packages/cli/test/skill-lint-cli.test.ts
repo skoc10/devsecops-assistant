@@ -39,7 +39,7 @@ describe("ops skill lint", () => {
     const root = join(home, "benim-skiller");
     await mk(root, "iyi", "Kısa.");
     await mk(root, "uyarili", "Detay: https://ornek.example.invalid/dok");
-    await mk(root, "trojan", "Normal‮ gizli");
+    await mk(root, "trojan", "Normal\u202E gizli");
     const bad = await run(["skill", "lint", root]);
     expect(bad.code).toBe(1);
     expect(bad.out).toContain("hidden_unicode");

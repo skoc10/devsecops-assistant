@@ -122,10 +122,10 @@ describe("TtyApprovalGate (v0)", () => {
   });
 
   it("özet: model/argüman kaynaklı kontrol karakterleri ve ANSI temizlenir; taint uyarısı görünür", () => {
-    const evil = summary({ argsRedacted: { x: "\u001b[2J\u001b]8;;http://evil.invalid\u0007gizli\u001b]8;;\u0007 ‮ters" }, taintedContext: true, citedEvidence: [{ id: "ev-9", summary: "\u001b[31mkırmızı" }] });
+    const evil = summary({ argsRedacted: { x: "\u001b[2J\u001b]8;;http://evil.invalid\u0007gizli\u001b]8;;\u0007 \u202Eters" }, taintedContext: true, citedEvidence: [{ id: "ev-9", summary: "\u001b[31mkırmızı" }] });
     const text = renderSummary(evil, { index: 1, expiresInSec: 300 });
     expect(text).not.toContain("\u001b");
-    expect(text).not.toContain("‮");
+    expect(text).not.toContain("\u202E");
     expect(text).not.toContain("\u0007");
     expect(text).not.toMatch(/\\u001b|\\u0007/); // kaçışlı (JSON) biçimde de kalmaz
     expect(text).toContain("UNTRUSTED");

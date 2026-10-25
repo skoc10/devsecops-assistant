@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { OpsError, TOOL_NAME_PATTERN, estimateTokens } from "@ops/contracts";
 import { SKILL_NAME } from "./parse.ts";
+import { hasInvisible, hasVariationRun } from "./unicode.ts";
 
 /**
  * Runbook (tasarım §4.4): KULLANICININ getirdiği markdown. Deterministik olarak PLANA çevrilir; plan kullanıcıya
@@ -49,7 +50,7 @@ export function parseRunbook(name: string, text: string): Runbook {
   };
   if (!SKILL_NAME.test(name) || name.length > 64) bad("dosya adı küçük harf-rakam-tire olmalı (≤64)");
   if (text.length > RUNBOOK_LIMITS.chars) bad(`${RUNBOOK_LIMITS.chars} karakteri aşıyor`);
-  if (/[‪-‮⁦-⁩​-‏⁠]/.test(text)) bad("görünmez/çift yönlü Unicode karakteri var (Trojan Source)");
+  if (hasInvisible(text) || hasVariationRun(text)) bad("görünmez/çift yönlü/etiket Unicode karakteri var (Trojan Source / ASCII smuggling)");
 
   let title = name;
   let description = "";
@@ -142,7 +143,7 @@ export function substituteArgs(args: Record<string, unknown>, params: Readonly<R
   const walk = (v: unknown): unknown => {
     if (typeof v === "string") {
       return v.replace(PLACEHOLDER, (_m, k: string) => {
-        const val = params[k];
+        const val = Object.hasOwn(params, k) ? params[k] : undefined;
         if (val === undefined) {
           missing.add(k);
           return "";

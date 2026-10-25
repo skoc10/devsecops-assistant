@@ -290,7 +290,7 @@ function parseBody(lx: Lexer, depth: number, closing: boolean): { attrs: Record<
 export function parseHcl(src: string): { attrs: Record<string, HclAttr>; blocks: HclBlock[] } {
   if (src.length > 1_000_000) throw new HclError("dosya çok büyük", 1);
   // BOM ve CRLF tolere edilir
-  const text = src.replace(/^﻿/, "");
+  const text = src.replace(/^\uFEFF/, "");
   return parseBody(new Lexer(text), 0, false);
 }
 

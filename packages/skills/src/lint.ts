@@ -5,6 +5,7 @@ import { parse } from "yaml";
 import { estimateTokens } from "@ops/contracts";
 import { SKILL_NAME, parseSidecar, parseSkillMd } from "./parse.ts";
 import type { ParsedSkillMd, Sidecar } from "./parse.ts";
+import { hasInvisible, hasVariationRun } from "./unicode.ts";
 
 export type LintSeverity = "error" | "warn" | "info";
 
@@ -40,21 +41,30 @@ export interface LintContext {
 }
 
 export const LIMITS = { bodyLines: 500, bodyTokens: 5_000, description: 1_024 } as const;
+/** Dosya boyutu üst sınırı (gövde ≤5000 token ≈20 KB; bunun çok üstü saldırgan girdidir) ve sezgisel taramada satır başına üst sınır. */
+const MAX_FILE_BYTES = 256_000;
+const MAX_SCAN_LINE = 2_000;
 
 /** Agent Skills açık standardının ön bilgi anahtarları. */
 const FRONT_MATTER_KEYS = new Set(["name", "description", "license", "compatibility", "metadata", "allowed-tools"]);
 
-// Trojan Source / görünmez karakterler: talimat metninde meşru kullanımı yoktur.
-const INVISIBLE = /[‪-‮⁦-⁩​-‏⁠﻿]/;
 const INJECTION = /ignore (?:all )?(?:the )?(?:previous|prior|above) (?:instructions|rules)|disregard (?:all )?(?:previous|prior|the) |önceki (?:tüm )?(?:talimat|kural)\w* (?:unut|yok say|geçersiz)|you are now|talimatları unut/i;
 const URL = /https?:\/\/[^\s)>\]"']+/i;
 const PIPE_TO_SHELL = /(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b/i;
 const BASE64_BLOB = /[A-Za-z0-9+/]{200,}={0,2}/;
 
-async function listFiles(root: string): Promise<string[]> {
-  const out: string[] = [];
+const MAX_SCRIPT_FILES = 200;
+const MAX_SCRIPT_DEPTH = 4;
+
+/** `scripts/` ağacını listeler. Sınırı aşan ağaç veya sembolik bağ SESSİZCE atlanmaz: sorun olarak bildirilir (hash tam kapsamalı). */
+async function listFiles(root: string): Promise<{ files: string[]; problems: string[] }> {
+  const files: string[] = [];
+  const problems: string[] = [];
   const walk = async (d: string, depth: number): Promise<void> => {
-    if (depth > 4 || out.length > 200) return;
+    if (depth > MAX_SCRIPT_DEPTH) {
+      problems.push(`scripts/ ${MAX_SCRIPT_DEPTH} düzeyden derin`);
+      return;
+    }
     let ents;
     try {
       ents = await readdir(d, { withFileTypes: true });
@@ -63,13 +73,23 @@ async function listFiles(root: string): Promise<string[]> {
     }
     for (const e of ents.sort((a, b) => a.name.localeCompare(b.name))) {
       const p = join(d, e.name);
-      if (e.isDirectory()) await walk(p, depth + 1);
-      else if (e.isFile()) out.push(p);
+      if (e.isSymbolicLink()) problems.push(`scripts/ içinde sembolik bağ: ${relative(root, p).slice(0, 60)}`);
+      else if (e.isDirectory()) await walk(p, depth + 1);
+      else if (e.isFile()) {
+        if (files.length >= MAX_SCRIPT_FILES) {
+          if (!problems.some((x) => x.includes("dosyadan fazla"))) problems.push(`scripts/ ${MAX_SCRIPT_FILES} dosyadan fazla`);
+          return;
+        }
+        files.push(p);
+      }
     }
   };
   await walk(root, 0);
-  return out;
+  return { files, problems };
 }
+
+/** Sezgisel (düzenli ifade) taramalar için: satır başına sabit uzunluk (ikinci dereceden desenlere karşı); uzun satırın kendisi ayrıca bildirilir. */
+const capLines = (t: string): string => t.split("\n").map((l) => (l.length > MAX_SCAN_LINE ? l.slice(0, MAX_SCAN_LINE) : l)).join("\n");
 
 export interface LintedSkill {
   readonly lint: SkillLint;
@@ -85,10 +105,16 @@ export interface LintedSkill {
  */
 export async function lintSkillDir(dir: string, dirName: string, ctx: LintContext = {}): Promise<LintedSkill | null> {
   let md: string;
+  const mdStat = await stat(join(dir, "SKILL.md")).catch(() => null);
+  if (!mdStat || !mdStat.isFile()) return null; // SKILL.md yoksa skill değil
+  if (mdStat.size > MAX_FILE_BYTES) {
+    const lint: SkillLint = { dirName, findings: [{ severity: "error", code: "file_too_large", message: `SKILL.md ${MAX_FILE_BYTES} baytı aşıyor (${mdStat.size})` }], ok: false, scripts: [] };
+    return { lint, hasScripts: false };
+  }
   try {
     md = await readFile(join(dir, "SKILL.md"), "utf8");
   } catch {
-    return null; // SKILL.md yoksa skill değil
+    return null;
   }
   const findings: LintFinding[] = [];
   const add = (severity: LintSeverity, code: string, message: string): void => void findings.push({ severity, code, message });
@@ -101,10 +127,11 @@ export async function lintSkillDir(dir: string, dirName: string, ctx: LintContex
   }
 
   let sidecarText: string | undefined;
-  try {
-    sidecarText = await readFile(join(dir, "ops.skill.yaml"), "utf8");
-  } catch {
-    sidecarText = undefined;
+  const scStat = await stat(join(dir, "ops.skill.yaml")).catch(() => null);
+  if (scStat && scStat.size > 64_000) {
+    add("error", "sidecar_invalid", "ops.skill.yaml 64000 baytı aşıyor");
+  } else if (scStat) {
+    sidecarText = await readFile(join(dir, "ops.skill.yaml"), "utf8").catch(() => undefined);
   }
   const { sidecar, problems } = parseSidecar(sidecarText);
   for (const p of problems) add("error", "sidecar_invalid", p);
@@ -118,7 +145,9 @@ export async function lintSkillDir(dir: string, dirName: string, ctx: LintContex
     hasScripts = false;
   }
   if (hasScripts) {
-    for (const f of await listFiles(join(dir, "scripts"))) {
+    const listed = await listFiles(join(dir, "scripts"));
+    for (const pr of listed.problems) add("error", "scripts_unverifiable", `${pr}: içerik tam doğrulanamaz (hash eksik kalırdı)`);
+    for (const f of listed.files) {
       const bytes = await readFile(f).catch(() => Buffer.alloc(0));
       scripts.push({ path: relative(dir, f), sha256: createHash("sha256").update(bytes).digest("hex") });
     }
@@ -158,13 +187,16 @@ export async function lintSkillDir(dir: string, dirName: string, ctx: LintContex
     // içerik sezgileri (Best-effort)
     const texts: [string, string][] = [["SKILL.md", `${p.description}\n${p.body}`]];
     if (sidecar.runbook) texts.push(["ops.skill.yaml runbook", sidecar.runbook.join("\n")]);
-    for (const [where, t] of texts) {
-      if (INVISIBLE.test(t.replace(/^﻿/, ""))) add("error", "hidden_unicode", `${where}: görünmez/çift yönlü Unicode karakteri (Trojan Source) — talimatta meşru kullanımı yok`);
+    for (const [where, full] of texts) {
+      const t = capLines(full);
+      if (full.split("\n").some((l) => l.length > MAX_SCAN_LINE)) add("warn", "long_line", `${where}: ${MAX_SCAN_LINE} karakterden uzun satır (gizlenmiş içerik olabilir; sezgisel taramalar satır başı ile sınırlı)`);
+      if (hasInvisible(full)) add("error", "hidden_unicode", `${where}: görünmez/çift yönlü/etiket Unicode karakteri (Trojan Source, ASCII smuggling) — talimatta meşru kullanımı yok`);
+      if (hasVariationRun(full)) add("warn", "variation_selector_run", `${where}: art arda varyasyon seçicisi (veri gizleme işareti; tek emoji seçicisi sorun değildir)`);
       if (INJECTION.test(t)) add("warn", "injection_phrase", `${where}: model talimatını geçersiz kılmaya çalışan kalıp (ör. 'önceki talimatları unut')`);
       if (PIPE_TO_SHELL.test(t)) add("warn", "pipe_to_shell", `${where}: 'curl | sh' benzeri uzaktan kod çalıştırma kalıbı`);
       const u = URL.exec(t);
       if (u) add("warn", "external_url", `${where}: dış bağlantı (${u[0].slice(0, 60)}) — skill veri dışarı taşımamalı; yalnız başvuru bağlantısıysa yok sayın`);
-      if (BASE64_BLOB.test(t)) add("warn", "base64_blob", `${where}: uzun base64 benzeri blok (gizlenmiş içerik?)`);
+      if (BASE64_BLOB.test(full)) add("warn", "base64_blob", `${where}: uzun base64 benzeri blok (gizlenmiş içerik?)`);
     }
   }
 

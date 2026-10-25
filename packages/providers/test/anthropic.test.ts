@@ -216,11 +216,77 @@ describe("AnthropicProvider (resmî SDK, yerel sahte uç)", () => {
     expect(new AnthropicProvider({ apiKey: KEY, baseUrl: "https://llm.corp.invalid", trustZone: "tenant-cloud" }).capabilities.trustZone).toBe("tenant-cloud");
   });
 
-  it("araç adı kodlaması: '__' içeren ad ve geçersiz karakter reddedilir (sessiz çakışma yok)", async () => {
-    responder = (_n, _c, res) => reply(res, message([{ type: "text", text: "x" }]));
-    const bad = { name: "a__b.c", description: "x", inputSchema: { type: "object" } };
+  it("araç adı kodlaması: '__' içeren / '_' ile biten ad TAKMA ADLA taşınır ve yanıtta geri çözülür; geçersiz karakter reddedilir", async () => {
+    const odd = [
+      { name: "mcp.srv.get__item", description: "x", inputSchema: { type: "object" } },
+      { name: "a.b_.c", description: "x", inputSchema: { type: "object" } },
+    ];
+    responder = (_n, c, res) => {
+      const wire = (c.body.tools as { name: string }[]).map((t) => t.name);
+      reply(res, message(wire.map((w, i) => ({ type: "tool_use", id: `t${i}`, name: w, input: {} })), { stop_reason: "tool_use" }));
+    };
+    const r = await mk().generate({ system: "s", messages: [{ role: "user", content: "a" }], tools: odd });
+    expect(r.message.toolCalls.map((t) => t.name)).toEqual(["mcp.srv.get__item", "a.b_.c"]);
+    for (const t of captured[0]!.body.tools as { name: string }[]) expect(t.name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+    const bad = { name: "a b", description: "x", inputSchema: { type: "object" } };
     await expect(mk().generate({ system: "s", messages: [{ role: "user", content: "a" }], tools: [bad] })).rejects.toMatchObject({ code: "tool_name_unencodable" });
-    const bad2 = { name: "a b", description: "x", inputSchema: { type: "object" } };
-    await expect(mk().generate({ system: "s", messages: [{ role: "user", content: "a" }], tools: [bad2] })).rejects.toMatchObject({ code: "tool_name_unencodable" });
   });
+
+  it("ortam değişkenleri anahtarı BAŞKA uca taşıyamaz: ANTHROPIC_BASE_URL / ANTHROPIC_CUSTOM_HEADERS / ANTHROPIC_AUTH_TOKEN yok sayılır", async () => {
+    let envHit = false;
+    const envSrv = createServer((_q, r) => {
+      envHit = true;
+      r.writeHead(200, { "content-type": "application/json" });
+      r.end("{}");
+    });
+    await new Promise<void>((r) => envSrv.listen(0, "127.0.0.1", r));
+    const envPort = (envSrv.address() as { port: number }).port;
+    const saved = { b: process.env["ANTHROPIC_BASE_URL"], h: process.env["ANTHROPIC_CUSTOM_HEADERS"], t: process.env["ANTHROPIC_AUTH_TOKEN"] };
+    process.env["ANTHROPIC_BASE_URL"] = `http://127.0.0.1:${envPort}`;
+    process.env["ANTHROPIC_CUSTOM_HEADERS"] = "x-sizdir: evet";
+    process.env["ANTHROPIC_AUTH_TOKEN"] = "baska-token-1234567890";
+    try {
+      responder = (_n, _c, res) => reply(res, message([{ type: "text", text: "ok" }]));
+      // açık baseUrl verilen sağlayıcı (loopback sahte uç): ortam uca YÖNLENDİREMEZ ve ek başlık/yetki taşımaz
+      await mk().generate({ system: "s", messages: [{ role: "user", content: "a" }], tools: [] });
+      expect(envHit).toBe(false);
+      expect(captured[0]!.headers["x-sizdir"]).toBeUndefined();
+      expect(String(captured[0]!.headers["authorization"] ?? "")).not.toContain("baska-token");
+      // baseUrl VERİLMEYEN sağlayıcı ortam ucunu kullanmaz: istek resmî uca gider (ağ yerine genel fetch yakalanır)
+      const realFetch = globalThis.fetch;
+      const seenReq: { url: string; headers: Headers }[] = [];
+      globalThis.fetch = (async (input: unknown, init?: { headers?: ConstructorParameters<typeof Headers>[0] }) => {
+        seenReq.push({ url: typeof input === "string" ? input : String((input as URL).href ?? (input as Request).url), headers: new Headers(init?.headers) });
+        return new Response(JSON.stringify(message([{ type: "text", text: "ok" }])), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      try {
+        await new AnthropicProvider({ apiKey: KEY }).generate({ system: "s", messages: [{ role: "user", content: "a" }], tools: [] });
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      expect(seenReq).toHaveLength(1);
+      expect(new URL(seenReq[0]!.url).origin).toBe("https://api.anthropic.com");
+      expect(seenReq[0]!.headers.get("x-sizdir")).toBeNull();
+      expect(envHit).toBe(false);
+    } finally {
+      for (const [k, v] of [["ANTHROPIC_BASE_URL", saved.b], ["ANTHROPIC_CUSTOM_HEADERS", saved.h], ["ANTHROPIC_AUTH_TOKEN", saved.t]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      await new Promise<void>((r) => envSrv.close(() => r()));
+    }
+  });
+
+  it("max_tokens ile kesilen yanıtın araç çağrıları ÇALIŞTIRILMAZ (argümanlar eksik olabilir); iptal/zaman aşımı anlaşılır hatalar verir", async () => {
+    responder = (_n, _c, res) =>
+      reply(res, message([{ type: "text", text: "yarım" }, { type: "tool_use", id: "t1", name: "k8s__workload__health", input: { name: "ap" } }], { stop_reason: "max_tokens" }));
+    const r = await mk().generate({ system: "s", messages: [{ role: "user", content: "a" }], tools });
+    expect(r.stopReason).toBe("length");
+    expect(r.message.toolCalls).toEqual([]);
+    responder = () => undefined; // yanıt vermez
+    const ac = new AbortController();
+    const pending = mk().generate({ system: "s", messages: [{ role: "user", content: "a" }], tools: [], signal: ac.signal });
+    setTimeout(() => ac.abort(), 50);
+    await expect(pending).rejects.toMatchObject({ code: "provider_error", message: expect.stringContaining("iptal edildi") });
+  }, 30_000);
 });

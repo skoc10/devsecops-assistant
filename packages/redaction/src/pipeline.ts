@@ -31,6 +31,11 @@ export interface OutputPolicy {
 }
 
 export interface ProcessedOutput {
+  /**
+   * M1–M4 sonrası, M5 (bayt/öğe KIRPMA) ÖNCESİ redakte değer. Kırpılmış `evidence` yerine bunun üzerinden türetilen
+   * özetler (karantina) uzun çıktının kuyruğundaki bulguları kaçırmaz.
+   */
+  readonly redacted: unknown;
   /** Tam redakte kanıt gövdesi (Evidence Store'a). */
   readonly evidence: unknown;
   readonly evidenceText: string;
@@ -133,6 +138,7 @@ export function processOutput(data: unknown, summary: string | undefined, policy
 
   const safeSummary = scrubText(summary ?? "", policy.known, counter, patternOpts);
   return {
+    redacted: value,
     evidence,
     evidenceText,
     ...(compact.byReference ? {} : { view: compact.view }),

@@ -1,4 +1,5 @@
 import { OpsError, estimateTokens, TRUST_ZONES } from "@ops/contracts";
+import { decodeToolName, encodeToolName } from "./tool-names.ts";
 import type {
   GenerateRequest,
   GenerateResult,
@@ -27,14 +28,7 @@ export interface OpenAiCompatibleConfig {
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
-/** Araç adlarındaki `.` OpenAI işlev adlarında geçersizdir: `.` ↔ `__` (tersinir, çakışma denetimli). */
-export function encodeToolName(name: string): string {
-  if (name.includes("__")) throw new OpsError("tool_name_unencodable", `araç adı '__' içeremez: ${name.slice(0, 60)}`);
-  return name.replaceAll(".", "__");
-}
-export function decodeToolName(name: string): string {
-  return name.replaceAll("__", ".");
-}
+export { decodeToolName, encodeToolName };
 
 type WireMessage =
   | { role: "system" | "user"; content: string }

@@ -103,7 +103,7 @@ export class Opsd {
       const rt = this.o.runtime;
       switch (req.method) {
         case "ping":
-          send({ id, ok: true, result: { pong: true, session: rt.session.id } });
+          send({ id, ok: true, result: { pong: true, session: rt.session.id, localOnly: rt.mode.localOnly, quarantine: rt.mode.quarantine } });
           return;
         case "profile.list": {
           const rows: ProfileRow[] = rt.registry.list().map((p) => ({

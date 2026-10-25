@@ -35,7 +35,7 @@ const preamble = fc.constantFrom(
   'locals { v = "$${x} %%{y}" }\n',
   'variable "a" {\n  type = string\n}\n',
   'locals {\n  l = [\n    "}", # {\n    "{",\n  ]\n}\n',
-  "﻿",
+  "\uFEFF",
 );
 const header = fc.constantFrom('resource "null_resource" "x" {', 'resource   "null_resource"   "x"   {', 'resource "terraform_data" "x" {', 'resource null_resource x {');
 const filler = fc.constantFrom("", "  triggers = { a = \"b\" }\n", "  # } {\n", "  /* } */\n", '  doc = <<EOT\n  }\nEOT\n', '  l = [\n    "}",\n  ]\n');

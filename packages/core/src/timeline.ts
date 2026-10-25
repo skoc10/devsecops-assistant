@@ -87,6 +87,14 @@ function imageKeys(images: unknown): string[] {
   return keys;
 }
 
+const DNS_LABEL = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+/** `Kind/ad` (ad bir DNS etiketi); biçime uymayan nesne adı çıkmaz (küme yazarının serbest metni kanal olmasın). */
+function closedObject(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const m = /^([A-Z][A-Za-z]{1,30})\/([^/]+)$/.exec(v);
+  return m && DNS_LABEL.test(m[2] as string) ? v : undefined;
+}
+
 function fromEntry(e: EvidenceEntry): { events: Raw[]; bridge: string[] } | { skip: string } {
   let data: unknown;
   try {
@@ -178,7 +186,10 @@ function fromEntry(e: EvidenceEntry): { events: Raw[]; bridge: string[] } | { sk
         const reason = closed ? (typeof x["reason"] === "string" && KNOWN_REASON_SET.has(x["reason"]) ? x["reason"] : "other") : clean(x["reason"], 40);
         if (!t || !reason) continue;
         const count = num(x["count"]);
-        events.push(mk({ t, source: "k8s", kind: reason, summary: `${clean(x["type"], 10) ?? "?"} ${reason}${x["object"] ? ` ${clean(x["object"])}` : ""}${count && count > 1 ? ` ×${count}` : ""}` }));
+        // Karantinada tür ve nesne de KAPALI biçime indirilir: tür {Normal, Warning, other}; nesne `Tür/ad` ve ad DNS etiketi (≤63)
+        const typ = closed ? (x["type"] === "Normal" || x["type"] === "Warning" ? x["type"] : "other") : (clean(x["type"], 10) ?? "?");
+        const obj1 = closed ? closedObject(x["object"]) : clean(x["object"]);
+        events.push(mk({ t, source: "k8s", kind: reason, summary: `${typ} ${reason}${obj1 ? ` ${obj1}` : ""}${count && count > 1 ? ` ×${count}` : ""}` }));
       }
       return { events, bridge };
     }

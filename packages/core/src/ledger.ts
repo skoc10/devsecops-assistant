@@ -41,7 +41,7 @@ export class Ledger {
     if (this.goal) lines.push(`Hedef: ${this.goal}`);
     if (this.entries.length > 0) {
       lines.push("Kanıtlar:");
-      for (const e of this.entries) lines.push(`- ${e.id} ${e.tool}: ${e.summary}${e.subjects.length ? ` [${e.subjects.slice(0, 3).join(", ")}]` : ""}`);
+      for (const e of this.entries) lines.push(`- ${e.id} ${e.tool}: ${e.summary}${e.subjects.length ? ` [${e.subjects.slice(0, 3).map((x) => x.slice(0, 100)).join(", ")}]` : ""}`);
     }
     for (const c of this.conclusions) lines.push(`Önceki sonuç: ${c}`);
     let text = lines.join("\n");

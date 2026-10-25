@@ -20,7 +20,7 @@ describe("parseHcl: geçerli yapılar", () => {
 
   it("yorumlar, heredoc, enterpolasyon, çok satırlı listeler/nesneler, for ifadesi, koşul, CRLF, BOM", () => {
     const src = [
-      "﻿# yorum { } \"",
+      "\uFEFF# yorum { } \"",
       "// başka yorum",
       "/* blok yorum { provisioner \"local-exec\" { } } */",
       'locals {',
@@ -88,7 +88,7 @@ describe("terraform ön-tarama: kod çalıştıran yapılar", () => {
       '# } \n// {\nresource "x" "y" {\n  provisioner "local-exec" {\n    command = "id"\n  }\n}\n',
       'locals { v = "${ "}" }" }\nresource "x" "y" {\n  provisioner "local-exec" { command = "id" }\n}\n',
       'resource "x" "y" {\n  a = <<-A\n  ${"x"}\n  A\n  provisioner "local-exec" {\n    command = "id"\n  }\n}\n',
-      '﻿resource "x" "y" {\r\n  provisioner "local-exec" {\r\n    command = "id"\r\n  }\r\n}\r\n',
+      '\uFEFFresource "x" "y" {\r\n  provisioner "local-exec" {\r\n    command = "id"\r\n  }\r\n}\r\n',
       'resource    "x"   "y"   {   provisioner   "local-exec"   {   command   =   "id"   }   }',
       'resource "x" "y" {\n  a = [\n    "}", # { \n    "{",\n  ]\n  provisioner "local-exec" { command = "id" }\n}\n',
       'terraform {\n  required_providers {\n    a = { source = "hashicorp/a" }\n  }\n}\nresource "x" "y" { provisioner "local-exec" { command = "id" } }',

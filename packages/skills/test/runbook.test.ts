@@ -42,7 +42,7 @@ describe("parseRunbook", () => {
     const bad = (name: string, text: string, re: RegExp): void => expect(() => parseRunbook(name, text), text.slice(0, 30)).toThrow(re);
     bad("Büyük_Ad", "1. x", /dosya adı/);
     bad("a", "1. x\n".repeat(1) + "y".repeat(RUNBOOK_LIMITS.chars), /karakteri aşıyor/);
-    bad("a", "1. normal‮ gizli", /Trojan/);
+    bad("a", "1. normal\u202E gizli", /Trojan/);
     bad("a", "başlık\nadım yok", /numaralı adım/);
     bad("a", '1. x `k8s.workload.health {bozuk}`', /geçerli JSON/);
     bad("a", '1. x `k8s.workload.health ["a"]`', /JSON nesnesi/);
@@ -125,5 +125,27 @@ describe("buildPlan: adım durumları", () => {
     expect(buildPlan(inv, {}, session, reg).steps[0]!.status).toBe("invalid_args");
     expect(buildPlan(parseRunbook("u", "1. x `k8s.yok.araci {}`"), {}, session, reg).steps[0]!.status).toBe("unknown_tool");
     expect(buildPlan(parseRunbook("r", "1. x `runbook.run {}`"), {}, session, reg).steps[0]!.status).toBe("not_allowed");
+  });
+});
+
+describe("runbook sertleştirme (bağımsız inceleme bulguları)", () => {
+  it("Object.prototype üyeleri parametre sayılmaz: {{constructor}} / {{__proto__}} 'eksik parametre' olur", () => {
+    const r = substituteArgs({ a: "{{constructor}}", b: "{{__proto__}}" }, {});
+    expect(r.missing.sort()).toEqual(["__proto__", "constructor"]);
+    expect(r.args).toEqual({ a: "", b: "" });
+  });
+  it("etiket karakteri / yumuşak tire / sıfır genişlikli boşluk içeren runbook reddedilir; BOM ile başlayan geçerli runbook kabul edilir", () => {
+    for (const cpts of [[0xe0041], [0xad], [0x200b], [0x3164]]) {
+      expect(() => parseRunbook("a", `1. adım ${String.fromCodePoint(...cpts)} gizli`), String(cpts)).toThrow(/Unicode/);
+    }
+    expect(parseRunbook("bom", `${String.fromCodePoint(0xfeff)}1. adım`).steps).toHaveLength(1);
+  });
+  it("yerel yazma araçları (localWrite) planda 'not_allowed': 'otomatik' görünmez", () => {
+    const lim = { timeoutMs: 1000, maxBytes: 1000, maxItems: 10, maxOutputTokens: 100 };
+    const w = defineTool({ class: "read", scope: "local", localWrite: true, profileKind: null, sensitivity: "none", idempotent: false, limits: lim, untrustedOutput: false, typicalOutputTokens: 1, name: "change.propose", description: "x", toolset: "core" }, z.strictObject({}));
+    const reg = new ToolRegistry();
+    reg.register(new FakeAdapter("c", "cli", "k8s", [{ def: w, handler: () => ({ data: {} }) }]), [w]);
+    const plan = buildPlan(parseRunbook("w", "1. kaydet `change.propose {}`"), {}, new Session("s"), reg);
+    expect(plan.steps[0]).toMatchObject({ status: "not_allowed" });
   });
 });

@@ -67,6 +67,8 @@ export interface RuntimeOptions {
 
 export interface Runtime {
   readonly paths: OpsPaths;
+  /** Çalışma kipleri (opsd bunları `ping` ile bildirir; istemci istediği kipin uyuştuğunu doğrular). */
+  readonly mode: { readonly localOnly: boolean; readonly quarantine: "off" | "digest" | "model" };
   readonly store: SecretStore;
   readonly known: KnownSecrets;
   readonly audit: AuditLog;
@@ -297,6 +299,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   let closed = false;
   const rt: Runtime = {
     paths: o.paths,
+    mode: { localOnly: o.localOnly === true, quarantine: o.quarantine?.mode ?? "off" },
     store,
     known,
     audit,

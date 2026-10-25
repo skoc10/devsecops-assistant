@@ -111,7 +111,7 @@ export class OpsdClient implements ChatBackend {
   breakGlassEnd(profileId: string): Promise<string> {
     return this.call<string>("breakglass.end", { profile: profileId });
   }
-  ping(): Promise<{ pong: boolean; session: string }> {
+  ping(): Promise<{ pong: boolean; session: string; localOnly: boolean; quarantine: "off" | "digest" | "model" }> {
     return this.call("ping");
   }
 }

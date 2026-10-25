@@ -114,7 +114,12 @@ function quarantineMode(c: CliEnv, flag?: string): "digest" | "model" | undefine
   return v as "digest" | "model";
 }
 
-const isLocalOnly = (c: CliEnv, flag?: boolean): boolean => flag === true || c.localOnly === true || c.env["OPS_EGRESS"] === "local-only";
+/** `OPS_EGRESS`: yalnız `normal` | `local-only`. Yazım hatası (ör. `local_only`) sessizce NORMAL kipe düşmez: açık hata. */
+function isLocalOnly(c: CliEnv, flag?: boolean): boolean {
+  const e = c.env["OPS_EGRESS"];
+  if (e !== undefined && e !== "" && e !== "normal" && e !== "local-only") throw new OpsError("usage", `OPS_EGRESS 'normal' veya 'local-only' olmalı (verilen: '${stripControlChars(e).slice(0, 20)}')`);
+  return flag === true || c.localOnly === true || e === "local-only";
+}
 
 async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approval?: TtyApprovalGate, workspace?: string, localOnly?: boolean, quarantine?: "digest" | "model"): Promise<T> {
   const ws = workspace ?? c.workspace ?? c.env["OPS_WORKSPACE"];
@@ -152,12 +157,13 @@ async function engineFor(c: CliEnv, rt: Runtime, localOnly?: boolean, quarantine
     if (sel.capabilities.trustZone !== "local") throw new OpsError("local_only", `egress: local-only kipinde yalnız yerel (local) sağlayıcı kullanılır; '${sel.id}' bölgesi '${sel.capabilities.trustZone}'. Yerel uç için OPS_PROVIDER_URL=http://127.0.0.1:… ayarlayın`);
   }
   if (quarantine === "model" && !isAgentRuntime(sel)) {
-    // Karantina özetleyicisi: ana sağlayıcı veya (OPS_QUARANTINE_MODEL ile) aynı sağlayıcının küçük kademesi.
+    // Karantina özetleyicisi: AYRI bir sağlayıcı örneği (ana örneğin konuşma durumu — ör. Anthropic'in düşünme bloğu
+    // izleyicisi — özetleyici çağrılarıyla bozulmasın); OPS_QUARANTINE_MODEL ile aynı sağlayıcının küçük kademesi.
     let qp: ModelProvider = sel;
     const qm = c.env["OPS_QUARANTINE_MODEL"];
-    if (qm && !c.provider) {
-      const made = await (c.providerFactory ?? createProvider)({ ...ctx, env: { ...c.env, OPS_PROVIDER_MODEL: qm, OPS_PROVIDER_TIER: "small" } });
-      if (isAgentRuntime(made)) throw new OpsError("usage", "OPS_QUARANTINE_MODEL ana model döngülü bir sağlayıcıyla kullanılamaz");
+    if (!c.provider) {
+      const made = await (c.providerFactory ?? createProvider)({ ...ctx, env: { ...c.env, ...(qm ? { OPS_PROVIDER_MODEL: qm, OPS_PROVIDER_TIER: "small" } : {}) } });
+      if (isAgentRuntime(made)) throw new OpsError("usage", "karantina özetleyicisi ana model döngülü bir sağlayıcıyla kullanılamaz");
       qp = made;
     }
     if (lo && qp.capabilities.trustZone !== "local") throw new OpsError("local_only", "egress: local-only kipinde karantina özetleyicisi de yerel olmalı");
@@ -795,6 +801,11 @@ export async function runCli(c: CliEnv): Promise<number> {
           throw new OpsError("opsd_unreachable", `opsd'ye bağlanılamadı (${c.paths.socket}). \`ops daemon\` çalıştırın veya \`ops chat --embedded\` kullanın`);
         });
         try {
+          // Güvenlik kipleri opsd SÜRECİNE aittir: istemci istediği kipi çalışan daemon'un sağlamadığı halde sessizce
+          // sürmez (fail-open olmaz); uyuşmazlıkta sohbet BAŞLAMAZ.
+          const info = await client.ping();
+          if (isLocalOnly(c, cv["local-only"]) && !info.localOnly) throw new OpsError("local_only", "istenen `local-only` kipi çalışan opsd'de KAPALI: `ops daemon --local-only` ile yeniden başlatın");
+          if (cq && info.quarantine !== cq && !(cq === "digest" && info.quarantine === "model")) throw new OpsError("usage", `istenen karantina kipi '${cq}' ama çalışan opsd '${info.quarantine}': \`ops daemon --quarantine ${cq}\` ile yeniden başlatın`);
           await runChat(client, { input: c.io.input, output: c.io.output }, { reauth: makeReauth(c) });
         } finally {
           client.close();

@@ -29,7 +29,7 @@ import type {
   TrustZone,
 } from "@ops/contracts";
 import type { PolicyEngine } from "@ops/policy";
-import { Counter, mapStrings, processOutput, scrubText } from "@ops/redaction";
+import { Counter, mapStrings, processOutput, scrubText, stripControlChars } from "@ops/redaction";
 import type { KnownSecrets, MaskingRules } from "@ops/redaction";
 import type { EvidenceStore } from "./evidence.ts";
 import { ToolExecutor } from "./executor.ts";
@@ -98,6 +98,17 @@ function canonicalJson(v: unknown): string {
   return JSON.stringify(sort(v));
 }
 
+/**
+ * Kanıt `subject` başvuruları kümelerde/bağlam defterinde/zaman çizelgesinde güvenilir (taint'siz) metin gibi görünür;
+ * bu yüzden YALNIZ kimlik-biçimli (boşluksuz, satır sonsuz) değerler kabul edilir. Küme yazarının koyabildiği serbest
+ * metin (olay `involvedObject.name` vb.) burada elenir.
+ */
+const SUBJECT_OK = /^[A-Za-z0-9._/@:+=~#-]{1,253}$/;
+const MAX_SUBJECTS = 100;
+const cleanSubjects = (xs: readonly string[]): string[] => [...new Set(xs)].filter((x) => SUBJECT_OK.test(x)).slice(0, MAX_SUBJECTS);
+/** Denetime/terminale giden araç adı: model seçtiği bilinmeyen ad kontrol karakteri taşıyabilir. */
+const cleanName = (s: string): string => stripControlChars(s).slice(0, 80);
+
 interface CallState {
   readonly callId: string;
   readonly req: InvokeRequest;
@@ -151,10 +162,11 @@ export class ToolGateway {
     const { registry, session, policy, audit, evidence, known } = this.d;
 
     const reg = registry.get(req.tool);
-    if (!reg) return this.deny(st, "unknown_tool", `bilinmeyen araç: ${req.tool}`);
+    if (!reg) return this.deny(st, "unknown_tool", `bilinmeyen araç: ${cleanName(req.tool)}`);
     const desc = reg.def.descriptor;
     st.desc = desc;
 
+    if (req.signal?.aborted) return this.deny(st, "timeout", "çağrı başlamadan iptal edildi");
     if (desc.composite && req.parentCallId !== undefined) {
       return this.deny(st, "policy_deny", "iç içe bileşik araç çağrılamaz (bileşik araç yalnız doğrudan modelden gelir)");
     }
@@ -245,6 +257,9 @@ export class ToolGateway {
       else if (r) cls = maxRisk(cls, r);
     }
     st.cls = unclassified ? "destroy" : cls;
+    if (req.parentCallId !== undefined && (st.cls !== "read" || desc.localWrite)) {
+      return this.deny(st, "policy_deny", "bileşik aracın iç çağrıları yalnız okuma sınıfındadır (okuma dışı eylem normal onay akışıyla ayrıca çağrılmalı)");
+    }
     if (this.d.localOnly && st.cls !== "read") {
       return this.deny(st, "local_only", `egress: local-only kipi yalnız okuma sınıfına izin verir (araç sınıfı '${st.cls}')`);
     }
@@ -260,8 +275,8 @@ export class ToolGateway {
       sensitivity: effSens,
       tainted: session.context.tainted,
       maxSensitivity: session.context.maxSensitivity,
-      profilesTouched: session.context.profilesTouched.slice(0, 16),
-      scopes: (target?.scopes ?? []).slice(0, 16),
+      profilesTouched: session.context.profilesTouched.slice(0, 16).map((x) => x.slice(0, 100)),
+      scopes: (target?.scopes ?? []).slice(0, 16).map((x) => x.slice(0, 200)),
       ...(profile ? { ceiling: profile.classCeiling } : {}),
     };
     if (decision.effect === "deny") return this.deny(st, decision.reasonCode, decision.detail, { policyDecision: true });
@@ -382,6 +397,9 @@ export class ToolGateway {
       if (isLocalWrite && decision.reasonCode === "approval_required" && st.cls === "read" && !session.context.tainted) session.writeGrants.add(desc.name);
     }
 
+    // İptal/zaman aşımı onay beklerken gelmiş olabilir (ör. bileşik üst çağrı süresi doldu): onaydan sonra HİÇBİR şey çalışmaz.
+    if (req.signal?.aborted) return this.deny(st, "timeout", "çağrı onay beklenirken iptal edildi; hiçbir şey çalıştırılmadı");
+
     // Break-glass onay beklerken bitmiş/süresi dolmuş olabilir: yükseltilmiş tavanla verilen karar GEÇERSİZ.
     if (st.breakGlass && profile) {
       const live = session.breakGlass.get(profile.id);
@@ -447,6 +465,11 @@ export class ToolGateway {
       }
     }
 
+    if (req.signal?.aborted) {
+      await this.releaseLease(st, lease);
+      return this.deny(st, "timeout", "çağrı iptal edildi; adapter çalıştırılmadı");
+    }
+
     // 10. Adapter (zaman aşımı + iptal)
     let raw: RawToolOutput;
     const ac = new AbortController();
@@ -490,7 +513,7 @@ export class ToolGateway {
     // `taint`: KANIT içeriğinin güvenilirliği. Karantinada modele giden görünümün taint'i ayrıdır (`viewTaint`).
     const taint = desc.untrustedOutput || raw.taint === "untrusted" ? "untrusted" : "trusted";
     const sensitivity: Sensitivity = maxSensitivity(desc.sensitivity, raw.sensitivity ?? "none");
-    const subjects = [...new Set([...(raw.subjects ?? []), ...(target?.refs ?? [])])];
+    const subjects = cleanSubjects([...(raw.subjects ?? []), ...(target?.refs ?? [])]);
     const observedAt = this.now().toISOString();
     let quarantined: QuarantineResult | null = null;
     if (this.d.quarantine && taint === "untrusted") {
@@ -498,7 +521,7 @@ export class ToolGateway {
       quarantined = await this.d.quarantine
         .apply({
           tool: desc.name,
-          evidence: processed.evidence,
+          evidence: processed.redacted,
           sensitivity,
           zoneCapAfter: session.zoneCapAfter({ ...(profile ? { profile } : {}), sensitivity }),
           ...(req.signal ? { signal: req.signal } : {}),
@@ -684,7 +707,7 @@ export class ToolGateway {
         ...(st.profile ? { profile: st.profile.id, environment: st.profile.environment } : {}),
         exitStatus: "error",
         reasonCode: code,
-        message,
+        message: st.req.parentCallId ? `iç çağrı (üst: ${st.req.parentCallId}): ${message}` : message,
         policyVersionHash: policy.versionHash,
       });
     } catch {
@@ -702,13 +725,13 @@ export class ToolGateway {
           event: "result",
           sessionId: session.id,
           callId: st.callId,
-          tool: st.desc?.name ?? st.req.tool,
+          tool: st.desc?.name ?? cleanName(st.req.tool),
           ...(st.cls ? { class: st.cls } : {}),
           ...(st.profile ? { profile: st.profile.id, environment: st.profile.environment } : {}),
           decision: "deny",
           reasonCode: code,
           exitStatus: "denied",
-          message,
+          message: st.req.parentCallId ? `iç çağrı (üst: ${st.req.parentCallId}): ${message}` : message,
           // yalnız POLİTİKA motorunun reddi karar girdisini taşır (sonraki reddler — egress, atıf, onay — politika dışıdır)
           ...(st.dctx && opts.policyDecision ? { decisionContext: st.dctx } : {}),
           policyVersionHash: policy.versionHash,
@@ -729,13 +752,13 @@ export class ToolGateway {
   private resultShell(st: CallState, status: "denied" | "error", code: ReasonCode, message: string): ToolResult {
     return {
       callId: st.callId,
-      tool: st.desc?.name ?? st.req.tool,
+      tool: st.desc?.name ?? cleanName(st.req.tool),
       status,
       summary: message,
       byReference: false,
       truncated: false,
       redactions: new Counter().toSummary(),
-      provenance: { source: st.desc?.name ?? st.req.tool, observedAt: this.now().toISOString() },
+      provenance: { source: st.desc?.name ?? cleanName(st.req.tool), observedAt: this.now().toISOString() },
       sensitivity: "none",
       taint: "trusted",
       subjects: [],

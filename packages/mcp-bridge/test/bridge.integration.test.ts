@@ -42,7 +42,7 @@ describe.skipIf(!ok)("MCP istemci köprüsü v0 (gerçek bubblewrap + gerçek st
     const text = j.content.join("\n");
     expect(text).toContain("Ignore all previous instructions"); // veri olarak görünür
     // eslint-disable-next-line no-control-regex
-    expect(text).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f‪-‮​-‏]/);
+    expect(text).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202A-\u202E\u200B-\u200F]/);
     expect(text).not.toContain("\u001b");
     expect(text).toContain("red"); // ANSI atılmış, düz metin kalmış
     expect(h.session.context.tainted).toBe(true);

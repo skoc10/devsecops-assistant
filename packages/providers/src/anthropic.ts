@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { OpsError, TRUST_ZONES, estimateTokens } from "@ops/contracts";
+import { decodeToolName, encodeToolName } from "./tool-names.ts";
 import type { GenerateRequest, GenerateResult, Message, ModelProvider, ModelTier, ProviderCapabilities, ToolCall, TrustZone } from "@ops/contracts";
 
 export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -28,16 +29,23 @@ export interface AnthropicProviderConfig {
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const DEFAULT_MODEL = "claude-opus-5-5";
-const MAX_TOOL_NAME = 64;
+const DEFAULT_BASE_URL = "https://api.anthropic.com";
+/** SDK'nın isteğe ekleyebileceği başlıklardan YALNIZ bunlar gider (ortamdan gelen `ANTHROPIC_CUSTOM_HEADERS` vb. elenir). */
+const ALLOWED_HEADERS = /^(content-type|content-length|accept|accept-encoding|authorization|x-api-key|anthropic-version|anthropic-beta|user-agent|idempotency-key|x-stainless-[a-z0-9-]+)$/i;
 
-/** Anthropic araç adları `^[a-zA-Z0-9_-]{1,64}$`: `.` ↔ `__` (tersinir, çakışma denetimli). */
-export function encodeToolName(name: string): string {
-  if (name.includes("__")) throw new OpsError("tool_name_unencodable", `araç adı '__' içeremez: ${name.slice(0, 60)}`);
-  const enc = name.replaceAll(".", "__");
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(enc) || enc.length > MAX_TOOL_NAME) throw new OpsError("tool_name_unencodable", `araç adı Anthropic biçimine uymuyor: ${name.slice(0, 60)}`);
-  return enc;
+/**
+ * SDK'nın `fetch`'i yerine: (1) istek YAPILANDIRILAN uç noktanın kökenine gitmeli (ortam değişkeni/yönlendirme anahtarı
+ * başka bir hosta taşıyamaz), (2) yalnız bilinen başlıklar gider.
+ */
+function guardedFetch(origin: string): typeof fetch {
+  return async (input, init) => {
+    const href = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+    if (new URL(href).origin !== origin) throw new OpsError("provider_error", "istek yapılandırılan uç noktanın dışına gidiyordu; reddedildi");
+    const h = new Headers(init?.headers);
+    for (const k of [...h.keys()]) if (!ALLOWED_HEADERS.test(k)) h.delete(k);
+    return fetch(input, { ...init, headers: h });
+  };
 }
-export const decodeToolName = (name: string): string => name.replaceAll("__", ".");
 
 /** İleti içeriğinin sağlayıcıdan bağımsız özeti: geçmiş düzenlendi mi? sorusu için (providerData katılmaz). */
 function digestOf(m: Message): string {
@@ -115,7 +123,10 @@ export class AnthropicProvider implements ModelProvider {
       cfg.client ??
       new Anthropic({
         apiKey: cfg.apiKey,
-        ...(cfg.baseUrl !== undefined ? { baseURL: cfg.baseUrl } : {}),
+        // Ortam değişkenleri (ANTHROPIC_BASE_URL/AUTH_TOKEN/CUSTOM_HEADERS) ANAHTARI başka uca taşıyamaz: uç HER ZAMAN açık
+        authToken: null,
+        baseURL: cfg.baseUrl ?? DEFAULT_BASE_URL,
+        fetch: guardedFetch(new URL(cfg.baseUrl ?? DEFAULT_BASE_URL).origin),
         maxRetries: 2,
         timeout: cfg.requestTimeoutMs ?? 120_000,
         fetchOptions: { redirect: "error" },
@@ -199,7 +210,10 @@ export class AnthropicProvider implements ModelProvider {
       throw new OpsError("provider_refusal", `model isteği reddetti${d?.category ? ` (kategori: ${String(d.category).slice(0, 40)})` : ""}; sorguyu daraltın veya başka sağlayıcı kullanın`);
     }
     const content = text.join("\n");
-    const stopReason: GenerateResult["stopReason"] = toolCalls.length > 0 ? "tool_use" : msg.stop_reason === "max_tokens" ? "length" : "end";
+    // `max_tokens` ile kesilen yanıtın araç çağrısı argümanları EKSİK olabilir: ÇALIŞTIRILMAZ (yalnız metin döner)
+    const truncated = msg.stop_reason === "max_tokens";
+    if (truncated) toolCalls.length = 0;
+    const stopReason: GenerateResult["stopReason"] = toolCalls.length > 0 ? "tool_use" : truncated ? "length" : "end";
     const u = msg.usage;
     const cacheRead = u.cache_read_input_tokens ?? 0;
     const cacheWrite = u.cache_creation_input_tokens ?? 0;
@@ -219,6 +233,9 @@ export class AnthropicProvider implements ModelProvider {
 
   private mapError(e: unknown): OpsError {
     const redact = (s: string): string => s.replaceAll(this.cfg.apiKey, "‹redacted›");
+    if (e instanceof Anthropic.APIUserAbortError) return new OpsError("provider_error", "model çağrısı iptal edildi");
+    if (e instanceof Anthropic.APIConnectionTimeoutError) return new OpsError("provider_error", "model çağrısı zaman aşımına uğradı");
+    if (e instanceof Anthropic.APIConnectionError) return new OpsError("provider_error", "sağlayıcıya erişilemedi (bağlantı hatası)");
     if (e instanceof Anthropic.APIError) {
       const status = e.status ?? 0;
       const kind = e instanceof Anthropic.AuthenticationError ? "kimlik doğrulama" : e instanceof Anthropic.RateLimitError ? "oran sınırı" : e instanceof Anthropic.BadRequestError ? "geçersiz istek" : "API";

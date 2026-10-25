@@ -11,10 +11,11 @@ const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)
 // C0 (\n \t \r hariç), DEL, C1
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 // Çift yönlü geçersiz kılma ve sıfır genişlikli karakterler (gizli talimat saklamak için kullanılır)
-const INVISIBLE = /[​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
+const INVISIBLE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
 
 export function stripControlChars(s: string): string {
-  return s.replace(ANSI, "").replace(CONTROL, "").replace(INVISIBLE, "");
+  // `\r` imleci satır başına götürüp önceki metnin üstüne yazdırır: satır sonuna çevrilir (CRLF tek satır sonu olur)
+  return s.replace(ANSI, "").replace(/\r\n?/g, "\n").replace(CONTROL, "").replace(INVISIBLE, "");
 }
 
 export interface Envelope {

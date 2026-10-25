@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -285,7 +285,7 @@ describe("tam skill linter (B-02): lintSkillDir / lintSkillRoot", () => {
   });
 
   it("görünmez/çift yönlü Unicode HATA; enjeksiyon kalıbı, curl|sh, dış URL, base64 blok UYARI", async () => {
-    await mk("trojan", md("trojan", DESC, "Normal‮ gizli sıra"));
+    await mk("trojan", md("trojan", DESC, "Normal\u202E gizli sıra"));
     const t = await lint("trojan");
     expect(t.ok).toBe(false);
     expect(codes(t)).toContain("hidden_unicode");
@@ -343,5 +343,84 @@ describe("tam skill linter (B-02): lintSkillDir / lintSkillRoot", () => {
     await mkdir(join(root, "bos-dizin"), { recursive: true });
     expect(await lintSkillDir(join(root, "bos-dizin"), "bos-dizin")).toBeNull();
     expect(await lintSkillRoot(join(root, "yok"))).toEqual([]);
+  });
+});
+
+describe("linter sertleştirme (bağımsız inceleme bulguları)", () => {
+  const cp = (...n: number[]): string => String.fromCodePoint(...n);
+  const DESC = "Bu skill bir şeyi yapar; ne zaman kullanılacağını da anlatır.";
+  let root: string;
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "ops-lint2-"));
+  });
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const mk = async (name: string, body: string, scripts?: (dir: string) => Promise<void>) => {
+    const d = join(root, name);
+    await mkdir(d, { recursive: true });
+    await writeFile(join(d, "SKILL.md"), `---\nname: ${name}\ndescription: ${DESC}\n---\n${body}\n`);
+    if (scripts) await scripts(d);
+  };
+  const lint = async (name: string) => (await lintSkillDir(join(root, name), name))!.lint;
+  const codes = (l: { findings: readonly { code: string }[] }): string[] => l.findings.map((f) => f.code);
+
+  it("görünmez karakter aileleri HATA: etiket karakterleri (ASCII smuggling), yumuşak tire, sıfır genişlikli boşluk, Hangul dolgusu, özel kullanım", async () => {
+    const cases: [string, string][] = [
+      ["etiket", `normal ${cp(0xe0041, 0xe0042)} metin`],
+      ["yumusak-tire", `normal${cp(0xad)}metin`],
+      ["sifir-genislik", `normal${cp(0x200b)}metin`],
+      ["hangul-dolgu", `normal${cp(0x3164)}metin`],
+      ["ozel-kullanim", `normal${cp(0xe000)}metin`],
+      ["bidi", `normal${cp(0x202e)}metin`],
+    ];
+    for (const [n, body] of cases) {
+      await mk(n, body);
+      const l = await lint(n);
+      expect(l.ok, n).toBe(false);
+      expect(codes(l), n).toContain("hidden_unicode");
+    }
+  });
+
+  it("tek emoji varyasyon seçicisi sorun değil; art arda seçici dizisi UYARI", async () => {
+    await mk("emoji", `Dikkat ${cp(0x26a0, 0xfe0f)} uyarı`);
+    expect(codes(await lint("emoji"))).not.toContain("variation_selector_run");
+    expect((await lint("emoji")).ok).toBe(true);
+    await mk("vs-dizi", `normal${cp(0xfe01, 0xfe02, 0xfe03)}metin`);
+    expect(codes(await lint("vs-dizi"))).toContain("variation_selector_run");
+  });
+
+  it("ReDoS yok: 150 KB'lık 'curl ' satırı ve 50k haneli satır hızlı taranır; uzun satır uyarısı verilir", async () => {
+    await mk("redos", `${"curl ".repeat(30_000)}\n${"7".repeat(50_000)} failing`);
+    const t0 = Date.now();
+    const l = await lint("redos");
+    expect(Date.now() - t0).toBeLessThan(1_500);
+    expect(codes(l)).toContain("long_line");
+  });
+
+  it("dosya boyutu sınırı: çok büyük SKILL.md okunmadan reddedilir", async () => {
+    await mk("buyuk", "x".repeat(300_000));
+    const l = await lint("buyuk");
+    expect(l.ok).toBe(false);
+    expect(codes(l)).toEqual(["file_too_large"]);
+  });
+
+  it("scripts/: sembolik bağ ve sınırı aşan ağaç SESSİZCE atlanmaz (hash eksik kalmaz) → HATA", async () => {
+    await mk("baglantili", "g", async (d) => {
+      await mkdir(join(d, "scripts"), { recursive: true });
+      await writeFile(join(d, "scripts", "a.sh"), "echo a");
+      await symlink("/etc/passwd", join(d, "scripts", "kotu"));
+    });
+    const a = await lint("baglantili");
+    expect(a.ok).toBe(false);
+    expect(codes(a)).toContain("scripts_unverifiable");
+    await mk("derin", "g", async (d) => {
+      const deep = join(d, "scripts", "1", "2", "3", "4", "5");
+      await mkdir(deep, { recursive: true });
+      await writeFile(join(deep, "x.sh"), "echo x");
+    });
+    const b = await lint("derin");
+    expect(b.ok).toBe(false);
+    expect(b.findings.some((f) => f.message.includes("derin"))).toBe(true);
   });
 });

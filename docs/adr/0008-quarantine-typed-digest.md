@@ -18,3 +18,8 @@ Enjeksiyon metnini süzmek (regex, LLM ile) yarışı kaybeder. Burada savunma, 
 - (+) Okuma→mutasyon zincirinde onay sayısı düşer; ham log token harcamaz (özet ≈ 100–250 token).
 - (−) Tanı kalitesi: tipli özet "hangi sınıf hata" der, "hangi mesaj" demez. Gerçek modellerle kalite **ölçülmedi** → **varsayılan KAPALI** (`OPS_QUARANTINE=digest|model` / `--quarantine`). Tasarımın varsayılanı "açık"tır; sapma bilinçli ve STATUS'ta yazılıdır.
 - (−) Kapsam yalnız log/olay araçları. Diff, DB hücresi, terminal, MCP, `describe` için tipli özet yok → eskisi gibi taint'li akar.
+
+## Ek (bağımsız inceleme sonrası)
+- Özet, M5 (bayt/öğe KIRPMA) öncesi redakte değerden çıkarılır; aksi halde 256 KB üstü logun kuyruğundaki hata görünmez olurdu.
+- Kanıt `subject`'leri gateway'de kimlik-biçimli (boşluksuz) değerlere süzülür: bağlam defteri ve zaman çizelgesi bunları taint'siz gösterir.
+- **Kalan dar kanal:** kimlik-biçimli kısa tanımlayıcılar (nesne adı ≤63/253 karakter) taint'siz akar; küme yazarı bunlara kısa bir ifade gizleyebilir. Bu, ürünün "kalıp-doğrulamalı kısa tanımlayıcı" ilkesinin bilinçli sınırıdır.
