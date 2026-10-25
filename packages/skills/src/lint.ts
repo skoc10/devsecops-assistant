@@ -5,7 +5,7 @@ import { parse } from "yaml";
 import { estimateTokens } from "@ops/contracts";
 import { SKILL_NAME, parseSidecar, parseSkillMd } from "./parse.ts";
 import type { ParsedSkillMd, Sidecar } from "./parse.ts";
-import { hasInvisible, hasVariationRun } from "./unicode.ts";
+import { foldForScan, hasInvisible, hasStrayVariationSelector } from "./unicode.ts";
 
 export type LintSeverity = "error" | "warn" | "info";
 
@@ -189,13 +189,26 @@ export async function lintSkillDir(dir: string, dirName: string, ctx: LintContex
     if (sidecar.runbook) texts.push(["ops.skill.yaml runbook", sidecar.runbook.join("\n")]);
     for (const [where, full] of texts) {
       const t = capLines(full);
+      // Önce metnin kendisi, eşleşme yoksa "iskeleti" (NFKC + Kiril/Yunan benzerleri → Latin) taranır: yalnız
+      // iskelette eşleşme = kalıp benzer karakterlerle gizlenmiş (iletiye eklenir).
+      let skeleton: string | undefined;
+      const scan = (re: RegExp): { readonly m: RegExpExecArray; readonly hidden: boolean } | null => {
+        const m = re.exec(t);
+        if (m) return { m, hidden: false };
+        skeleton ??= capLines(foldForScan(full));
+        const f = re.exec(skeleton);
+        return f ? { m: f, hidden: true } : null;
+      };
+      const hiddenNote = (r: { readonly hidden: boolean }): string => (r.hidden ? " — Unicode benzeri/uyumluluk karakterleriyle gizlenmiş" : "");
       if (full.split("\n").some((l) => l.length > MAX_SCAN_LINE)) add("warn", "long_line", `${where}: ${MAX_SCAN_LINE} karakterden uzun satır (gizlenmiş içerik olabilir; sezgisel taramalar satır başı ile sınırlı)`);
-      if (hasInvisible(full)) add("error", "hidden_unicode", `${where}: görünmez/çift yönlü/etiket Unicode karakteri (Trojan Source, ASCII smuggling) — talimatta meşru kullanımı yok`);
-      if (hasVariationRun(full)) add("warn", "variation_selector_run", `${where}: art arda varyasyon seçicisi (veri gizleme işareti; tek emoji seçicisi sorun değildir)`);
-      if (INJECTION.test(t)) add("warn", "injection_phrase", `${where}: model talimatını geçersiz kılmaya çalışan kalıp (ör. 'önceki talimatları unut')`);
-      if (PIPE_TO_SHELL.test(t)) add("warn", "pipe_to_shell", `${where}: 'curl | sh' benzeri uzaktan kod çalıştırma kalıbı`);
-      const u = URL.exec(t);
-      if (u) add("warn", "external_url", `${where}: dış bağlantı (${u[0].slice(0, 60)}) — skill veri dışarı taşımamalı; yalnız başvuru bağlantısıysa yok sayın`);
+      if (hasInvisible(full)) add("error", "hidden_unicode", `${where}: görünmez/çift yönlü/etiket/boş glif Unicode karakteri (Trojan Source, ASCII smuggling) — talimatta meşru kullanımı yok`);
+      if (hasStrayVariationSelector(full)) add("error", "variation_selector", `${where}: emoji tabanı olmayan veya art arda varyasyon seçicisi (seçici başına bir bayt gizlenebilir) — yalnız emojiden sonra tek U+FE0E/U+FE0F meşrudur`);
+      const inj = scan(INJECTION);
+      if (inj) add("warn", "injection_phrase", `${where}: model talimatını geçersiz kılmaya çalışan kalıp (ör. 'önceki talimatları unut')${hiddenNote(inj)}`);
+      const pipe = scan(PIPE_TO_SHELL);
+      if (pipe) add("warn", "pipe_to_shell", `${where}: 'curl | sh' benzeri uzaktan kod çalıştırma kalıbı${hiddenNote(pipe)}`);
+      const u = scan(URL);
+      if (u) add("warn", "external_url", `${where}: dış bağlantı (${u.m[0].slice(0, 60)})${hiddenNote(u)} — skill veri dışarı taşımamalı; yalnız başvuru bağlantısıysa yok sayın`);
       if (BASE64_BLOB.test(full)) add("warn", "base64_blob", `${where}: uzun base64 benzeri blok (gizlenmiş içerik?)`);
     }
   }

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { OpsError, TOOL_NAME_PATTERN, estimateTokens } from "@ops/contracts";
 import { SKILL_NAME } from "./parse.ts";
-import { hasInvisible, hasVariationRun } from "./unicode.ts";
+import { hasInvisible, hasStrayVariationSelector } from "./unicode.ts";
 
 /**
  * Runbook (tasarım §4.4): KULLANICININ getirdiği markdown. Deterministik olarak PLANA çevrilir; plan kullanıcıya
@@ -50,7 +50,7 @@ export function parseRunbook(name: string, text: string): Runbook {
   };
   if (!SKILL_NAME.test(name) || name.length > 64) bad("dosya adı küçük harf-rakam-tire olmalı (≤64)");
   if (text.length > RUNBOOK_LIMITS.chars) bad(`${RUNBOOK_LIMITS.chars} karakteri aşıyor`);
-  if (hasInvisible(text) || hasVariationRun(text)) bad("görünmez/çift yönlü/etiket Unicode karakteri var (Trojan Source / ASCII smuggling)");
+  if (hasInvisible(text) || hasStrayVariationSelector(text)) bad("görünmez/çift yönlü/etiket Unicode karakteri veya emoji dışı varyasyon seçicisi var (Trojan Source / ASCII smuggling)");
 
   let title = name;
   let description = "";

@@ -135,10 +135,11 @@ describe("runbook sertleştirme (bağımsız inceleme bulguları)", () => {
     expect(r.args).toEqual({ a: "", b: "" });
   });
   it("etiket karakteri / yumuşak tire / sıfır genişlikli boşluk içeren runbook reddedilir; BOM ile başlayan geçerli runbook kabul edilir", () => {
-    for (const cpts of [[0xe0041], [0xad], [0x200b], [0x3164]]) {
+    for (const cpts of [[0xe0041], [0xad], [0x200b], [0x3164], [0x2800], [0xfe01], [0x26a0, 0xfe0f, 0xfe0f]]) {
       expect(() => parseRunbook("a", `1. adım ${String.fromCodePoint(...cpts)} gizli`), String(cpts)).toThrow(/Unicode/);
     }
     expect(parseRunbook("bom", `${String.fromCodePoint(0xfeff)}1. adım`).steps).toHaveLength(1);
+    expect(parseRunbook("emoji", `1. adım ${String.fromCodePoint(0x26a0, 0xfe0f)} dikkat`).steps).toHaveLength(1);
   });
   it("yerel yazma araçları (localWrite) planda 'not_allowed': 'otomatik' görünmez", () => {
     const lim = { timeoutMs: 1000, maxBytes: 1000, maxItems: 10, maxOutputTokens: 100 };
