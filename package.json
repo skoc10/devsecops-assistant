@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:vm": "vm/run-vm-tests.sh",
     "ops": "node packages/cli/src/bin.ts"
   },
   "devDependencies": {

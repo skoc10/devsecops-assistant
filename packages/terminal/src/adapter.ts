@@ -1,4 +1,4 @@
-import { access, constants, realpath } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -6,7 +6,8 @@ import { classifyShell } from "@ops/classifiers";
 import type { CommandCatalog, ResolvedCommand } from "@ops/classifiers";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError, defineTool } from "@ops/contracts";
 import type { Adapter, AdapterCall, AdapterManifest, Profile, RawToolOutput, Target } from "@ops/contracts";
-import type { Sandbox } from "@ops/sandbox";
+import { fsOf } from "@ops/sandbox";
+import type { Sandbox, SandboxFs } from "@ops/sandbox";
 
 export const shellRun = defineTool(
   {
@@ -42,15 +43,11 @@ const STAGE_STDOUT_CAP = 1_000_000;
 const STDERR_CAP = 8_000;
 const SHELL_HOME = "/home/ops-shell";
 
-async function defaultResolve(name: string): Promise<string | null> {
+/** İkili, sandbox'ın İKİLİ dosya sisteminde aranır (VM'de konuk; host'ta var olan `jq` konukta olmayabilir ve tersi). */
+async function defaultResolve(name: string, fs: SandboxFs): Promise<string | null> {
   for (const d of SYSTEM_BIN_DIRS) {
     const p = join(d, name);
-    try {
-      await access(p, constants.X_OK);
-      return p;
-    } catch {
-      /* sonraki */
-    }
+    if (await fs.executable(p)) return p;
   }
   return null;
 }
@@ -111,7 +108,7 @@ export class TerminalAdapter implements Adapter {
     if (!cls.ok) throw new OpsError("unclassified", `komut sınıflanamadı: ${cls.reason}`);
     if (cls.class !== "read") throw new OpsError("ceiling_exceeded", "shell.run yalnız read sınıfı komut çalıştırır");
 
-    const resolve = this.o.resolveBinary ?? defaultResolve;
+    const resolve = this.o.resolveBinary ?? ((name: string) => defaultResolve(name, fsOf(sb)));
     const stdout: string[] = [];
     let stderr = "";
     let lastExit = 0;

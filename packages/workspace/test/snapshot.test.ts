@@ -3,13 +3,37 @@ import { lstat, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { OpsError } from "@ops/contracts";
 import { detectSandbox } from "@ops/sandbox";
+import type { Sandbox } from "@ops/sandbox";
 import { WorkspaceRegistry, createSnapshot } from "../src/index.ts";
 import { SECRET_TFVARS, makeRepo } from "@ops/testkit/git-repo";
 import type { TestRepo } from "@ops/testkit/git-repo";
 
 const sandbox = await detectSandbox();
 const P = { writePaths: ["**"], denyPaths: [] as string[] };
+
+describe("anlık kopya VM kipinde paylaşılmamış depo (ADR-0011 §5)", () => {
+  it("sandbox 'vm_path_not_shared' derse anlık kopya ÜRETİLMEZ: 'workspace_not_shared' ve `ops vm reload` yönlendirmesi", async () => {
+    const vmLike: Sandbox = {
+      kind: "vm",
+      fs: { executable: async () => true, exists: async () => true, realpath: async (p) => p, readlink: async () => null, sha256: async () => null },
+      run: async () => {
+        throw new OpsError("vm_path_not_shared", "salt-okunur bağ VM ile paylaşılmamış bir host yolu");
+      },
+      spawn: async () => {
+        throw new Error("kullanılmaz");
+      },
+    };
+    const dest = await mkdtemp(join(tmpdir(), "ops-snap-noshare-"));
+    try {
+      await expect(createSnapshot({ repoPath: "/srv/repo", destDir: join(dest, "x"), sandbox: vmLike, policy: P })).rejects.toMatchObject({ code: "workspace_not_shared", message: expect.stringMatching(/ops vm reload/) });
+      expect(existsSync(join(dest, "x", "manifest.json"))).toBe(false);
+    } finally {
+      await rm(dest, { recursive: true, force: true });
+    }
+  });
+});
 
 describe.skipIf(!sandbox)("anlık kopya (gerçek git + gerçek bubblewrap)", () => {
   let repo: TestRepo;

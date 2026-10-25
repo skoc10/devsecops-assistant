@@ -1,21 +1,35 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { copyFile, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuditLog, MemoryAuditStorage, MemoryHeadAnchor } from "@ops/audit";
 import type { ApprovalGate, ApprovalRequest, ToolResult } from "@ops/contracts";
 import { EvidenceStore, Session, ToolGateway, ToolRegistry } from "@ops/core";
 import { DEFAULT_POLICY, PolicyEngine } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
-import { detectSandbox } from "@ops/sandbox";
+import { GUEST_NODE, detectSandbox, fsOf } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { FakeBroker } from "@ops/testkit";
 import { McpBridgeAdapter, McpManifestSchema } from "../src/index.ts";
 import type { McpManifest } from "../src/index.ts";
 
 export const sandbox = await detectSandbox();
-export const MOCK_SERVER = fileURLToPath(new URL("./mock-server.mjs", import.meta.url));
 const sha = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
-export const NODE_SHA = sha(readFileSync(process.execPath));
+/**
+ * Sunucuyu çalıştıracak Node ve betik, SANDBOX'IN gördüğü yerde olmalı (ADR-0011): VM kipinde konuk Node'u
+ * (`/opt/ops-tools/node`) ve paylaşım (TMPDIR) altına kopyalanan betik; yerelde testi koşturan Node ve depo dosyası.
+ */
+export const NODE_BIN = sandbox?.kind === "vm" ? GUEST_NODE : process.execPath;
+export const MOCK_SERVER = await (async () => {
+  const src = fileURLToPath(new URL("./mock-server.mjs", import.meta.url));
+  if (sandbox?.kind !== "vm") return src;
+  const d = await mkdtemp(join(tmpdir(), "ops-mcp-share-"));
+  await copyFile(src, join(d, basename(src)));
+  return join(d, basename(src));
+})();
+export const NODE_SHA = (await fsOf(sandbox).sha256(NODE_BIN)) ?? "";
 export const MOCK_SHA = sha(readFileSync(MOCK_SERVER));
 
 class Gate implements ApprovalGate {
@@ -63,7 +77,7 @@ export function manifestFor(o: McpHarnessOpts = {}): McpManifest {
     servers: [
       {
         id: "mock",
-        command: process.execPath,
+        command: NODE_BIN,
         sha256: o.sha256 ?? NODE_SHA,
         args: [MOCK_SERVER],
         files: [{ path: MOCK_SERVER, sha256: o.fileSha256 ?? MOCK_SHA }],
@@ -82,7 +96,7 @@ export function manifestFor(o: McpHarnessOpts = {}): McpManifest {
 function spied(sb: Sandbox): { sandbox: Sandbox; spawns: () => number } {
   let n = 0;
   return {
-    sandbox: { kind: sb.kind, run: (s) => sb.run(s), spawn: (s) => (n++, sb.spawn(s)) },
+    sandbox: { kind: sb.kind, run: (s) => sb.run(s), spawn: (s) => (n++, sb.spawn(s)), ...(sb.fs ? { fs: sb.fs } : {}), ...(sb.toolDirs ? { toolDirs: sb.toolDirs } : {}) },
     spawns: () => n,
   };
 }

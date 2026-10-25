@@ -30,7 +30,7 @@ Ayrıntı: [docs/design/08-threat-model.md](docs/design/08-threat-model.md). Her
 - JS bellekte secret silme **en iyi çabadır**.
 - Sütun maskeleme (M4) `Best-effort`tur; en güçlü savunma veritabanında maskeli view'dır.
 - Karantina varsayılan **kapalıdır** ve yalnız log/olay araçlarını kapsar; diğer untrusted araçlar taint ile korunur.
-- macOS'ta seatbelt profili güncel sürümde (macOS 27) süreç başlatamıyor: sandbox gerektiren araçlar (kabuk, çalışma alanı/IaC, MCP köprüsü, Cursor) macOS'ta **kapalıdır** (fail-closed). Linux/bubblewrap etkilenmez.
+- macOS'ta seatbelt profili güncel sürümde (macOS 27) süreç başlatamıyor; sandbox gerektiren araçlar macOS'ta yalnız `ops vm up` ile açılan **Linux VM'inde bubblewrap** altında çalışır ([ADR-0011](docs/adr/0011-macos-vm-sandbox.md)). VM kapalıysa araçlar **kapalıdır** (fail-closed). VM'e yalnız `OPS_HOME/worktrees` (rw) ve kayıtlı çalışma alanı depoları (ro) girer; `$HOME`, kasa, denetim girmez. Sınırlar: VM kaçışı ve hipervizör/hgfs güvenliği kapsam dışı; sandbox içindeki `network: host` KONUĞUN ağıdır; Cursor çalışma zamanı ve exec kimlik eklentileri VM kipinde desteklenmez; VM yolu CI'da koşmaz (yerel `pnpm test:vm`). Linux/bubblewrap etkilenmez.
 - `trust_zone: local` yalnız loopback uca verilebilir; loopback'te dinleyen ve buluta aktaran bir vekil/tünel ürün tarafından görülemez (local-only kullanıcı beyanına dayanır).
 - Skill/runbook sezgisel taramaları (`injection_phrase`, `external_url`, …) `Best-effort`tir: temiz çıkış güven değildir.
 - Anthropic/OpenAI-uyumlu/Cursor sağlayıcıları ve model kademesi yerel sahte uçlara karşı test edildi; **gerçek servislere karşı doğrulanmadı**.

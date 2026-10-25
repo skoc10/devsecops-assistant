@@ -40,13 +40,35 @@ export interface SandboxProcess {
   readonly exited: Promise<{ code: number | null; signal: string | null }>;
 }
 
-export type SandboxKind = "bwrap" | "seatbelt" | "none";
+/** `vm`: Vagrant yönetimli Linux VM içinde bubblewrap (ADR-0011; macOS). */
+export type SandboxKind = "bwrap" | "seatbelt" | "vm" | "none";
+
+/**
+ * Sandbox'lı sürecin İKİLİLERİNİ gördüğü dosya sistemi (ADR-0011 §6). Yerel sandbox'larda host dosya sistemidir;
+ * VM'de konuğunki. Araç çözümleme, venv yorumlayıcı zinciri ve ikili sha256 pinleri BU görünümle sorulur:
+ * host'ta var olan bir ikili konukta yoktur (ve tersi).
+ */
+export interface SandboxFs {
+  /** Yol var ve çalıştırılabilir mi (X_OK)? */
+  executable(path: string): Promise<boolean>;
+  exists(path: string): Promise<boolean>;
+  /** Çözülmüş gerçek yol; yoksa `null`. */
+  realpath(path: string): Promise<string | null>;
+  /** Sembolik bağ hedefi (ham, çözülmemiş); bağ değilse/yoksa `null`. */
+  readlink(path: string): Promise<string | null>;
+  /** Dosyanın sha256 (hex); okunamazsa `null`. */
+  sha256(path: string): Promise<string | null>;
+}
 
 export interface Sandbox {
   readonly kind: SandboxKind;
   run(spec: SandboxSpec): Promise<SandboxResult>;
   /** Akışlı çalıştırma. `timeoutMs` toplam ömürdür; `maxOutputBytes` uygulanmaz (tüketici sınırlar). */
   spawn(spec: SandboxSpec): Promise<SandboxProcess>;
+  /** İkililerin bulunduğu dosya sistemi görünümü; verilmezse host dosya sistemi. */
+  readonly fs?: SandboxFs;
+  /** Sandbox'ın kendi getirdiği araç dizinleri (`OPS_TOOL_DIRS` karşılığı; VM'de konuk dizinleri). */
+  readonly toolDirs?: readonly string[];
 }
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;

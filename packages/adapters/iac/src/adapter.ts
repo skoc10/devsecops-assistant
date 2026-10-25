@@ -2,6 +2,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError } from "@ops/contracts";
 import type { Adapter, AdapterCall, AdapterManifest, Profile, RawToolOutput, Target, ToolDefinition } from "@ops/contracts";
+import { fsOf } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import type { WorkspaceManager } from "@ops/workspace";
 import { parseInventory, scanAnsible } from "./ansible.ts";
@@ -137,7 +138,7 @@ export class IacAdapter implements Adapter {
   }
 
   private async tool(name: string): Promise<ResolvedTool> {
-    const t = await resolveTool(name, this.o.toolDirs ?? []);
+    const t = await resolveTool(name, this.o.toolDirs ?? [], fsOf(this.o.sandbox));
     if (!t) throw new OpsError("tool_missing", `'${name}' bulunamadı: kurun veya yapılandırılmış araç dizinlerine ekleyin (OPS_TOOL_DIRS)`);
     return t;
   }
@@ -192,7 +193,7 @@ export class IacAdapter implements Adapter {
   private async inspect(cur: ReturnType<IacAdapter["current"]>): Promise<RawToolOutput> {
     const engine = cur.ws.engine;
     const bin = engine === "ansible" ? "ansible-playbook" : ENGINE_BIN[engine];
-    const available = (await resolveTool(bin, this.o.toolDirs ?? [])) !== null;
+    const available = (await resolveTool(bin, this.o.toolDirs ?? [], fsOf(this.o.sandbox))) !== null;
     if (engine === "ansible") {
       const files = await cur.fs.listFiles();
       const an = scanAnsible(await this.collectAnsible(cur, files));
@@ -366,7 +367,7 @@ export class IacAdapter implements Adapter {
   private async lint(cur: ReturnType<IacAdapter["current"]>, playbook?: string): Promise<RawToolOutput> {
     const sandbox = this.requireSandbox();
     if (cur.ws.engine !== "ansible") {
-      const tflint = await resolveTool("tflint", this.o.toolDirs ?? []);
+      const tflint = await resolveTool("tflint", this.o.toolDirs ?? [], fsOf(this.o.sandbox));
       if (!tflint) return { data: { tool: "tflint", available: false, note: "tflint kurulu değil; iac.validate ve iac.fmt kullanın" }, summary: "tflint yok", subjects: [`Workspace/${cur.ws.id}`] };
       const cfg = join(cur.fs.snapshot.dir, "tflint.hcl");
       await ensureDir(cur.fs.snapshot.dir);
@@ -401,7 +402,7 @@ export class IacAdapter implements Adapter {
     };
     const playbooks = (playbook ? [playbook] : an.model.playbooks).slice(0, 8);
     const syntax: { playbook: string; ok: boolean; message?: string }[] = [];
-    const pb = await resolveTool("ansible-playbook", this.o.toolDirs ?? []);
+    const pb = await resolveTool("ansible-playbook", this.o.toolDirs ?? [], fsOf(this.o.sandbox));
     if (pb) {
       for (const p of playbooks) {
         if (!an.model.playbooks.includes(p)) {
@@ -414,7 +415,7 @@ export class IacAdapter implements Adapter {
     }
     let lintIssues: Obj[] = [];
     let lintNote: string | undefined;
-    const al = await resolveTool("ansible-lint", this.o.toolDirs ?? []);
+    const al = await resolveTool("ansible-lint", this.o.toolDirs ?? [], fsOf(this.o.sandbox));
     if (al) {
       const r = await runInSandbox({ sandbox, tool: al, args: ["-f", "json", "--nocolor", "--offline", "-c", lintCfg, "--project-dir", cur.fs.root, ...(playbook ? [playbook] : [])], cwd: cur.fs.root, rwBinds: [], roBinds: [cur.fs.root, cfg, lintCfg], env, timeoutMs: 150_000, maxOutputBytes: 2_000_000 });
       try {
@@ -599,7 +600,7 @@ export class IacAdapter implements Adapter {
         subjects: [`Workspace/${cur.ws.id}`, `File/${cur.ws.id}/${playbook}`],
       };
     }
-    const pb = await resolveTool("ansible-playbook", this.o.toolDirs ?? []);
+    const pb = await resolveTool("ansible-playbook", this.o.toolDirs ?? [], fsOf(this.o.sandbox));
     if (!pb) throw new OpsError("tool_missing", "'ansible-playbook' bulunamadı: kurun veya OPS_TOOL_DIRS'e ekleyin");
     const fsp = await import("node:fs/promises");
     await ensureDir(cur.fs.snapshot.dir);

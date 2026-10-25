@@ -103,7 +103,8 @@ describe("yetenek bildirimi", () => {
 // ---- host süreci ile uçtan uca (gerçek bwrap varsa orada; yoksa atlanır) -----------------------
 
 const nodeDir = dirname(process.execPath);
-const describeReal = real ? describe : describe.skip;
+// VM sandbox'ında cursor-host/Node/SDK konukta yoktur (ADR-0011 sınırlar): gerçek testler yalnız yerel bwrap ile
+const describeReal = real && real.kind !== "vm" ? describe : describe.skip;
 
 function runtimeFor(sb: Sandbox, scenario: string, extraBinds: string[] = [], extraEnv: Record<string, string> = {}, apiKey?: string, spikePassed = true) {
   return new CursorRuntime({
