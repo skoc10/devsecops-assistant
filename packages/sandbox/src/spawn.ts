@@ -7,6 +7,8 @@ export interface SpawnOpts {
   readonly stdin?: Uint8Array;
   /** spawn edilen sürecin KENDİ ortamı (sandbox ikilisi için asgari). */
   readonly env: Record<string, string>;
+  /** Süreç zorla öldürüldüğünde (zaman aşımı/çıktı sınırı) çağrılır: uzak tarafta kalıntı temizliği için (VM). */
+  readonly onKill?: () => void;
 }
 
 /** Zaman aşımı ve çıktı sınırı olan, kabuksuz spawn. Aşımda süreç öldürülür. */
@@ -19,7 +21,12 @@ export function spawnLimited(file: string, args: readonly string[], opts: SpawnO
     let size = 0;
     let truncated = false;
     let timedOut = false;
+    let killed = false;
     const kill = (): void => {
+      if (!killed) {
+        killed = true;
+        opts.onKill?.();
+      }
       try {
         if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
         else child.kill("SIGKILL");
@@ -57,9 +64,14 @@ export function spawnLimited(file: string, args: readonly string[], opts: SpawnO
 }
 
 /** Akışlı spawn: ömür sınırı dolunca süreç grubu öldürülür. */
-export function spawnStreaming(file: string, args: readonly string[], opts: { env: Record<string, string>; lifetimeMs: number }): SandboxProcess {
+export function spawnStreaming(file: string, args: readonly string[], opts: { env: Record<string, string>; lifetimeMs: number; onKill?: () => void }): SandboxProcess {
   const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"], env: opts.env, shell: false, detached: true });
+  let killed = false;
   const kill = (): void => {
+    if (!killed) {
+      killed = true;
+      opts.onKill?.();
+    }
     try {
       if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
       else child.kill("SIGKILL");

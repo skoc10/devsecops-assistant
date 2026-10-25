@@ -11,3 +11,5 @@ coverage/
 .terraform/
 .vite/
 tsconfig.tsbuildinfo
+# Vagrant makine durumu OPS_HOME/vm/.vagrant altindadir; vm/ icinde elle vagrant kosulursa:
+vm/.vagrant/

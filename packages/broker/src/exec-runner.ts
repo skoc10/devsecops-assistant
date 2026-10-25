@@ -108,6 +108,8 @@ export class ExecCredentialRunner {
     if (!sandbox) {
       throw new OpsError("sandbox_unavailable", "OS sandbox yok (bubblewrap/seatbelt): exec kimlik eklentisi çalıştırılamaz");
     }
+    // Pin host ikilisine aittir; konukta ne ikili ne bulut CLI kimlik deposu vardır (ADR-0011 sınırlar).
+    if (sandbox.kind === "vm") throw new OpsError("sandbox_unavailable", "exec kimlik eklentileri VM sandbox'ında desteklenmiyor (host ikilisi konukta çalışamaz; ADR-0011)");
     // şablon + argv yeniden doğrulama
     const catalog = this.o.catalog ?? BUILTIN_EXEC_TEMPLATES;
     const binName = exec.binaryPath.split("/").pop() ?? "";

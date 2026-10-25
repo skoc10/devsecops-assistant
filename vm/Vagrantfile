@@ -1,0 +1,51 @@
+# ops-assistant macOS sandbox VM'i (ADR-0011). `ops vm up` ile yönetilir; elle `vagrant` çağrısı için:
+#   VAGRANT_CWD=vm VAGRANT_DOTFILE_PATH=~/.ops-assistant/vm/.vagrant vagrant status
+# Paylaşımlar `ops vm up` tarafından OPS_VM_SHARES (JSON) ile verilir; Vagrant'ın varsayılan /vagrant paylaşımı KAPALI.
+require "json"
+
+BOX = "bento/ubuntu-24.04"
+BOX_VERSION = "202502.21.0" # sabit: güncelleme bilinçli bir commit'tir (provision.sh'daki pinlerle birlikte sınanır)
+
+shares = JSON.parse(ENV.fetch("OPS_VM_SHARES", "[]"))
+provider = ENV.fetch("OPS_VM_PROVIDER", "vmware_desktop")
+memory = ENV.fetch("OPS_VM_MEMORY", "2048")
+cpus = ENV.fetch("OPS_VM_CPUS", "2")
+
+Vagrant.configure("2") do |config|
+  config.vm.box = BOX
+  config.vm.box_version = BOX_VERSION
+  config.vm.box_check_update = false
+  config.vm.hostname = "ops-sandbox"
+  # Depo kaynak ağacı konuğa GİRMEZ.
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  # ssh: agent/X11 iletimi yok; `ops vm up` kendi sertleştirilmiş ssh_config'ini yazar.
+  config.ssh.forward_agent = false
+  config.ssh.forward_x11 = false
+
+  shares.each do |s|
+    opts = { create: true }
+    opts[:mount_options] = ["ro"] if s["mode"] == "ro"
+    config.vm.synced_folder s["host"], s["guest"], **opts
+  end
+
+  config.vm.provider "vmware_desktop" do |v|
+    v.vmx["memsize"] = memory
+    v.vmx["numvcpus"] = cpus
+    v.gui = false
+    v.ssh_info_public = false
+  end
+  config.vm.provider "virtualbox" do |v|
+    v.memory = memory
+    v.cpus = cpus
+  end
+  config.vm.provider "parallels" do |v|
+    v.memory = memory
+    v.cpus = cpus
+  end
+  config.vm.provider "utm" do |v|
+    v.memory = memory
+    v.cpus = cpus
+  end
+
+  config.vm.provision "shell", path: "provision.sh", privileged: true
+end

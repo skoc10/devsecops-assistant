@@ -6,10 +6,10 @@ import { promisify } from "node:util";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { scanTerraform } from "../src/terraform.ts";
-import { findTool } from "./tools.ts";
+import { findHostTool } from "./tools.ts";
 
 const run = promisify(execFile);
-const tofu = findTool("tofu");
+const tofu = findHostTool("tofu"); // host'ta çalışır (sandbox'sız ayrıştırıcı karşılaştırması)
 
 async function tofuParses(text: string, dir: string): Promise<boolean> {
   await writeFile(join(dir, "main.tf"), text);

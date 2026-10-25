@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError, defineTool } from "@ops/contracts";
 import type { Adapter, AdapterCall, AdapterManifest, Profile, RawToolOutput, Target, ToolDefinition } from "@ops/contracts";
 import { KnownSecrets, scrubText } from "@ops/redaction";
+import { fsOf } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { McpProtocolError, McpSession } from "./client.ts";
 import { buildInputSchema, mcpToolName, roBindProblem, toolsetOf } from "./manifest.ts";
@@ -27,17 +26,6 @@ export interface McpCheckReport {
   /** Sunucunun sunduğu ama manifestte OLMAYAN araç sayısı (bunlar asla modele açılmaz). */
   readonly undeclared: number;
   readonly error?: string;
-}
-
-async function sha256File(path: string): Promise<string> {
-  const h = createHash("sha256");
-  await new Promise<void>((resolve, reject) => {
-    const s = createReadStream(path);
-    s.on("data", (c) => h.update(c));
-    s.on("end", () => resolve());
-    s.on("error", reject);
-  });
-  return h.digest("hex");
 }
 
 interface Entry {
@@ -108,15 +96,15 @@ export class McpBridgeAdapter implements Adapter {
     return { profileId: profile.id, kind: profile.kind, endpoint: profile.targetPin.endpoint, scopes: [], refs: [] };
   }
 
-  /** Sunucu ikilisi ve ek dosyaları pinli sha256 ile eşleşmeli; aksi halde ÇALIŞTIRILMAZ. */
+  /**
+   * Sunucu ikilisi ve ek dosyaları pinli sha256 ile eşleşmeli; aksi halde ÇALIŞTIRILMAZ. Özet, sandbox'ın İKİLİ
+   * dosya sisteminden alınır (VM'de konuk: çalışacak dosya host'taki değil, konuktakidir).
+   */
   private async verifyPins(s: McpServerSpec): Promise<void> {
+    const fs = fsOf(this.o.sandbox);
     const check = async (path: string, want: string, label: string): Promise<void> => {
-      let got: string;
-      try {
-        got = await sha256File(path);
-      } catch {
-        throw new OpsError("mcp_pin_mismatch", `${label} okunamadı: ${path}`);
-      }
+      const got = await fs.sha256(path);
+      if (got === null) throw new OpsError("mcp_pin_mismatch", `${label} okunamadı: ${path}`);
       if (got !== want) throw new OpsError("mcp_pin_mismatch", `${label} sha256 pini uyuşmuyor (${path}): sunucu ÇALIŞTIRILMADI`);
     };
     await check(s.command, s.sha256, "sunucu ikilisi");

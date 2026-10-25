@@ -74,6 +74,8 @@ export function registerBuiltinProviders(): void {
     if (!ctx.sandbox || ctx.sandbox.kind === "none") {
       throw new OpsError("sandbox_unavailable", "Cursor için OS sandbox (bubblewrap/seatbelt) gerekli: SDK kullanıcının ortamını miras alır");
     }
+    // cursor-host betiği, host Node ikilisi ve SDK host dosyalarıdır; konukta yoktur (ADR-0011 sınırlar).
+    if (ctx.sandbox.kind === "vm") throw new OpsError("sandbox_unavailable", "Cursor çalışma zamanı VM sandbox'ında desteklenmiyor: cursor-host ve SDK konukta yok (ADR-0011)");
     let sdk = ctx.env["OPS_CURSOR_SDK_MODULE"];
     const binds = new Set<string>([dirname(process.execPath), dirname(CURSOR_HOST_PATH)]);
     if (sdk) binds.add(dirname(sdk));

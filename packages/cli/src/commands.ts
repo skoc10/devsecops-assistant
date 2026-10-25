@@ -14,7 +14,7 @@ import { stripControlChars } from "@ops/redaction";
 import { WORKSPACE_ENGINES, WorkspaceManager, WorkspaceRegistry } from "@ops/workspace";
 import type { WorkspaceEngine } from "@ops/workspace";
 import { PolicyEngine, explainReason, loadPolicyFile, parsePolicy } from "@ops/policy";
-import { detectSandbox } from "@ops/sandbox";
+import { detectSandbox, detectSandboxDetailed, VmSandbox, loadVmState } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { RunbookRegistry, lintSkillRoot, renderLint } from "@ops/skills";
 import { readAuditRecords, LocalBackend } from "./backend.ts";
@@ -34,6 +34,7 @@ import { createProvider, isAgentRuntime, providerKeyName, providerNames } from "
 import type { ProviderFactory } from "./providers.ts";
 import { createRuntime } from "./runtime.ts";
 import type { Runtime } from "./runtime.ts";
+import { guestToolVersions, vmCommand } from "./vm.ts";
 
 export interface CliEnv {
   readonly argv: readonly string[];
@@ -77,7 +78,8 @@ const USAGE = [
   "              [--log-hosts h1,h2] [--name AD] [--replace]   (belirteç: OPS_GITHUB_TOKEN_FILE ile 0600 dosya veya yankısız TTY; salt okunur fine-grained belirteç önerilir)",
   "  profile list | rm ID | doctor ID",
   "  profile rbac --sa-namespace NS --namespace a,b [--cluster-read] [--name AD]   (manifest üretir, UYGULAMAZ)",
-  "  doctor                             ortam kimlikleri ve sandbox durumu",
+  "  doctor                             ortam kimlikleri ve sandbox durumu (VM kipinde konuk araç sürümleri)",
+  "  vm up|status|halt|destroy|reload   macOS sandbox VM'i (Vagrant + Linux + bubblewrap; ADR-0011) — VM yalnız bu komutlarla başlar",
   "  audit verify                       denetim zincirini doğrula",
   "  usage                              token kullanım raporu (denetimden)",
   "  replay [--session ID] [--policy DOSYA|current] [--verbose] [--json]   denetimden oturum incelemesi: eylem zaman çizelgesi + tutarlılık denetimi; --policy ile kayıtlı kararlar aday politikayla yeniden değerlendirilir (araç/model ÇAĞRILMAZ)",
@@ -100,6 +102,7 @@ const USAGE = [
   "  (ortam) OPS_QUARANTINE=digest|model  ham log/olay modele GİRMEZ, tipli özet gider (ham: sohbette /show, /raw); model: ek olarak araçsız şemalı model sınıflaması (OPS_QUARANTINE_MODEL=küçük model)",
   "  (ortam) OPS_WORKDIR=DİZİN          shell.run iş alanı (salt-okunur; OS sandbox gerekir; ev dizini olamaz)",
   "  (ortam) OPS_WORKSPACE=ID           etkin IaC çalışma alanı; OPS_TOOL_DIRS=d1:d2 terraform/tofu/ansible dizinleri; OPS_IAC_PROVIDER_MIRROR=DİZİN yerel sağlayıcı aynası",
+  "  (ortam) OPS_SANDBOX=vm|bwrap|none  sandbox seçimi (varsayılan: Linux bwrap, macOS VM varsa VM); OPS_VM_DIR=DİZİN VM durum dizini (varsayılan OPS_HOME/vm)",
 ].join("\n");
 
 const out = (c: CliEnv, s: string): void => void c.io.output.write(`${s}\n`);
@@ -280,6 +283,7 @@ async function workspaceCommand(c: CliEnv, sub: string | undefined, rest: string
         { ...(values.replace ? { replace: true } : {}), ...(c.env["HOME"] ? { home: c.env["HOME"] } : {}) },
       );
       out(c, `Çalışma alanı kaydedildi: ${ws.id} (${ws.engine}, ${ws.path})`);
+      if (await loadVmState(c.paths.vmDir).catch(() => null)) out(c, "Sandbox VM'i kurulu: deponun konukta salt-okunur görünmesi için `ops vm reload` çalıştırın (paylaşımlar açılışta bağlanır).");
       out(c, "Ajan deponuza YAZMAZ: her oturumda HEAD'in anlık kopyasında çalışır. Değişiklikleri `ops workspace diff/export` ile alırsınız. State, tfvars, .env, anahtar ve CI tanımı dosyaları kopyalanmaz/yazılamaz.");
       return 0;
     }
@@ -680,8 +684,14 @@ export async function runCli(c: CliEnv): Promise<number> {
       case "doctor": {
         const home = c.env["HOME"] ?? "";
         const amb = home ? await scanAmbientCredentials(home) : [];
-        const sb = c.sandbox === undefined || c.sandbox === "detect" ? await detectSandbox() : c.sandbox;
-        out(c, `OS sandbox: ${sb ? sb.kind : "YOK — exec kimlik eklentileri çalışmaz, terminal dar kümeyle sınırlı kalır"}`);
+        const det = c.sandbox === undefined || c.sandbox === "detect" ? await detectSandboxDetailed({ env: c.env, vmStateDir: c.paths.vmDir }) : { sandbox: c.sandbox, reason: c.sandbox ? "verildi" : "kapalı" };
+        const sb = det.sandbox;
+        out(c, `OS sandbox: ${sb ? `${sb.kind} — ${det.reason}` : `YOK (${det.reason}) — kabuk, çalışma alanı/IaC, MCP köprüsü ve exec kimlik eklentileri çalışmaz`}`);
+        if (sb instanceof VmSandbox) {
+          out(c, `  paylaşımlar: ${sb.state.shares.map((s) => `${s.host} [${s.mode}]`).join(", ")}`);
+          out(c, `  konuk araç dizinleri: ${sb.toolDirs.join(":")}`);
+          for (const l of await guestToolVersions(sb)) out(c, l);
+        }
         const envNames = scanAmbientEnv(c.env);
         out(c, amb.length === 0 && envNames.length === 0 ? "Ortam kimliği bulunamadı." : "Ürünün DENETİMİ DIŞINDAKİ ortam kimlikleri (içerik okunmadı):");
         for (const a of amb) out(c, `  ${a.path}  ${a.what}  mod ${a.mode}${a.groupOrWorldReadable ? "  ⚠ grup/dünya okuyabilir" : ""}`);
@@ -749,6 +759,9 @@ export async function runCli(c: CliEnv): Promise<number> {
 
       case "workspace":
         return await workspaceCommand(c, sub, rest);
+
+      case "vm":
+        return await vmCommand({ paths: c.paths, env: c.env, io: c.io }, sub, rest);
 
       case "skill":
         return await skillCommand(c, sub, rest);

@@ -1,5 +1,7 @@
 // CI kapısı: vitest JSON raporunda atlanan (skip/todo) test varsa çıkış 1.
 // Sandbox, gerçek PostgreSQL ve IaC testleri ortam eksikse kendini atlar; CI'da bu sessiz kapsam kaybıdır.
+// VM gerektiren testler (*.vm.test.ts) varsayılan yapılandırmanın DIŞINDADIR (vitest.vm.config.ts, `pnpm test:vm`):
+// bu rapora hiç girmezler, dolayısıyla "atlanmış" sayılmazlar — VM yolu CI'da doğrulanmaz (ADR-0011).
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
 

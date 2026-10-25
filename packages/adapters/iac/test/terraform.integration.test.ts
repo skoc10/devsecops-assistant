@@ -7,11 +7,11 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { makeCanary } from "@ops/testkit";
 import { makeIacHarness, sandbox } from "./harness.ts";
-import { findTool } from "./tools.ts";
+import { findHostTool, findTool } from "./tools.ts";
 
 const run = promisify(execFile);
-const tofu = findTool("tofu");
-const terraform = findTool("terraform");
+const tofu = await findTool("tofu", sandbox);
+const terraform = await findTool("terraform", sandbox);
 const ok = !!sandbox && !!tofu;
 
 const GOOD = {
@@ -241,8 +241,13 @@ describe.skipIf(!ok)("Terraform/OpenTofu araçları (gerçek tofu + gerçek bubb
     try {
       const { writeFile } = await import("node:fs/promises");
       await writeFile(join(cfg, "main.tf"), 'terraform {\n  required_providers {\n    null = {\n      source  = "hashicorp/null"\n      version = "3.2.3"\n    }\n  }\n}\n');
+      const hostTofu = findHostTool("tofu");
+      if (!hostTofu) {
+        console.warn("[atlandı] host'ta tofu yok (VM kipi): sağlayıcı aynası host'ta üretilemez");
+        return;
+      }
       try {
-        await run(tofu!, ["providers", "mirror", mirror], { cwd: cfg, env: { PATH: process.env["PATH"] ?? "", HOME: cfg, HTTPS_PROXY: process.env["HTTPS_PROXY"] ?? "", SSL_CERT_FILE: process.env["SSL_CERT_FILE"] ?? "/root/.ccr/ca-bundle.crt" }, timeout: 90_000 });
+        await run(hostTofu, ["providers", "mirror", mirror], { cwd: cfg, env: { PATH: process.env["PATH"] ?? "", HOME: cfg, HTTPS_PROXY: process.env["HTTPS_PROXY"] ?? "", SSL_CERT_FILE: process.env["SSL_CERT_FILE"] ?? "/root/.ccr/ca-bundle.crt" }, timeout: 90_000 });
       } catch {
         console.warn("[atlandı] sağlayıcı aynası üretilemedi (kayıt defterine erişim yok)");
         return;

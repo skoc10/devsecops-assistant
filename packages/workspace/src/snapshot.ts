@@ -1,6 +1,7 @@
-import { access, constants, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { OpsError } from "@ops/contracts";
+import { fsOf } from "@ops/sandbox";
 import type { Sandbox } from "@ops/sandbox";
 import { readCheck } from "./paths.ts";
 import type { PathPolicy } from "./paths.ts";
@@ -29,16 +30,11 @@ export interface Snapshot {
 
 const GIT_HOME = "/home/ops-git";
 
-async function gitBinary(): Promise<string> {
-  for (const p of ["/usr/bin/git", "/usr/local/bin/git", "/bin/git"]) {
-    try {
-      await access(p, constants.X_OK);
-      return p;
-    } catch {
-      /* sonraki */
-    }
-  }
-  throw new OpsError("git_missing", "git bulunamadı");
+/** git, sandbox'ın İKİLİ dosya sisteminde aranır (VM'de konuk git'i; host'un `/usr/bin/git`i değil). */
+async function gitBinary(sandbox: Sandbox): Promise<string> {
+  const fs = fsOf(sandbox);
+  for (const p of ["/usr/bin/git", "/usr/local/bin/git", "/bin/git"]) if (await fs.executable(p)) return p;
+  throw new OpsError("git_missing", "git bulunamadı (sandbox'ın gördüğü dosya sisteminde)");
 }
 
 /**
@@ -46,7 +42,7 @@ async function gitBinary(): Promise<string> {
  * süzgeç (smudge/clean), fsmonitor ve `.gitattributes` çalıştırmaz). Sandbox yoksa çalışmaz.
  */
 async function git(sandbox: Sandbox, repo: string, args: readonly string[], opts: { stdin?: Uint8Array; maxOutputBytes: number }): Promise<Buffer> {
-  const bin = await gitBinary();
+  const bin = await gitBinary(sandbox);
   const res = await sandbox.run({
     argv: [bin, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never", "-c", "core.untrackedCache=false", "--no-pager", "-C", repo, ...args],
     env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" },
