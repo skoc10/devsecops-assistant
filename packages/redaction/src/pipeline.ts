@@ -52,11 +52,14 @@ export interface ProcessedOutput {
   readonly fullTokens: number;
 }
 
-/** M2 + M3 + kontrol karakteri temizliği: serbest metin (hata mesajı, kullanıcı girdisi, denetim) için. */
+/**
+ * M3 + M2 + kontrol karakteri temizliği: serbest metin (hata mesajı, kullanıcı girdisi, denetim) için. Kayıtlı
+ * değerler (M3) desenlerden (M2) ÖNCE maskelenir: M2'nin kısmi eşleşmesi (`password=correct horse…` → yalnız ilk
+ * sözcük) kayıtlı değeri bölüp M3'ün onu tanımasını engelliyor, kalan kısım sızıyordu.
+ */
 export function scrubText(text: string, known: KnownSecrets, counter: Counter = new Counter(), opts: PatternOptions = {}): string {
   const cleaned = stripControlChars(text);
-  const patterned = applyPatternRules(cleaned, counter, opts);
-  return known.scrub(patterned, counter);
+  return applyPatternRules(known.scrub(cleaned, counter), counter, opts);
 }
 
 function isTable(v: unknown): v is Table {
@@ -102,7 +105,7 @@ export function processOutput(data: unknown, summary: string | undefined, policy
 
   // M1
   let value = applyStructural(data, getProfile(policy.structuralProfile), counter);
-  // M2 + M3 (+ kontrol karakterleri) her string ve anahtar üzerinde
+  // M3 + M2 (+ kontrol karakterleri) her string ve anahtar üzerinde
   value = mapStrings(value, (s) => scrubText(s, policy.known, counter, patternOpts));
   // M4
   if (policy.masking) {

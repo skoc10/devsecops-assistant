@@ -69,6 +69,21 @@ describe("S-06 çekirdeği: canary çıktı boru hattından sızmaz", () => {
     expect(out).toContain("‹redacted:github-token›");
   });
 
+  it("kayıtlı değer (M3) desenden (M2) önce maskelenir: kısmi kv-secret eşleşmesi parolayı bölüp kalanını sızdıramaz", () => {
+    const known = new KnownSecrets();
+    const pass = "correct horse battery staple"; // boşluklu (passphrase) parola
+    const pw2 = "Tr0ub4dor,3xYz!Q9"; // virgüllü: kv-secret değeri virgülde kesilir
+    known.add("db1", pass);
+    known.add("db2", pw2);
+    const a = scrubText(`FATAL: could not connect, password=${pass}`, known);
+    const b = scrubText(`DATABASE_PASSWORD: ${pw2}`, known);
+    expect(a).not.toContain("horse");
+    expect(b).not.toContain("3xYz");
+    const p = processOutput({ log: `password=${pass}`, env: `DATABASE_PASSWORD: ${pw2}` }, "", policy({}, known));
+    expect(p.evidenceText).not.toContain("battery");
+    expect(p.evidenceText).not.toContain("3xYz");
+  });
+
   it("extraPatternRules scrubText ve processOutput'ta uygulanır; `g`siz/`y`li kural da her geçişi maskeler", () => {
     const rules = [
       { id: "corp-token", regex: /\bCORP-[0-9]{8}\b/ }, // bilerek `g`siz: yalnız ilk geçiş maskelenmemeli
