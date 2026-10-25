@@ -38,6 +38,17 @@ describe("alan projeksiyonu", () => {
   it("olmayan alanı yok sayar", () => {
     expect(projectFields({ a: 1 }, ["b", "a"])).toEqual({ a: 1 });
   });
+
+  it("model kontrollü yol prototip zincirine ulaşamaz (prototip kirletme yok)", () => {
+    for (const path of ["__proto__.kirli", "a.__proto__.kirli", "constructor.prototype.kirli", "__proto__"]) {
+      expect(() => projectFields({ a: { b: 1 } }, [path, "a.b"])).not.toThrow();
+      expect(projectFields({ a: { b: 1 } }, [path, "a.b"])).toEqual({ a: { b: 1 } });
+    }
+    expect(({} as Record<string, unknown>)["kirli"]).toBeUndefined();
+    expect(Object.keys(buildTrie(["__proto__.x", "constructor"]))).toEqual([]);
+    // miras alınan özellik "alan var" sayılmaz
+    expect(projectFields({ a: 1 }, ["toString", "hasOwnProperty", "a"])).toEqual({ a: 1 });
+  });
 });
 
 describe("boşları atma, tablo biçimi, liste sınırı", () => {

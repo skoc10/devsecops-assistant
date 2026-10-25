@@ -14,20 +14,28 @@ export interface FieldTrie {
   [key: string]: true | FieldTrie;
 }
 
+/**
+ * Yollar modelden gelir (`select`): prototip zincirine ulaşan bölüm içeren yol YOK SAYILIR.
+ * Aksi halde `__proto__.x` PEP sürecindeki tüm nesnelere `x` ekliyordu (prototip kirletme).
+ */
+const UNSAFE_SEGMENTS: ReadonlySet<string> = new Set(["__proto__", "prototype", "constructor"]);
+const emptyTrie = (): FieldTrie => Object.create(null) as FieldTrie;
+
 export function buildTrie(paths: readonly string[]): FieldTrie {
-  const root: FieldTrie = {};
+  const root = emptyTrie();
   for (const path of paths) {
     const segs = path.split(".").filter((s) => s.length > 0);
+    if (segs.some((s) => UNSAFE_SEGMENTS.has(s))) continue;
     let node = root;
     for (let i = 0; i < segs.length; i++) {
       const seg = segs[i] as string;
-      const existing = node[seg];
+      const existing = Object.hasOwn(node, seg) ? node[seg] : undefined;
       if (existing === true) break; // üst yol zaten tümüyle seçili
       if (i === segs.length - 1) {
         node[seg] = true;
         break;
       }
-      const next: FieldTrie = existing ?? {};
+      const next: FieldTrie = existing ?? emptyTrie();
       node[seg] = next;
       node = next;
     }
@@ -40,7 +48,7 @@ function project(value: unknown, trie: FieldTrie): unknown {
   if (!isPlain(value)) return value;
   const out: Plain = {};
   for (const [key, sub] of Object.entries(trie)) {
-    if (!(key in value)) continue;
+    if (!Object.hasOwn(value, key)) continue;
     out[key] = sub === true ? value[key] : project(value[key], sub);
   }
   return out;
