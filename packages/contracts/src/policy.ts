@@ -37,6 +37,7 @@ export const REASON_CODES = [
   "timeout",
   "target_changed",
   "preview_failed",
+  "local_only",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
 

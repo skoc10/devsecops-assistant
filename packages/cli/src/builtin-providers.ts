@@ -3,7 +3,8 @@ import type { TrustZone } from "@ops/contracts";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
 import { CURSOR_HOST_PATH, CursorRuntime } from "@ops/runtime-cursor";
-import { OpenAiCompatibleProvider } from "@ops/providers";
+import { AnthropicProvider, OpenAiCompatibleProvider } from "@ops/providers";
+import type { AnthropicEffort } from "@ops/providers";
 import { readProviderKey, registerProvider } from "./providers.ts";
 
 /**
@@ -13,6 +14,8 @@ import { readProviderKey, registerProvider } from "./providers.ts";
  * Bölge verilmezse loopback → local, aksi halde third-party-cloud (en kısıtlayıcı varsayım değil,
  * en az maruz DEĞİL: hassas bağlamlar bu sağlayıcıya egress denetiminde gitmez).
  */
+const EFFORTS: readonly AnthropicEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
 export function registerBuiltinProviders(): void {
   registerProvider("openai-compatible", async (ctx) => {
     const baseUrl = ctx.env["OPS_PROVIDER_BASE_URL"];
@@ -30,6 +33,33 @@ export function registerBuiltinProviders(): void {
       ...(apiKey ? { apiKey } : {}),
       ...(tier === "small" || tier === "large" ? { tier } : {}),
       ...(cw && Number(cw) > 0 ? { contextWindow: Number(cw) } : {}),
+    });
+  });
+
+  /**
+   * Anthropic (loopOwner=host, resmî SDK). Anahtar kasadan; yapılandırma ortamdan:
+   *   OPS_PROVIDER=anthropic  [OPS_PROVIDER_MODEL]  [OPS_PROVIDER_BASE_URL]  [OPS_PROVIDER_ZONE]  [OPS_PROVIDER_TIER]
+   *   [OPS_ANTHROPIC_EFFORT=low|medium|high|xhigh|max]  [OPS_ANTHROPIC_PROMPT_CACHE=0]
+   * Uç belirtilmezse üçüncü taraf bulut; loopback → local (ör. test/ağ geçidi).
+   */
+  registerProvider("anthropic", async (ctx) => {
+    const apiKey = await readProviderKey(ctx, "anthropic");
+    if (!apiKey) throw new OpsError("provider_not_configured", "Anthropic API anahtarı kasada yok (`ops provider set-key anthropic`)");
+    const model = ctx.env["OPS_PROVIDER_MODEL"];
+    const baseUrl = ctx.env["OPS_PROVIDER_BASE_URL"];
+    const zone = ctx.env["OPS_PROVIDER_ZONE"];
+    if (zone !== undefined && !TRUST_ZONES.includes(zone as TrustZone)) throw new OpsError("provider_config", `OPS_PROVIDER_ZONE şunlardan biri olmalı: ${TRUST_ZONES.join(", ")}`);
+    const tier = ctx.env["OPS_PROVIDER_TIER"];
+    const effort = ctx.env["OPS_ANTHROPIC_EFFORT"];
+    if (effort !== undefined && !EFFORTS.includes(effort as AnthropicEffort)) throw new OpsError("provider_config", `OPS_ANTHROPIC_EFFORT şunlardan biri olmalı: ${EFFORTS.join(", ")}`);
+    return new AnthropicProvider({
+      apiKey,
+      ...(model ? { model } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(zone ? { trustZone: zone as TrustZone } : {}),
+      ...(tier === "small" || tier === "large" ? { tier } : {}),
+      ...(effort ? { effort: effort as AnthropicEffort } : {}),
+      ...(ctx.env["OPS_ANTHROPIC_PROMPT_CACHE"] === "0" ? { promptCache: false } : {}),
     });
   });
 

@@ -54,6 +54,11 @@ export interface GatewayDeps {
   readonly newId?: () => string;
   /** Mutasyon atfı için kanıt tazelik penceresi. */
   readonly citationMaxAgeMs?: number;
+  /**
+   * `egress: local-only` kipi (tasarım §2): yalnız YEREL sağlayıcı bölgesi ve yalnız okuma sınıfı. Sağlayıcı
+   * seçiminden bağımsız, PEP'te fail-closed zorlanır.
+   */
+  readonly localOnly?: boolean;
 }
 
 export interface InvokeRequest {
@@ -136,6 +141,10 @@ export class ToolGateway {
     if (!reg) return this.deny(st, "unknown_tool", `bilinmeyen araç: ${req.tool}`);
     const desc = reg.def.descriptor;
     st.desc = desc;
+
+    if (this.d.localOnly && req.providerZone !== "local") {
+      return this.deny(st, "local_only", `egress: local-only kipinde yalnız yerel sağlayıcı kullanılır (sağlayıcı bölgesi '${req.providerZone}')`);
+    }
 
     // Oturum bütçesi
     const budget = policy.checkBudget({ toolCalls: session.usage.toolCalls, sessionTokens: session.usage.sessionTokens });
@@ -220,6 +229,12 @@ export class ToolGateway {
       else if (r) cls = maxRisk(cls, r);
     }
     st.cls = unclassified ? "destroy" : cls;
+    if (this.d.localOnly && st.cls !== "read") {
+      return this.deny(st, "local_only", `egress: local-only kipi yalnız okuma sınıfına izin verir (araç sınıfı '${st.cls}')`);
+    }
+    if (this.d.localOnly && desc.network === "open") {
+      return this.deny(st, "local_only", "egress: local-only kipinde açık ağ çıkışlı araç çalışmaz");
+    }
 
     // 5-6. Politika (bağlam etiketi/taint dahil)
     const effSens: Sensitivity = maxSensitivity(desc.sensitivity, reg.adapter.sensitivityOf?.(desc.name, args) ?? "none");

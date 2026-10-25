@@ -25,6 +25,8 @@ export interface BreakGlassDeps {
   readonly doctor: (raised: Profile) => Promise<DoctorReport>;
   readonly now?: () => Date;
   readonly newId?: () => string;
+  /** Doluysa break-glass başlatılamaz (ör. `egress: local-only` kipi: yalnız okuma). */
+  readonly disabledReason?: string;
 }
 
 export interface BreakGlassRequest {
@@ -67,6 +69,7 @@ export class BreakGlassController {
 
   async start(req: BreakGlassRequest): Promise<BreakGlassGrant> {
     const { session, audit } = this.d;
+    if (this.d.disabledReason) throw new OpsError("break_glass_disabled", `break-glass kapalı: ${this.d.disabledReason}`);
     const reason = req.reason.trim();
     if (reason.length < BREAK_GLASS_MIN_REASON) throw new OpsError("break_glass_reason", `gerekçe en az ${BREAK_GLASS_MIN_REASON} karakter olmalı (ne için, hangi olay/bilet)`);
     if (reason.length > BREAK_GLASS_MAX_REASON) throw new OpsError("break_glass_reason", `gerekçe en çok ${BREAK_GLASS_MAX_REASON} karakter olabilir`);

@@ -15,7 +15,16 @@ export interface ToolCall {
 
 export type Message =
   | { readonly role: "user"; readonly content: string }
-  | { readonly role: "assistant"; readonly content: string; readonly toolCalls?: readonly ToolCall[] }
+  | {
+      readonly role: "assistant";
+      readonly content: string;
+      readonly toolCalls?: readonly ToolCall[];
+      /**
+       * Sağlayıcının KENDİ yanıt biçimi (ör. Anthropic içerik blokları: düşünme blokları değiştirilmeden geri
+       * gönderilmelidir). Orkestratör yorumlamaz, yalnız saklayıp aynı sağlayıcıya geri verir.
+       */
+      readonly providerData?: unknown;
+    }
   | { readonly role: "tool"; readonly toolCallId: string; readonly name: string; readonly content: string };
 
 export interface Usage {
@@ -47,7 +56,7 @@ export interface GenerateRequest {
 }
 
 export interface GenerateResult {
-  readonly message: { readonly content: string; readonly toolCalls: readonly ToolCall[] };
+  readonly message: { readonly content: string; readonly toolCalls: readonly ToolCall[]; readonly providerData?: unknown };
   readonly usage: Usage;
   readonly stopReason: "end" | "tool_use" | "length" | "error";
 }

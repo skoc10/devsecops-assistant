@@ -195,7 +195,7 @@ export class Orchestrator {
       }
 
       const { content, toolCalls } = res.message;
-      this.messages.push({ role: "assistant", content, toolCalls });
+      this.messages.push({ role: "assistant", content, toolCalls, ...(res.message.providerData !== undefined ? { providerData: res.message.providerData } : {}) });
 
       if (toolCalls.length === 0) {
         // "Kanıt yoksa iddia yok": atıf doğrulaması

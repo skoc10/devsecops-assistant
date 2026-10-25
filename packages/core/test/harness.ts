@@ -59,6 +59,7 @@ export interface HarnessOpts {
   providerSecret?: string;
   /** Saat enjeksiyonu (break-glass süre testleri). */
   now?: () => Date;
+  localOnly?: boolean;
 }
 
 export async function makeHarness(opts: HarnessOpts = {}) {
@@ -111,6 +112,7 @@ export async function makeHarness(opts: HarnessOpts = {}) {
     ...(opts.approval ? { approval: opts.approval } : {}),
     ...(opts.classifiers ? { classifiers: opts.classifiers } : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.localOnly ? { localOnly: true } : {}),
   });
 
   const profile: Profile = makeTestProfile({ id: "test-k8s", ...(opts.profile ?? {}) });

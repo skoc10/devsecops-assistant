@@ -54,6 +54,8 @@ export interface RuntimeOptions {
   readonly providerMirror?: string;
   readonly registryOptions?: Partial<ProfileRegistryOptions>;
   readonly now?: () => Date;
+  /** `egress: local-only`: yalnız yerel sağlayıcı, yalnız okuma sınıfı, MCP köprüsü ve break-glass kapalı. */
+  readonly localOnly?: boolean;
 }
 
 export interface Runtime {
@@ -171,7 +173,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
 
   // MCP istemci köprüsü v0: yalnız kullanıcı manifesti varsa. Geçersiz manifest = başlangıç hatası (fail-closed).
   let mcp: McpBridgeAdapter | null = null;
-  if (await exists(o.paths.mcpManifestFile)) {
+  if (!o.localOnly && (await exists(o.paths.mcpManifestFile))) {
     mcp = new McpBridgeAdapter({ manifest: parseMcpManifest(await readFile(o.paths.mcpManifestFile, "utf8")), sandbox, known });
     toolRegistry.register(mcp, mcp.definitions);
   }
@@ -225,13 +227,14 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     ...(classifiers.length ? { classifiers } : {}),
     ...(o.approval ? { approval: o.approval } : {}),
     ...(o.now ? { now: o.now } : {}),
+    ...(o.localOnly ? { localOnly: true } : {}),
   });
 
   await audit.append({
     event: "session_start",
     sessionId: session.id,
     policyVersionHash: policy.versionHash,
-    message: `sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
+    message: `egress=${o.localOnly ? "local-only" : "normal"} sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
   });
 
   const diagnoseWith = async (profile: Profile): Promise<{ report: DoctorReport; profile: Profile }> => {
@@ -262,7 +265,7 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   };
 
   // Break-glass: yükseltilmiş kopya, FİİLİ yetkiye karşı (doktor) sınanır; denetim yazılamazsa başlamaz.
-  const breakGlass = new BreakGlassController({ session, audit, doctor: async (raised) => (await diagnoseWith(raised)).report, ...(o.now ? { now: o.now } : {}) });
+  const breakGlass = new BreakGlassController({ session, audit, doctor: async (raised) => (await diagnoseWith(raised)).report, ...(o.now ? { now: o.now } : {}), ...(o.localOnly ? { disabledReason: "egress: local-only kipi yalnız okuma sınıfına izin verir" } : {}) });
   const sweeper = setInterval(() => void breakGlass.sweep(), 15_000);
   sweeper.unref();
 

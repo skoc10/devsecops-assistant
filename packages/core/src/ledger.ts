@@ -66,7 +66,8 @@ export interface CompactOptions {
 export const DEFAULT_COMPACT: CompactOptions = { thresholdTokens: 6_000, summaryTokens: 1_200, keepToolMessages: 4 };
 
 export function messagesTokens(messages: readonly Message[]): number {
-  return estimateTokens(JSON.stringify(messages));
+  // sağlayıcıya özgü opak veri (ör. düşünme blokları) içeriği ikiye katlar: tahmine katılmaz
+  return estimateTokens(JSON.stringify(messages.map((m) => (m.role === "assistant" && m.providerData !== undefined ? { role: m.role, content: m.content, toolCalls: m.toolCalls } : m))));
 }
 
 /**

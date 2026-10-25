@@ -28,6 +28,7 @@ export const REASON_EXPLANATIONS: Readonly<Record<ReasonCode, string>> = {
   call_budget_exceeded: "Oturumdaki en çok araç çağrısı sayısı aşıldı.",
   adapter_error: "Adapter işlemi başarısız oldu (ör. API hatası, kimlik bağlanamadı). Ayrıntı mesajdadır.",
   timeout: "Araç zaman aşımına uğradı veya iptal edildi.",
+  local_only: "`egress: local-only` kipi: yalnız YEREL (local) model sağlayıcısı ve yalnız okuma sınıfı çalışır. Yerel bir sağlayıcı yapılandırın veya kipi kapatın (OPS_EGRESS / --local-only).",
   target_changed: "Onaydan sonra hedefin sürümü/içeriği DEĞİŞTİ (TOCTOU): onaylanan eylem artık geçerli değil, hiçbir şey uygulanmadı. İncelemeyi yenileyip yeniden onay verin.",
   preview_failed: "Mutasyon önizlemesi (diff/etki/sürüm) üretilemedi; neyi onaylayacağınız gösterilemediği için çağrı reddedildi (fail-closed).",
 };
