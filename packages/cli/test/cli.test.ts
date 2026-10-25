@@ -1,11 +1,11 @@
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseAllDocuments } from "yaml";
 import { ScriptedProvider, buildKubeconfig, say } from "@ops/testkit";
-import { OpsdClient, resolvePaths, runCli } from "../src/index.ts";
+import { OpsdClient, ensureHome, resolvePaths, runCli } from "../src/index.ts";
 import { makeFixture } from "./fixture.ts";
 import type { Fixture } from "./fixture.ts";
 
@@ -173,5 +173,86 @@ describe("ops init / parola kaynağı (gerçek şifreli dosya kasası)", () => {
     const r = await cli(["init"], {});
     expect(r.code).toBe(1);
     expect(r.err).toContain("passphrase_unavailable");
+  });
+});
+
+describe("OPS_HOME sahiplik ve izin denetimi", () => {
+  let home: string;
+  let pw: string;
+  const SCRYPT = { N: 1 << 10, r: 8, p: 1 };
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "ops-perm-"));
+    pw = join(home, "pw");
+    await writeFile(pw, "dogru-parola-123\n", { mode: 0o600 });
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+  const init = async (opsHome: string, argv = ["init"]) => {
+    const p = ioPair();
+    const code = await runCli({ argv, env: { OPS_PASSPHRASE_FILE: pw }, io: p.io, paths: resolvePaths(opsHome), scryptParams: SCRYPT, sandbox: null });
+    return { code, out: p.out(), err: p.err() };
+  };
+
+  it("önceden var olan 0777 OPS_HOME: init REDDEDİLİR ve içine hiçbir şey yazılmaz", async () => {
+    const ops = join(home, "ops");
+    await mkdir(ops);
+    await chmod(ops, 0o777);
+    const r = await init(ops);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("home_insecure");
+    expect(r.err).toContain("grup/diğerleri yazabiliyor");
+    expect(await readdir(ops)).toEqual([]);
+    expect((await stat(ops)).mode & 0o777).toBe(0o777); // sessizce düzeltilmez
+  });
+
+  it("alt dizin (vault/audit/run) sembolik bağ veya grup-yazılabilirse reddedilir", async () => {
+    const ops = join(home, "ops");
+    const elsewhere = await mkdtemp(join(home, "baska-"));
+    await mkdir(ops, { mode: 0o700 });
+    await symlink(elsewhere, join(ops, "vault"));
+    const a = await init(ops);
+    expect(a.code).toBe(1);
+    expect(a.err).toMatch(/home_insecure: .*vault: sembolik bağ/);
+    expect(await readdir(elsewhere)).toEqual([]);
+
+    await rm(join(ops, "vault"));
+    await mkdir(join(ops, "run"), { mode: 0o700 });
+    await chmod(join(ops, "run"), 0o770);
+    const b = await init(ops);
+    expect(b.code).toBe(1);
+    expect(b.err).toMatch(/home_insecure: .*run: mod 770/);
+  });
+
+  it("OPS_HOME'un kendisi kullanıcıya ait bir bağ olabilir; hedef aynı denetimden geçer", async () => {
+    const real = join(home, "gercek");
+    await mkdir(real, { mode: 0o700 });
+    await symlink(real, join(home, "ops"));
+    const ok = await init(join(home, "ops"));
+    expect(ok.code, ok.err).toBe(0);
+    expect((await stat(join(real, "vault", "vault.json"))).isFile()).toBe(true);
+    await chmod(real, 0o757);
+    const bad = await init(join(home, "ops"), ["profile", "list"]);
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain("home_insecure");
+  });
+
+  it.skipIf(process.getuid?.() === 0)("başka kullanıcıya ait OPS_HOME reddedilir", async () => {
+    const r = await init("/usr");
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/home_insecure: .*ait değil/);
+  });
+
+  it("bu çağrının oluşturduğu dizinler umask'tan bağımsız 0700", async () => {
+    const paths = resolvePaths(join(home, "ops"));
+    const prev = process.umask(0o277); // mkdir(0700) → 0500 olurdu: alt dizin bile oluşturulamazdı
+    try {
+      await ensureHome(paths);
+    } finally {
+      process.umask(prev);
+    }
+    for (const d of [paths.home, join(paths.home, "vault"), join(paths.home, "audit"), paths.runDir]) {
+      expect((await stat(d)).mode & 0o777, d).toBe(0o700);
+    }
   });
 });
