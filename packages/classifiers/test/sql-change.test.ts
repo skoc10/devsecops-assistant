@@ -43,6 +43,31 @@ describe("db.change SQL sınıflayıcı (gerçek PostgreSQL ayrıştırıcısı,
     }
   });
 
+  it("sütuna başvurmayan WHERE (1=1, true, EXISTS) WHERE'siz sayılır: sınıf düşürülemez", () => {
+    const cases: [string, string][] = [
+      ["DELETE FROM customers WHERE 1=1", "destroy"],
+      ["DELETE FROM customers WHERE true", "destroy"],
+      ["DELETE FROM customers WHERE 'a' = 'a' OR false", "destroy"],
+      ["DELETE FROM customers WHERE EXISTS (SELECT 1 FROM orders WHERE orders.id = 1)", "destroy"],
+      ["UPDATE customers SET name = 'x' WHERE true", "deploy"],
+      ["UPDATE customers SET name = 'x' WHERE NOT false", "deploy"],
+      // yalnız başka tablonun sütunu: hedefin her satırı (çapraz birleşim)
+      ["UPDATE customers SET name = 'x' FROM orders WHERE orders.status = 'paid'", "deploy"],
+      ["DELETE FROM customers USING orders o WHERE o.id = 1", "destroy"],
+      // hedef sütunlu koşullar sınırlı sayılır (takma ad, nitelenmemiş ad, alt sorgunun dış ifadesi)
+      ["DELETE FROM customers WHERE id = 1", "mutate"],
+      ["DELETE FROM customers WHERE id IN (SELECT customer_id FROM orders WHERE status = 'failed')", "mutate"],
+      ["UPDATE customers SET name = 'x' WHERE id = 1 AND true", "mutate"],
+      ["UPDATE customers c SET name = 'x' FROM orders o WHERE o.customer_id = c.id", "mutate"],
+      ["DELETE FROM public.customers WHERE customers.id = 2", "mutate"],
+    ];
+    for (const [sql, risk] of cases) {
+      const r = ok(sql);
+      expect(r.risk, sql).toBe(risk);
+      expect(r.statements[0]?.unbounded, sql).toBe(risk !== "mutate");
+    }
+  });
+
   it("çok ifadeli kümeyi böler, her metni aynen korur ve en yüksek sınıfı verir", () => {
     const r = ok("UPDATE orders SET status = 'x' WHERE id = 1;\n  DELETE FROM orders WHERE id = 2 ;\nINSERT INTO orders (id, customer_id, status, total) VALUES (1, 1, 'ü', 1);");
     expect(r.statements.map((s) => s.kind)).toEqual(["update", "delete", "insert"]);
