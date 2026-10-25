@@ -6,12 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isOpsError } from "@ops/contracts";
 import {
   AuditLog,
+  canonicalJson,
   FileAuditStorage,
   FileHeadAnchor,
   MemoryAuditStorage,
   MemoryHeadAnchor,
   verifyAudit,
 } from "../src/index.ts";
+import { chainHash } from "../src/chain.ts";
 
 const key = randomBytes(32);
 const base = { event: "intent" as const, sessionId: "s1" };
@@ -122,6 +124,72 @@ describe("hash zinciri (S-08)", () => {
     const v = await verifyAudit(storage, key);
     expect(v.ok).toBe(true);
     expect(v.records).toBe(40);
+  });
+});
+
+describe("kanonik JSON (MAC girdisi)", () => {
+  const prev = "0".repeat(64);
+  const withProto = (inner: string) =>
+    JSON.parse(`{"ts":"t","event":"intent","sessionId":"s","principal":"p","seq":0,"prevHash":"${prev}","argsRedacted":{"path":"/safe","__proto__":${inner}}}`) as unknown;
+
+  it("`__proto__` anahtarı MAC girdisinden düşmez: yalnız onunla ayrışan iki kaydın hash'i farklıdır", () => {
+    const a = withProto('{"path":"/etc/shadow"}');
+    const b = withProto('{"path":"TAMAMEN BAŞKA"}');
+    expect(canonicalJson(a)).toContain('"__proto__":{"path":"/etc/shadow"}');
+    expect(chainHash(key, prev, a)).not.toBe(chainHash(key, prev, b));
+    // ilkel değerli `__proto__` da (ayarlayıcı sessizce yutardı) girdide kalır
+    expect(canonicalJson(withProto("1"))).toContain('"__proto__":1');
+  });
+
+  it("olağan kayıtta çıktı bayt bayt aynı kalır (mevcut günlükler doğrulanmaya devam eder)", () => {
+    // Beklenen değerler düzeltme ÖNCESİ uygulamayla üretildi; tamsayı biçimli anahtar sırası dahil.
+    const fixedKey = new Uint8Array(32).fill(0x2a);
+    const p = "ab".repeat(32);
+    const rec = {
+      ts: "2026-02-03T04:05:06.000Z",
+      event: "intent",
+      sessionId: "s-1",
+      principal: "local-user",
+      callId: "c1",
+      tool: "k8s.resources.list",
+      decision: "allow",
+      reasonCode: "allowed",
+      seq: 7,
+      prevHash: p,
+      message: 'çğış ‹r›   "tırnak"',
+      target: undefined,
+      argsRedacted: { namespace: "default", "10": "on", "2": "iki", b: [3, { z: null, a: true, u: undefined }], A: { constructor: "c", toString: "t" } },
+      redactionCounts: { secret: 2, email: 1 },
+      tokens: { output: 2, input: 1, cacheRead: 0 },
+    };
+    expect(canonicalJson(rec)).toBe(
+      `{"argsRedacted":{"2":"iki","10":"on","A":{"constructor":"c","toString":"t"},"b":[3,{"a":true,"z":null}],"namespace":"default"},"callId":"c1","decision":"allow","event":"intent","message":"çğış ‹r›   \\"tırnak\\"","prevHash":"${p}","principal":"local-user","reasonCode":"allowed","redactionCounts":{"email":1,"secret":2},"seq":7,"sessionId":"s-1","tokens":{"cacheRead":0,"input":1,"output":2},"tool":"k8s.resources.list","ts":"2026-02-03T04:05:06.000Z"}`,
+    );
+    expect(chainHash(fixedKey, p, rec)).toBe("432a7ffa712e854e307e002d3dcfc0bce8108a4788b18a5a760d41437e434cf7");
+  });
+
+  it("anahtarsız düzenleme: argsRedacted'e `__proto__` eklenen kayıt doğrulanmaz", async () => {
+    const storage = new MemoryAuditStorage();
+    const log = await AuditLog.open({ storage, key });
+    await log.append({ ...base, callId: "c1", tool: "k8s.resources.list", argsRedacted: { namespace: "default" } });
+    await log.append({ ...base, event: "result", callId: "c1" });
+    storage.lines[0] = (storage.lines[0] as string).replace(
+      '{"namespace":"default"}',
+      '{"namespace":"default","__proto__":{"command":"kubectl delete ns prod --force"}}',
+    );
+    const v = await verifyAudit(storage, key);
+    expect(v.ok).toBe(false);
+    expect(v.problems).toContainEqual(expect.objectContaining({ seq: 0, code: "hash_mismatch" }));
+  });
+
+  it("yazım yolu `__proto__` argüman anahtarını korur ve kayıt doğrulanır", async () => {
+    const storage = new MemoryAuditStorage();
+    const log = await AuditLog.open({ storage, key, scrub: (s) => s.replaceAll("GIZLI", "‹r›") });
+    const args = JSON.parse('{"namespace":"default","__proto__":{"allNamespaces":true,"note":"GIZLI"}}') as unknown;
+    const rec = await log.append({ ...base, callId: "c1", tool: "k8s.resources.list", argsRedacted: args });
+    expect(Object.keys(rec.argsRedacted as object)).toEqual(["namespace", "__proto__"]);
+    expect(storage.lines[0]).toContain('"__proto__":{"allNamespaces":true,"note":"‹r›"}');
+    expect((await verifyAudit(storage, key)).ok).toBe(true);
   });
 });
 

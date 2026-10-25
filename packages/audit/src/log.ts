@@ -21,7 +21,11 @@ function mapStrings(value: unknown, fn: (s: string) => string): unknown {
   if (Array.isArray(value)) return value.map((v) => mapStrings(v, fn));
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[fn(k)] = mapStrings(v, fn);
+    // defineProperty: `__proto__` adlı argüman anahtarı da kendi alanı olarak kalır. Atama prototipi değiştirip
+    // anahtarı kayıttan düşürürdü; denetim, modelin gönderdiği argümanı eksiksiz yansıtmalı.
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      Object.defineProperty(out, fn(k), { value: mapStrings(v, fn), enumerable: true, writable: true, configurable: true });
+    }
     return out;
   }
   return value;
