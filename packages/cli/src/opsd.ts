@@ -167,13 +167,22 @@ export class Opsd {
     const send = (obj: unknown): void => {
       if (!sock.destroyed) sock.write(`${JSON.stringify(obj)}\n`);
     };
+    const tooLarge = (): void => {
+      send({ id: -1, ok: false, error: { code: "too_large", message: "istek çok büyük" } });
+      sock.destroy();
+    };
+    // Sınır satır sonu BEKLENMEDEN uygulanır: readline sonlanmamış satırı sınırsız biriktirir (istemci hiç '\n'
+    // göndermeden akıtabilir). Son satır sonundan beri gelen bayt sayılır (\n ve \r: readline ikisinde de böler).
+    let pending = 0;
+    sock.on("data", (chunk: Buffer) => {
+      const end = Math.max(chunk.lastIndexOf(0x0a), chunk.lastIndexOf(0x0d));
+      pending = end === -1 ? pending + chunk.length : chunk.length - end - 1;
+      if (pending > MAX_LINE) tooLarge();
+    });
     const rl = createInterface({ input: sock, crlfDelay: Infinity });
     rl.on("line", (line) => {
-      if (line.length > MAX_LINE) {
-        send({ id: -1, ok: false, error: { code: "too_large", message: "istek çok büyük" } });
-        sock.destroy();
-        return;
-      }
+      if (sock.destroyed) return; // aynı parçada sınır aşıldıysa kalan satırlar işlenmez
+      if (Buffer.byteLength(line, "utf8") > MAX_LINE) return tooLarge(); // satır sonu sınırı aşan parçayla birlikte geldiyse
       void this.handle(line, send);
     });
   }

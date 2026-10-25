@@ -97,6 +97,57 @@ describe("opsd (UDS)", () => {
     c.close();
   });
 
+  /** Ham NDJSON bağlantısı: gelen çerçeveler ve kapanış. */
+  const rawConn = async () => {
+    const raw = createConnection(fx.rt.paths.socket);
+    const frames: { id: number; ok?: boolean; error?: { code: string } }[] = [];
+    let buf = "";
+    raw.on("data", (b) => {
+      buf += b.toString();
+      for (let i = buf.indexOf("\n"); i !== -1; i = buf.indexOf("\n")) {
+        frames.push(JSON.parse(buf.slice(0, i)));
+        buf = buf.slice(i + 1);
+      }
+    });
+    raw.on("error", () => undefined); // sunucu kapatınca EPIPE/ECONNRESET beklenir
+    const closed = new Promise<void>((r) => raw.once("close", () => r()));
+    await new Promise<void>((r) => raw.once("connect", () => r()));
+    return { raw, frames, closed };
+  };
+  const within = <T,>(p: Promise<T>, ms: number): Promise<T | "zaman aşımı"> => Promise.race([p, new Promise<"zaman aşımı">((r) => setTimeout(() => r("zaman aşımı"), ms))]);
+
+  it("satır sonu gelmeden 1 MiB'ı aşan akış bağlantıyı kapatır (sınırsız tampon yok); sunucu ayakta kalır", async () => {
+    const c = await start(new ScriptedProvider([say("x")]));
+    const { raw, closed } = await rawConn();
+    const chunk = Buffer.alloc(64 * 1024, 0x61); // 'a'; hiç satır sonu yok
+    for (let i = 0; i < 48 && !raw.destroyed; i++) raw.write(chunk); // 3 MiB
+    expect(await within(closed, 5_000)).not.toBe("zaman aşımı");
+    expect(await c.ping()).toMatchObject({ pong: true });
+    c.close();
+  });
+
+  it("çok satırlı normal trafik etkilenmez: toplamı sınırı aşan satırlar ve tam 1 MiB'lık satır kabul edilir; 1 MiB+1 reddedilir", async () => {
+    const c = await start(new ScriptedProvider([say("x")]));
+    const pad = "p".repeat(600_000);
+    const lines = [1, 2, 3].map((id) => JSON.stringify({ id, method: "ping", params: { pad } }));
+    const frame = (id: number, n: number): string => JSON.stringify({ id, method: "ping", params: { p: "q".repeat(n) } });
+    const overhead = frame(4, 0).length;
+    lines.push(frame(4, (1 << 20) - overhead));
+    expect(lines.at(-1)?.length).toBe(1 << 20);
+    const ok = await rawConn();
+    ok.raw.write(`${lines.join("\n")}\n`); // ~2.8 MiB tek yazımda
+    for (let i = 0; i < 250 && ok.frames.length < 4; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(ok.frames.map((f) => [f.id, f.ok])).toEqual([[1, true], [2, true], [3, true], [4, true]]);
+    ok.raw.destroy();
+
+    const over = await rawConn();
+    over.raw.write(`${frame(5, (1 << 20) - overhead + 1)}\n`);
+    expect(await within(over.closed, 5_000)).not.toBe("zaman aşımı");
+    expect(over.frames.some((f) => f.ok === true)).toBe(false);
+    expect(await c.ping()).toMatchObject({ pong: true });
+    c.close();
+  });
+
   it("S-16: onay/araç çağırma yöntemi bu soketten sunulmaz (yalnız sohbet ve yönetim)", async () => {
     const c = await start(new ScriptedProvider([say("x")]));
     await expect(c.call("tool.invoke", { tool: "k8s.resources.list" })).rejects.toThrow(/bad_request/);
