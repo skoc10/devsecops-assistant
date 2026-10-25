@@ -1,0 +1,5 @@
+requires:
+  adapters: [postgres]
+requests:
+  toolsets: [database, database-change, change]
+model_hint: large

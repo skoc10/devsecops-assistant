@@ -45,6 +45,8 @@ node packages/cli/src/bin.ts profile rbac --sa-namespace ops --namespace default
 export OPS_DB_PASSWORD_FILE=~/.ops-db-password
 node packages/cli/src/bin.ts profile add db --id shop --env stage --host db.example --database shop --user ops_reader --scope public,sales --ca-file ~/db-ca.pem
 node packages/cli/src/bin.ts profile doctor shop        # fiili rol yetkileri ↔ beyan (yazma/CREATE/süper yetki varsa BAĞLANMAZ)
+# (isteğe bağlı) yazıcı profili: reader'dan AYRI, yalnız gereken tablolarda DML yetkili DB kullanıcısı; her değişiklik önizleme + onay + tek işlem + satır üst sınırı
+node packages/cli/src/bin.ts profile add db --id shop-w --env stage --host db.example --database shop --user ops_writer --scope public --ca-file ~/db-ca.pem --ceiling mutate
 # IaC (Terraform/OpenTofu/Ansible): ajan deponuza YAZMAZ, HEAD'in anlık kopyasında çalışır (ikililer ürünle gelmez)
 export OPS_TOOL_DIRS=/opt/ops-tools/bin:/opt/ops-tools/venv/bin     # tofu/terraform/ansible/ansible-lint dizinleri
 node packages/cli/src/bin.ts workspace add --id infra --path ~/src/infra --engine opentofu

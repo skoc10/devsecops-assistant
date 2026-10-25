@@ -15,7 +15,7 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
   it("yüklenir, hata yok, gövde sınırları içinde; tier dizinden gelir", async () => {
     const reg = await SkillRegistry.load({ builtinDir });
     expect(reg.issues).toEqual([]);
-    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "database", "generic-diagnosis", "github-change", "kubernetes", "kubernetes-change", "local-shell", "pipelines", "terraform"]);
+    expect(reg.all().map((s) => s.name)).toEqual(["ansible", "database", "database-change", "generic-diagnosis", "github-change", "kubernetes", "kubernetes-change", "local-shell", "pipelines", "terraform"]);
     for (const s of reg.all()) {
       expect(s.tier).toBe("builtin");
       expect(s.tokens).toBeLessThanOrEqual(LIMITS.bodyTokens);
@@ -34,9 +34,11 @@ describe("yerleşik skill'ler (B-02 linter)", () => {
     expect(reg.get("terraform")!.tokens).toBeLessThanOrEqual(850);
     expect(reg.get("ansible")!.tokens).toBeLessThanOrEqual(850);
     // tüm yerleşik skill'ler AYNI ANDA görünürse üst sınır; gerçek oturumlarda yalnız uygun olanlar ilan edilir
-    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(380);
+    expect(estimateTokens(skillMetadataBlock(reg.metadata()))).toBeLessThanOrEqual(420);
     expect(reg.get("kubernetes-change")!.tokens).toBeLessThanOrEqual(700);
     expect(reg.get("github-change")!.tokens).toBeLessThanOrEqual(650);
+    expect(reg.get("database-change")!.tokens).toBeLessThanOrEqual(800);
+    expect(reg.get("database-change")!.sidecar.requests.toolsets).toEqual(["database", "database-change", "change"]);
   });
 
   it("gerektirdiği adapter kayıtlı değilse skill ilan edilmez", async () => {

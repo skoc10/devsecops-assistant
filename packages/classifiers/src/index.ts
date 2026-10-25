@@ -7,3 +7,5 @@ export type { ClassifyResult, ExecPlan, ResolvedCommand } from "./classify.ts";
 export { shellCommandClassifier } from "./gateway.ts";
 export { initSqlClassifier, classifySql, maskedViolations, normalizeSqlForDisplay, ALLOWED_FUNCTIONS, MAX_SQL_CHARS } from "./sql.ts";
 export type { SqlAnalysis } from "./sql.ts";
+export { classifySqlChange, splitChangeStatements, strongerLock, MAX_CHANGE_STATEMENTS } from "./sql-change.ts";
+export type { ChangeAnalysis, ChangeKind, ChangeRelation, ChangeStatement, LockMode } from "./sql-change.ts";

@@ -154,6 +154,12 @@ export const SHOP_ROLES = {
   fileReader: "ops_filereader",
   bypass: "ops_bypass",
   outsideReader: "ops_outside_reader",
+  /** DML yetkili yazıcı: public.customers/orders (+ sales.invoices okuma). Sahip DEĞİL, DDL yok. */
+  writer: "ops_writer",
+  /** DML yetkisi hem public hem sales'te: izinli şemalar dışına yazma testi. */
+  writerWide: "ops_writer_wide",
+  /** `work` şemasının ve work.items tablosunun SAHİBİ (DDL/yok etme sınıfı). */
+  ddl: "ops_ddl",
 } as const;
 
 const sqlLit = (s: string): string => `'${s.replace(/'/g, "''")}'`;
@@ -183,6 +189,9 @@ export async function seedShop(pg: TestPostgres, seed: ShopSeed): Promise<void> 
     [R.fileReader, ""],
     [R.bypass, "BYPASSRLS"],
     [R.outsideReader, ""],
+    [R.writer, ""],
+    [R.writerWide, ""],
+    [R.ddl, ""],
   ] as const) {
     await pg.admin(`CREATE ROLE ${name} LOGIN ${extra} PASSWORD ${sqlLit(name === R.reader ? seed.readerPassword : seed.otherPassword)}`);
     await pg.admin(`GRANT CONNECT ON DATABASE shop TO ${name}`);
@@ -209,6 +218,18 @@ export async function seedShop(pg: TestPostgres, seed: ShopSeed): Promise<void> 
       `GRANT INSERT, UPDATE ON public.orders TO ${R.writerLike}`,
       `GRANT CREATE ON SCHEMA public TO ${R.creator}`,
       `GRANT pg_read_server_files TO ${R.fileReader}`,
+      "CREATE SCHEMA work AUTHORIZATION " + R.ddl,
+      "CREATE TABLE work.items (id int PRIMARY KEY, label text NOT NULL)",
+      `ALTER TABLE work.items OWNER TO ${R.ddl}`,
+      "INSERT INTO work.items VALUES (1,'a'),(2,'b'),(3,'c')",
+      `GRANT USAGE ON SCHEMA public TO ${R.writer}, ${R.writerWide}`,
+      `GRANT USAGE ON SCHEMA sales TO ${R.writer}, ${R.writerWide}`,
+      `GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${R.writer}, ${R.writerWide}`,
+      `GRANT SELECT ON ALL TABLES IN SCHEMA sales TO ${R.writer}, ${R.writerWide}`,
+      `GRANT INSERT, UPDATE, DELETE ON public.orders, public.customers TO ${R.writer}, ${R.writerWide}`,
+      `GRANT INSERT, UPDATE, DELETE ON sales.invoices TO ${R.writerWide}`,
+      `GRANT USAGE ON SCHEMA public TO ${R.ddl}`,
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${R.ddl}`,
       `GRANT USAGE ON SCHEMA sales, secret TO ${R.outsideReader}`,
       `GRANT SELECT ON ALL TABLES IN SCHEMA sales TO ${R.outsideReader}`,
       `GRANT SELECT ON ALL TABLES IN SCHEMA secret TO ${R.outsideReader}`,

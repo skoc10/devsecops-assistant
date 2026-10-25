@@ -159,12 +159,13 @@ export class ProfileService {
   }
 
   /**
-   * `db` profili (reader). Yazıcı kimliği Faz 2'dir; bu sürümde tavan `read`'dir. Parola kasaya
-   * yazılır; dönen profil ve uyarılar parola içermez.
+   * `db` profili. Tavan `read` → reader rolü; `mutate|deploy|destroy` → writer rolü (ayrı DB kullanıcısı
+   * olmalıdır; her değişiklik önizleme + onaydan geçer). Parola kasaya yazılır; dönen profil ve uyarılar
+   * parola içermez.
    */
   async addDatabase(req: AddDatabaseRequest): Promise<AddResult> {
     const ceiling: RiskClass = req.classCeiling ?? "read";
-    if (ceiling !== "read") throw new OpsError("ceiling_unsupported", "veritabanı profilleri bu sürümde yalnız 'read' tavanlıdır (yazıcı kimliği Faz 2)");
+    const writer = riskRank(ceiling) > riskRank("read");
     const scopes = [...req.allowedScopes];
     if (scopes.length === 0) throw new OpsError("scope_required", "izinli şema belirtilmedi (allowedScopes verin; '*' = hepsi)");
     for (const sc of scopes) if (sc !== "*" && !SCHEMA_NAME.test(sc)) throw new OpsError("scope_invalid", `şema adı geçersiz (küçük harf/rakam/_ ile, ≤63): ${sc.slice(0, 40)}`);
@@ -183,6 +184,12 @@ export class ProfileService {
     });
     const warnings = [...imp.warnings];
     if (scopes.includes("*")) warnings.push("allowedScopes '*': tüm şemalar izinli");
+    if (writer) {
+      warnings.push(
+        `tavan '${ceiling}': yazıcı profili. Bu profil için reader'dan AYRI, en az yetkili bir DB kullanıcısı kullanın (yalnız gereken tablolarda INSERT/UPDATE/DELETE; tablo SAHİBİ ve süper kullanıcı olmasın` +
+          `${ceiling === "mutate" ? "; CREATE/TRUNCATE yetkisi olmasın" : ""}). Her değişiklik önizleme + onaydan geçer, tek işlemde uygulanır ve satır üst sınırı aşılırsa geri alınır. \`ops profile doctor\` fiili yetkiyi tavanla karşılaştırır.`,
+      );
+    }
     const datasource = (req.datasource ?? req.database).slice(0, 63);
     const profile = ProfileSchema.parse({
       id: req.id,
@@ -194,7 +201,7 @@ export class ProfileService {
       allowedScopes: scopes,
       credentialSource: { kind: "static", ambientDependencies: [] },
       egressClass: req.egressClass ?? defaultEgressFor("db", req.environment),
-      attributes: { role: "reader", datasource, defaultSchema },
+      attributes: { role: writer ? "writer" : "reader", datasource, defaultSchema },
     });
     const key = credentialKey(profile.id);
     const had = await this.store.get(key);

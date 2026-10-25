@@ -1,10 +1,12 @@
-import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError } from "@ops/contracts";
+import { ADAPTER_CONTRACT, AdapterManifestSchema, OpsError, riskRank } from "@ops/contracts";
 import type {
+  ActionPreview,
   Adapter,
   AdapterCall,
   AdapterManifest,
   CredentialHandle,
   DbConnectOptions,
+  DbRole,
   DoctorReport,
   Profile,
   RawToolOutput,
@@ -13,14 +15,16 @@ import type {
   Target,
 } from "@ops/contracts";
 import type { CredentialResolver } from "@ops/broker";
-import { classifySql, maskedViolations } from "@ops/classifiers";
-import type { SqlAnalysis } from "@ops/classifiers";
+import { classifySql, classifySqlChange, maskedViolations } from "@ops/classifiers";
+import type { ChangeAnalysis, SqlAnalysis } from "@ops/classifiers";
 import { PgDriver } from "./driver.ts";
 import type { PgDriverApi, PgSessionHandle } from "./driver.ts";
 import { diagnose } from "./doctor.ts";
 import { EMPTY_MASKING_CONFIG, maskedMapFor } from "./masking.ts";
 import type { MaskingConfig } from "./masking.ts";
-import { DB_READ_TOOLS } from "./tools.ts";
+import { DB_ALL_TOOLS } from "./tools.ts";
+import { DEFAULT_CHANGE_MAX_ROWS, MAX_APPROVED_ROWS, buildPlan, changeRefs, changeScopes, renderPreview } from "./change.ts";
+import type { ChangePlan } from "./change.ts";
 import { SIMPLE_IDENT } from "./identifiers.ts";
 import { isLoopbackHost } from "@ops/broker";
 
@@ -60,21 +64,23 @@ export class PostgresAdapter implements Adapter {
       kind: "database",
       profileKinds: ["db"],
       credentialKinds: ["static"],
-      capabilities: ["read-only", "column-origin", "statement-timeout", "ast-allowlist"],
-      tools: DB_READ_TOOLS.map((t) => t.descriptor),
+      capabilities: ["read-only", "column-origin", "statement-timeout", "ast-allowlist", "change-transaction", "row-limit-rollback"],
+      tools: DB_ALL_TOOLS.map((t) => t.descriptor),
     });
   }
 
-  get definitions(): typeof DB_READ_TOOLS {
-    return DB_READ_TOOLS;
+  get definitions(): typeof DB_ALL_TOOLS {
+    return DB_ALL_TOOLS;
   }
 
   validateProfile(profile: Profile): string[] {
     const problems: string[] = [];
     if (profile.kind !== "db") problems.push(`profil türü 'db' olmalı: ${profile.kind}`);
     if (profile.credentialSource.kind !== "static") problems.push(`kimlik kaynağı henüz desteklenmiyor: ${profile.credentialSource.kind}`);
-    if (profile.attributes["role"] !== "reader") problems.push("profil rolü 'reader' olmalı (yazıcı Faz 2)");
-    if (profile.classCeiling !== "read") problems.push("db profilleri bu sürümde yalnız 'read' tavanlıdır");
+    const role = profile.attributes["role"];
+    if (role !== "reader" && role !== "writer") problems.push("profil rolü 'reader' veya 'writer' olmalı");
+    else if (role === "reader" && profile.classCeiling !== "read") problems.push("reader profil yalnız 'read' tavanlı olabilir");
+    else if (role === "writer" && profile.classCeiling === "read") problems.push("writer profil 'mutate', 'deploy' veya 'destroy' tavanlı olmalı");
     if (/^https?:\/\//i.test(profile.targetPin.endpoint) || !/^(\[[0-9a-f:]+\]|[a-z0-9.-]+):\d{1,5}$/i.test(profile.targetPin.endpoint)) problems.push("pin uç noktası 'host:port' biçiminde olmalı");
     const defaultSchema = profile.attributes["defaultSchema"];
     if (defaultSchema !== undefined && !SIMPLE_IDENT.test(defaultSchema)) problems.push("defaultSchema geçersiz");
@@ -109,6 +115,27 @@ export class PostgresAdapter implements Adapter {
     return { analysis, sql };
   }
 
+  private roleOf(profile: Profile): DbRole {
+    return profile.attributes["role"] === "writer" ? "writer" : "reader";
+  }
+
+  /** Değişiklik ifade kümesini sınıflar; reddedilirse nedeniyle OpsError. Yazma aracı yalnız writer profilinde. */
+  private analyzeChange(tool: string, a: Args, profile: Profile): { analysis: ChangeAnalysis; maxRows: number } {
+    const sql = str(a, "sql");
+    if (sql === undefined) throw new OpsError("sql_missing", "sql gerekli");
+    if (tool === "db.change.apply" && this.roleOf(profile) !== "writer") {
+      throw new OpsError("writer_required", "db.change.apply yalnız 'writer' rollü profilde çalışır (reader profilde yazma yok)");
+    }
+    const analysis = classifySqlChange(sql);
+    if (!analysis.allowed) throw new OpsError("sql_rejected", `SQL reddedildi: ${analysis.reason ?? "izinli değil"}`);
+    const violations = maskedViolations({ allowed: true, explain: false, classification: analysis.classification }, maskedMapFor(this.masking, profile.id));
+    if (violations.length > 0) {
+      throw new OpsError("masked_column_violation", `maskeli sütun kuralı: ${violations.slice(0, 3).join("; ")} — maskeli sütun değişiklikte yalnız yazılabilir, okunamaz (koşul/ifade/alt sorgu yasak)`);
+    }
+    const maxRows = typeof a["maxRows"] === "number" ? (a["maxRows"] as number) : DEFAULT_CHANGE_MAX_ROWS;
+    return { analysis, maxRows };
+  }
+
   private scopesOf(analysis: SqlAnalysis, profile: Profile): string[] {
     const def = this.defaultSchemaOf(profile);
     const out = new Set<string>();
@@ -139,6 +166,12 @@ export class PostgresAdapter implements Adapter {
         const { analysis } = this.analyze(tool, a, profile);
         return t(this.scopesOf(analysis, profile), analysis.classification.relations.map((r) => `Table/${r.includes(".") ? r : `${this.defaultSchemaOf(profile)}.${r}`}`));
       }
+      case "db.change.propose":
+      case "db.change.apply": {
+        const { analysis } = this.analyzeChange(tool, a, profile);
+        const def = this.defaultSchemaOf(profile);
+        return t(changeScopes(analysis, def), changeRefs(analysis, def));
+      }
       default:
         throw new OpsError("unknown_tool", `bilinmeyen araç: ${tool}`);
     }
@@ -146,6 +179,12 @@ export class PostgresAdapter implements Adapter {
 
   /** Savunma derinliği: reddedilen SQL `destroy` muamelesi görür (resolveTarget zaten reddeder). */
   classify(tool: string, args: unknown): RiskClass | undefined {
+    if (tool === "db.change.apply") {
+      const sql = str((args ?? {}) as Args, "sql");
+      if (sql === undefined) return "destroy";
+      const r = classifySqlChange(sql);
+      return r.allowed ? r.risk : "destroy";
+    }
     if (tool !== "db.query.read" && tool !== "db.query.explain") return undefined;
     const sql = str((args ?? {}) as Args, "sql");
     if (sql === undefined) return "destroy";
@@ -197,10 +236,98 @@ export class PostgresAdapter implements Adapter {
 
   // ---- araçlar ------------------------------------------------------------------------------
 
+  /** Mutasyon önizlemesi: ifade kümesi + tahmini etki + şema sürümü (TOCTOU). Salt OKUNUR işlemlerle. */
+  async preview(call: AdapterCall): Promise<ActionPreview> {
+    if (call.tool !== "db.change.apply") throw new OpsError("no_preview", `araç önizleme desteklemiyor: ${call.tool}`);
+    if (!call.handle) throw new OpsError("lease_inactive", "kimlik tutamacı yok");
+    const p = call.profile;
+    const { analysis, maxRows } = this.analyzeChange(call.tool, (call.args ?? {}) as Args, p);
+    const plan = buildPlan(analysis, this.defaultSchemaOf(p), maxRows, call.limits.timeoutMs);
+    return this.withSession(call, "reader", async (session) => {
+      const version = await session.changeVersion(plan);
+      const estimates = await session.estimateChange(plan);
+      return renderPreview(plan, estimates, version);
+    });
+  }
+
+  /** Oturumu açar, okuma korumalarını uygular, `fn`i çalıştırır; her durumda kapatır (zaman aşımında bağlantıyı düşürür). */
+  private async withSession<T>(call: AdapterCall, role: DbRole, fn: (s: PgSessionHandle) => Promise<T>, guard: "reader" | "writer" = "reader"): Promise<T> {
+    if (!call.handle) throw new OpsError("lease_inactive", "kimlik tutamacı yok");
+    const p = call.profile;
+    const session = await this.driver.connect(call.handle, role, this.connectOpts(p, call.signal));
+    const deadline = setTimeout(() => (session as unknown as { destroy?: () => void }).destroy?.(), call.limits.timeoutMs + 3_000);
+    deadline.unref();
+    try {
+      if (guard === "writer") await session.applyWriterGuards({ timeoutMs: call.limits.timeoutMs });
+      else await session.applyReaderGuards({ maxRows: 1, maxBytes: 4096, timeoutMs: Math.min(call.limits.timeoutMs, 20_000) });
+      return await fn(session);
+    } finally {
+      clearTimeout(deadline);
+      await session.close();
+    }
+  }
+
+  private async proposeChange(call: AdapterCall): Promise<RawToolOutput> {
+    const p = call.profile;
+    const { analysis, maxRows } = this.analyzeChange(call.tool, (call.args ?? {}) as Args, p);
+    const def = this.defaultSchemaOf(p);
+    const plan = buildPlan(analysis, def, maxRows, call.limits.timeoutMs);
+    const estimates = await this.withSession(call, "reader", (s) => s.estimateChange(plan));
+    const known = estimates.filter((e): e is number => typeof e === "number");
+    const dmlCount = plan.statements.filter((s) => s.dml).length;
+    const total = known.reduce((x, y) => x + y, 0);
+    const complete = known.length === dmlCount;
+    const suggestedMaxRows = complete && dmlCount > 0 ? Math.min(MAX_APPROVED_ROWS, Math.max(10, Math.ceil(total * 1.2))) : DEFAULT_CHANGE_MAX_ROWS;
+    const notes: string[] = [];
+    if (!complete) notes.push("bazı ifadeler için satır tahmini yok (yetki, henüz yaratılmamış tablo veya DDL); üst sınırı bilerek seçin");
+    const needed = analysis.risk;
+    if (riskRank(needed) > riskRank(p.classCeiling)) notes.push(`bu profilin tavanı '${p.classCeiling}', küme '${needed}' gerektirir: uygulanamaz (ceiling_exceeded)`);
+    if (this.roleOf(p) !== "writer") notes.push("bu profil reader: uygulamak için writer profili bağlayın (aynı kanıtlara atıf yapılamaz; yeniden okuyun)");
+    return {
+      data: {
+        statements: analysis.statements.map((s) => ({
+          index: s.index + 1,
+          kind: s.kind,
+          class: s.risk,
+          targets: s.targets.map((t) => (t.schema ? `${t.schema}.${t.name}` : `${def}.${t.name}`)),
+          estimatedRows: estimates[s.index] ?? null,
+          ...(s.unbounded ? { whereless: true } : {}),
+        })),
+        requiredClass: needed,
+        profileCeiling: p.classCeiling,
+        estimatedTotalRows: complete ? total : undefined,
+        suggestedMaxRows,
+        statementSetSha256: analysis.digest.slice(0, 16),
+        notes: notes.length ? notes : undefined,
+      },
+      summary: `${analysis.statements.length} ifade, gereken sınıf ${needed}${complete && dmlCount > 0 ? `, tahmini ≈${total} satır` : ""}`,
+      subjects: changeRefs(analysis, def).slice(0, 20),
+    };
+  }
+
+  private async applyChange(call: AdapterCall): Promise<RawToolOutput> {
+    const p = call.profile;
+    if (!call.approvedVersion) throw new OpsError("approval_version_missing", "onaylanan sürüm yok: uygulama reddedildi");
+    const { analysis, maxRows } = this.analyzeChange(call.tool, (call.args ?? {}) as Args, p);
+    const def = this.defaultSchemaOf(p);
+    // Kimlik kullanılmadan ÖNCE, PEP'e güvenmeden: sınıf profil tavanını aşamaz.
+    if (riskRank(analysis.risk) > riskRank(p.classCeiling)) throw new OpsError("ceiling_exceeded", `ifade kümesi '${analysis.risk}' gerektirir, profil tavanı '${p.classCeiling}'`);
+    const plan = buildPlan(analysis, def, maxRows, call.limits.timeoutMs);
+    const approved = call.approvedVersion;
+    const res = await this.withSession(call, "writer", (s) => s.applyChange(plan, approved), "writer");
+    return {
+      data: { committed: true, statements: res.statements.map((s) => ({ index: s.index + 1, kind: s.kind, rows: s.rows })), totalRows: res.totalRows, maxRows, schemaVersion: res.version.slice(0, 22), statementSetSha256: analysis.digest.slice(0, 16) },
+      summary: `${res.statements.length} ifade uygulandı (COMMIT), toplam ${res.totalRows} satır etkilendi (üst sınır ${maxRows})`,
+      subjects: changeRefs(analysis, def).slice(0, 20),
+    };
+  }
+
   async invoke(call: AdapterCall): Promise<RawToolOutput> {
     const a = (call.args ?? {}) as Args;
     const p = call.profile;
     if (call.tool === "db.datasource.describe") return this.describeDatasource(p);
+    if (call.tool === "db.change.propose") return this.proposeChange(call);
+    if (call.tool === "db.change.apply") return this.applyChange(call);
     if (!call.handle) throw new OpsError("lease_inactive", "kimlik tutamacı yok");
     // SQL araçları: kimlik kullanılmadan ÖNCE tekrar sınıflanır (PEP'e güvenmeden).
     const sqlInfo = call.tool === "db.query.read" || call.tool === "db.query.explain" ? this.analyze(call.tool, a, p) : null;
@@ -250,7 +377,7 @@ export class PostgresAdapter implements Adapter {
       data: {
         datasource: p.attributes["datasource"] ?? p.id,
         dialect: "postgresql",
-        role: p.attributes["role"] ?? "reader",
+        role: this.roleOf(p),
         environment: p.environment,
         allowedSchemas: p.allowedScopes,
         defaultSchema: this.defaultSchemaOf(p),
@@ -260,7 +387,7 @@ export class PostgresAdapter implements Adapter {
         limits: { maxRows: 500, maxKiB: 256, timeoutSec: 10 },
         maskedTables: [...maskedMapFor(this.masking, p.id).keys()],
       },
-      summary: `veri kaynağı ${p.attributes["datasource"] ?? p.id} (${p.environment}), reader`,
+      summary: `veri kaynağı ${p.attributes["datasource"] ?? p.id} (${p.environment}), ${this.roleOf(p)}`,
     };
   }
 
@@ -293,7 +420,7 @@ export class PostgresAdapter implements Adapter {
       data: { schemas, truncated: truncated || undefined, note: truncated ? `${total} tablodan ${shown} tanesi gösterildi; schema/table ile daraltın` : undefined },
       summary: `${shown} tablo`,
       truncated,
-      subjects: schemas.flatMap((s) => s.tables.slice(0, 20).map((t) => `Table/${s.name}.${t.name}`)),
+      subjects: [...schemas.map((s) => `Schema/${s.name}`), ...schemas.flatMap((s) => s.tables.slice(0, 20).map((t) => `Table/${s.name}.${t.name}`))],
       sensitivity: "internal",
     };
   }

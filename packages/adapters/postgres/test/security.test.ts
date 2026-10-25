@@ -116,12 +116,15 @@ describe.skipIf(!pg)("S-03 (DB ayağı): katmanlar tek tek devre dışı bırak�
     expect(await pg!.admin("SELECT count(*) FROM public.orders", "shop")).toBe("30");
   });
 
-  it("(1) araç yüzünde yazma aracı yok: tüm araçlar read sınıfında", async () => {
+  it("(1) reader profilde yazma yolu yok: okuma araçları read sınıfında; yazma aracı ayrı toolset'te ve reader'da reddedilir", async () => {
     const h = await makePgHarness();
-    expect(h.adapter.manifest.tools.every((t) => t.class === "read")).toBe(true);
-    expect(h.adapter.manifest.tools.map((t) => t.name).join()).not.toMatch(/apply|write|exec|change/);
-    const r = await h.call("db.change.apply", { sql: "DELETE FROM public.orders" });
+    const reads = h.adapter.manifest.tools.filter((t) => t.toolset === "database");
+    expect(reads.every((t) => t.class === "read")).toBe(true);
+    expect(reads.map((t) => t.name).join()).not.toMatch(/apply|write|exec|change/);
+    expect(h.adapter.manifest.tools.filter((t) => t.class !== "read").map((t) => t.name)).toEqual(["db.change.apply"]);
+    const r = await h.call("db.change.apply", { sql: "DELETE FROM public.orders WHERE id = 1" });
     expect(r.status).toBe("denied");
+    expect(await pg!.admin("SELECT count(*) FROM public.orders", "shop")).toBe("30");
   });
 });
 

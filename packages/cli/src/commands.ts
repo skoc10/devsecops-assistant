@@ -57,7 +57,7 @@ const USAGE = [
   "  init                               OPS_HOME ve kasayı oluştur",
   "  profile add k8s --id ID --kubeconfig YOL --env dev|stage|prod|sandbox [--context C] [--scope a,b] [--ceiling read]",
   "              [--name AD] [--ambient-env ADLAR] [--ambient-path DİZİN]",
-  "  profile add db --id ID --env E --host H [--port 5432] --database D --user U --scope public,sales [--ca-file PEM]",
+  "  profile add db --id ID --env E --host H [--port 5432] --database D --user U --scope public,sales [--ca-file PEM] [--ceiling read|mutate|deploy|destroy]  (read olmayan tavan = writer profili)",
   "              [--default-schema S] [--datasource AD] [--name AD] [--tls verify-full|disable] [--replace]",
   "              (parola: OPS_DB_PASSWORD_FILE ile 0600 dosya veya yankısız TTY istemi; bağlantı DİZESİ kabul edilmez)",
   "  profile add pipeline|scm --id ID --env E --scope sahip/depo,sahip/* [--api-url https://api.github.com] [--ca-file PEM] [--ceiling read|mutate|deploy]",
@@ -156,7 +156,7 @@ async function addDatabaseProfile(c: CliEnv, args: string[]): Promise<number> {
       ...(values.replace ? { replace: true } : {}),
     }),
   );
-  out(c, `Profil eklendi: ${res.profile.id} (${res.profile.environment}, reader, şemalar ${res.profile.allowedScopes.join("|")}, çıktı bölgesi ${res.profile.egressClass})`);
+  out(c, `Profil eklendi: ${res.profile.id} (${res.profile.environment}, ${res.profile.attributes["role"] ?? "reader"}, şemalar ${res.profile.allowedScopes.join("|")}, çıktı bölgesi ${res.profile.egressClass})`);
   for (const w of res.warnings) out(c, `⚠ ${w}`);
   out(c, "Parola yalnız kasada. `ops profile doctor` rolün fiili yetkilerini sınar (yazma/CREATE/süper yetki varsa profil bağlanmaz). Maskeli sütunlar için OPS_HOME/masking.yaml.");
   return 0;

@@ -9,7 +9,7 @@ import { CaptureSink, makeCanary, makeTestProfile } from "@ops/testkit";
 import type { Canary } from "@ops/testkit";
 import { SHOP_ROLES, seedShop, startTestPostgres } from "@ops/testkit/postgres";
 import type { TestPostgres } from "@ops/testkit/postgres";
-import type { Profile, ProfileInput, ReadLimits, ToolResult } from "@ops/contracts";
+import type { ApprovalGate, Profile, ProfileInput, ReadLimits, ToolResult } from "@ops/contracts";
 import { EMPTY_MASKING_CONFIG, PostgresAdapter, maskingRulesFor } from "../src/index.ts";
 import type { MaskingConfig, PgDriverApi } from "../src/index.ts";
 
@@ -52,6 +52,9 @@ export interface PgHarnessOpts {
   /** Kasadaki parolayı değiştirir (yanlış parola testi). */
   readonly password?: string;
   readonly driver?: (real: PgDriverApi) => PgDriverApi;
+  readonly approval?: ApprovalGate;
+  /** Yazıcı profili: rol `writer` + verilen tavan (ve DB kullanıcısı `role`). */
+  readonly writerCeiling?: "mutate" | "deploy" | "destroy";
 }
 
 export async function makePgHarness(opts: PgHarnessOpts = {}) {
@@ -73,10 +76,10 @@ export async function makePgHarness(opts: PgHarnessOpts = {}) {
     displayName: "Shop (test)",
     environment: "sandbox",
     targetPin: { endpoint: `${pg.host}:${pg.port}`, ...(opts.noCaPin || opts.tlsMode === "disable" ? {} : { caFingerprint: pg.pki.caFingerprint }) },
-    classCeiling: "read",
+    classCeiling: opts.writerCeiling ?? "read",
     allowedScopes: ["public", "sales"],
     egressClass: "tenant-cloud",
-    attributes: { role: "reader", datasource: "shop", defaultSchema: "public" },
+    attributes: { role: opts.writerCeiling ? "writer" : "reader", datasource: "shop", defaultSchema: "public" },
     ...(opts.profile ?? {}),
   });
   const store = new MemorySecretStore();
@@ -105,10 +108,12 @@ export async function makePgHarness(opts: PgHarnessOpts = {}) {
     evidence,
     known,
     maskingFor: (tool, p) => (tool.profileKind === "db" && p ? maskingRulesFor(masking, p.id) : null),
+    ...(opts.approval ? { approval: opts.approval } : {}),
   });
   session.bind(profile);
 
-  const call = (tool: string, args: unknown): Promise<ToolResult> => gateway.invoke({ tool, args, profile: profile.id, providerZone: "local" });
+  const call = (tool: string, args: unknown, over: { cited?: string[] } = {}): Promise<ToolResult> =>
+    gateway.invoke({ tool, args, profile: profile.id, providerZone: "local", ...(over.cited ? { citedEvidence: over.cited } : {}) });
   const sinkFor = async (results: readonly ToolResult[]): Promise<CaptureSink> => {
     const sink = new CaptureSink();
     sink.push("audit", (await storage.readLines()).join("\n"));

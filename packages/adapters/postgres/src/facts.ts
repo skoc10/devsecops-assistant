@@ -19,6 +19,12 @@ export interface PrivilegeFacts {
   /** INSERT/UPDATE/DELETE/TRUNCATE yetkisi olan ilişkiler (en çok 20) ve toplam. */
   readonly writableRelations: readonly string[];
   readonly writableRelationCount: number;
+  /** İzinli şemalar DIŞINDA yazma yetkisi olan şemalar ve ilişki sayıları (yazıcı profili için kapsam aşımı). */
+  readonly writableOutsideScopes: readonly { readonly schema: string; readonly tables: number }[];
+  /** TRUNCATE yetkisi olan ilişki sayısı (yok etme sınıfı). */
+  readonly truncatableRelations: number;
+  /** Rolün sahibi olduğu ilişki sayısı: sahiplik DROP/ALTER/TRUNCATE'i örtük verir (yok etme sınıfı). */
+  readonly ownedRelations: number;
   readonly writableSequences: readonly string[];
   /** Çalıştırma yetkisi olan tehlikeli yerleşik/eklenti fonksiyonları. */
   readonly dangerousFunctions: readonly string[];

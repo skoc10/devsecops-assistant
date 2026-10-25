@@ -117,14 +117,19 @@ describe("ProfileService.addDatabase + LocalBroker", () => {
     expect(() => broker.resolver.db(lease.handle)).toThrow(/geçersiz|süresi/);
   });
 
-  it("prod varsayılan egress 'local'; yazıcı tavanı ve geçersiz şema reddedilir; kopya profil engellenir", async () => {
+  it("prod varsayılan egress 'local'; geçersiz şema reddedilir; kopya profil engellenir; read-üstü tavan = writer rolü + uyarı", async () => {
     const store = new MemorySecretStore();
     const registry = await ProfileRegistry.open({ path: join(dir, "p.json"), testMode: false });
     const svc = new ProfileService({ store, registry });
     const req = { id: "orders-prod", environment: "prod" as const, ...base, allowedScopes: ["public"] };
     expect((await svc.addDatabase(req)).profile.egressClass).toBe("local");
     await expect(svc.addDatabase(req)).rejects.toThrow(/zaten var/);
-    await expect(svc.addDatabase({ ...req, id: "w", classCeiling: "mutate" })).rejects.toThrow(/yalnız 'read'/);
+    const w = await svc.addDatabase({ ...req, id: "w", classCeiling: "mutate" });
+    expect(w.profile).toMatchObject({ classCeiling: "mutate", attributes: { role: "writer" } });
+    expect(w.warnings.join()).toMatch(/yazıcı profili.*AYRI.*kullanıcı/s);
+    expect(w.warnings.join()).not.toContain(base.password);
+    expect((await svc.addDatabase({ ...req, id: "r1" })).profile.attributes["role"]).toBe("reader");
+    expect((await svc.addDatabase({ ...req, id: "d1", classCeiling: "destroy" })).profile).toMatchObject({ classCeiling: "destroy", attributes: { role: "writer" } });
     await expect(svc.addDatabase({ ...req, id: "s1", allowedScopes: ["Bad-Schema"] })).rejects.toThrow(/şema adı geçersiz/);
     await expect(svc.addDatabase({ ...req, id: "s2", allowedScopes: [] })).rejects.toThrow(/izinli şema/);
     await expect(svc.addDatabase({ ...req, id: "s3", allowedScopes: ["a"], defaultSchema: "b" })).rejects.toThrow(/izinli şemalar arasında/);

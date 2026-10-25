@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import pg from "pg";
 import Cursor from "pg-cursor";
 import { OpsError, normalizeEndpoint } from "@ops/contracts";
@@ -20,6 +21,7 @@ import { classifySql, normalizeSqlForDisplay } from "@ops/classifiers";
 import { dbError } from "./errors.ts";
 import type { PgStats, PrivilegeFacts } from "./facts.ts";
 import { quoteIdent } from "./identifiers.ts";
+import type { ChangePlan, PlanRelation } from "./change.ts";
 
 /** Tüm hücreler metin biçiminde gelir; yalnız güvenli sayısal/bool türleri JS değerine çevrilir. */
 const PARSERS: Readonly<Record<number, (v: string) => unknown>> = {
@@ -65,12 +67,29 @@ function closeCursor(cursor: Cursor<unknown[]>): Promise<void> {
 
 const intMs = (n: number): number => Math.max(1, Math.min(600_000, Math.floor(n)));
 
+/** Kısıtlar, dizinler ve sütunlar dahil ilişki şeması parmak izi (TOCTOU sürümü). Yoksa satır dönmez. */
+const FINGERPRINT_SQL =
+  "SELECT c.oid::text AS oid, c.relkind::text AS kind, " +
+  "(SELECT json_agg(json_build_array(a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.atthasdef) ORDER BY a.attnum) " +
+  "   FROM pg_catalog.pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped)::text AS cols, " +
+  "(SELECT json_agg(pg_catalog.pg_get_constraintdef(k.oid) ORDER BY pg_catalog.pg_get_constraintdef(k.oid)) FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid)::text AS cons, " +
+  "(SELECT json_agg(pg_catalog.pg_get_indexdef(i.indexrelid) ORDER BY pg_catalog.pg_get_indexdef(i.indexrelid)) FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid)::text AS idx, " +
+  "CASE WHEN c.relkind = 'v' THEN pg_catalog.pg_get_viewdef(c.oid) END AS def " +
+  "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','v','m','f')";
+
+export interface ChangeApplyResult {
+  readonly statements: readonly { readonly index: number; readonly kind: string; readonly rows: number }[];
+  readonly totalRows: number;
+  /** Uygulama işleminin içinde yeniden hesaplanan şema sürümü (onaylanan ile aynıdır). */
+  readonly version: string;
+}
+
 export class PgSession implements DbSession {
   private closed = false;
   private readonly client: pg.Client;
-  private readonly opts: { readonly defaultSchema: string; readonly tls: boolean };
+  private readonly opts: { readonly defaultSchema: string; readonly tls: boolean; readonly role: DbRole };
 
-  constructor(client: pg.Client, opts: { readonly defaultSchema: string; readonly tls: boolean }) {
+  constructor(client: pg.Client, opts: { readonly defaultSchema: string; readonly tls: boolean; readonly role: DbRole }) {
     this.client = client;
     this.opts = opts;
   }
@@ -203,6 +222,111 @@ export class PgSession implements DbSession {
     }
   }
 
+  // ---- yazıcı: değişiklik önizleme / uygulama --------------------------------------------------
+
+  /** Yazıcı oturum ayarları (zaman aşımları, arama yolu). Salt-okunur DEĞİL: yalnız `applyChange` öncesi. */
+  async applyWriterGuards(limits: { readonly timeoutMs: number }): Promise<void> {
+    if (this.opts.role !== "writer") throw new OpsError("writer_required", "yazıcı oturumu gerekli");
+    try {
+      await this.simple(`SET statement_timeout = ${intMs(limits.timeoutMs)}`);
+      await this.simple(`SET lock_timeout = ${intMs(Math.min(limits.timeoutMs, 5_000))}`);
+      await this.simple(`SET idle_in_transaction_session_timeout = ${intMs(limits.timeoutMs * 2)}`);
+      await this.simple(`SET search_path = ${quoteIdent(this.opts.defaultSchema)}`);
+    } catch (e) {
+      throw dbError(e, "yazıcı korumaları uygulanamadı");
+    }
+  }
+
+  private async fingerprintOf(rel: PlanRelation): Promise<unknown> {
+    const r = await this.client.query({ text: FINGERPRINT_SQL, values: [rel.schema, rel.name] });
+    return r.rows[0] ?? null;
+  }
+
+  /** Onaylanan ifade kümesine ve dokunulan ilişkilerin şemasına bağlı sürüm (TOCTOU). */
+  async changeVersion(plan: ChangePlan): Promise<string> {
+    try {
+      const parts: unknown[] = [];
+      for (const t of plan.touched) parts.push([t.schema, t.name, await this.fingerprintOf(t)]);
+      return `pgchg1:${createHash("sha256").update(JSON.stringify({ digest: plan.digest, parts })).digest("hex")}`;
+    } catch (e) {
+      throw dbError(e, "şema sürümü okunamadı");
+    }
+  }
+
+  /** Planlayıcının satır tahmini (EXPLAIN, ANALYZE yok; yürütülmez). DDL ve tahmin edilemeyenler için `null`. */
+  async estimateChange(plan: ChangePlan): Promise<(number | null)[]> {
+    const out: (number | null)[] = [];
+    for (const st of plan.statements) {
+      if (!st.dml) {
+        out.push(null);
+        continue;
+      }
+      try {
+        await this.simple("BEGIN READ ONLY");
+        try {
+          await this.simple(`SET LOCAL statement_timeout = ${intMs(Math.min(plan.timeoutMs, 10_000))}`);
+          const r = await this.client.query(`EXPLAIN (FORMAT JSON, COSTS true) ${st.text}`);
+          const raw = r.rows[0]?.["QUERY PLAN"];
+          const doc = (typeof raw === "string" ? JSON.parse(raw) : raw) as { Plan?: { "Plan Rows"?: unknown } }[];
+          const n = Number(doc?.[0]?.Plan?.["Plan Rows"]);
+          out.push(Number.isFinite(n) && n >= 0 ? Math.round(n) : null);
+        } finally {
+          await this.simple("ROLLBACK").catch(() => undefined);
+        }
+      } catch {
+        out.push(null); // izin yok / ilişki henüz yok (aynı kümede CREATE) / tahmin edilemedi
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Onaylanan ifade kümesini TEK işlemde uygular: kilitler → şema sürümü doğrulama → ifadeler → satır
+   * sayımı → COMMIT. Sürüm uyuşmazlığı, hata ya da toplam etkilenen satır > `maxRows` → ROLLBACK.
+   */
+  async applyChange(plan: ChangePlan, approvedVersion: string): Promise<ChangeApplyResult> {
+    if (this.opts.role !== "writer") throw new OpsError("writer_required", "yazıcı oturumu gerekli");
+    await this.simple("BEGIN READ WRITE").catch((e: unknown) => {
+      throw dbError(e, "işlem başlatılamadı");
+    });
+    let committed = false;
+    try {
+      await this.simple(`SET LOCAL statement_timeout = ${intMs(plan.timeoutMs)}`);
+      for (const l of plan.locks) {
+        const q = `${quoteIdent(l.schema)}.${quoteIdent(l.name)}`;
+        const exists = await this.client.query({ text: "SELECT to_regclass($1) IS NOT NULL AS e", values: [q] });
+        if (exists.rows[0]?.["e"] === true) await this.simple(`LOCK TABLE ${q} IN ${l.mode} MODE`);
+      }
+      const version = await this.changeVersion(plan);
+      if (version !== approvedVersion) throw new OpsError("target_changed", "onaydan sonra ilgili tabloların şeması değişti; hiçbir ifade çalıştırılmadı");
+      const done: { index: number; kind: string; rows: number }[] = [];
+      let total = 0;
+      for (const st of plan.statements) {
+        let res: pg.QueryResult;
+        try {
+          res = await this.client.query(st.text);
+        } catch (e) {
+          throw dbError(e, `ifade ${st.index + 1}/${plan.statements.length} (${st.kind}) başarısız; işlem geri alındı`);
+        }
+        const rows = st.dml ? (res.rowCount ?? 0) : 0;
+        total += rows;
+        done.push({ index: st.index, kind: st.kind, rows });
+        if (total > plan.maxRows) {
+          throw new OpsError("row_limit_exceeded", `etkilenen satır onaylanan üst sınırı aştı (ifade ${st.index + 1}: toplam ${total} > ${plan.maxRows}); işlem geri alındı`);
+        }
+      }
+      try {
+        await this.simple("COMMIT");
+      } catch (e) {
+        throw dbError(e, "COMMIT başarısız; işlem geri alındı");
+      }
+      committed = true;
+      return { statements: done, totalRows: total, version };
+    } finally {
+      if (!committed) await this.simple("ROLLBACK").catch(() => undefined);
+    }
+  }
+
   // ---- yalnız PostgreSQL: istatistik ve doktor -----------------------------------------------
 
   async stats(): Promise<PgStats> {
@@ -294,6 +418,20 @@ export class PgSession implements DbSession {
           "AND (has_table_privilege(c.oid, 'INSERT') OR has_table_privilege(c.oid, 'UPDATE') OR has_table_privilege(c.oid, 'DELETE') OR has_table_privilege(c.oid, 'TRUNCATE') " +
           "OR has_any_column_privilege(c.oid, 'INSERT') OR has_any_column_privilege(c.oid, 'UPDATE')) ORDER BY 1, 2 LIMIT 500",
       );
+      const outsideWritable = wildcard
+        ? []
+        : await q<{ nspname: string; n: number }>(
+            "SELECT n.nspname, count(*)::int AS n FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+              "WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' AND NOT (n.nspname = ANY($1::text[])) " +
+              "AND (has_table_privilege(c.oid, 'INSERT') OR has_table_privilege(c.oid, 'UPDATE') OR has_table_privilege(c.oid, 'DELETE') OR has_table_privilege(c.oid, 'TRUNCATE') " +
+              "OR has_any_column_privilege(c.oid, 'INSERT') OR has_any_column_privilege(c.oid, 'UPDATE')) GROUP BY 1 ORDER BY 1 LIMIT 20",
+            [[...scopes]],
+          );
+      const owned = (await q<{ n: number; t: number }>(
+        "SELECT count(*) FILTER (WHERE pg_has_role(current_user, c.relowner, 'MEMBER'))::int AS n, count(*) FILTER (WHERE has_table_privilege(c.oid, 'TRUNCATE'))::int AS t " +
+          "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+          "WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'",
+      ))[0];
       const seqs = await q<{ nspname: string; relname: string }>(
         "SELECT n.nspname, c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
           "WHERE c.relkind = 'S' AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema' " +
@@ -323,6 +461,9 @@ export class PgSession implements DbSession {
         schemaCreate: nsp.filter((n) => n.can_create).map((n) => n.nspname),
         writableRelations: writable.slice(0, 20).map((w) => `${w.nspname}.${w.relname}`),
         writableRelationCount: writable.length,
+        writableOutsideScopes: outsideWritable.map((o) => ({ schema: o.nspname, tables: o.n })),
+        truncatableRelations: owned?.t ?? 0,
+        ownedRelations: owned?.n ?? 0,
         writableSequences: seqs.map((s) => `${s.nspname}.${s.relname}`),
         dangerousFunctions: funcs.map((f) => f.f),
         readableOutsideScopes: outside.map((o) => ({ schema: o.nspname, tables: o.n })),
@@ -354,6 +495,10 @@ export class PgSession implements DbSession {
 export interface PgSessionHandle extends DbSession {
   stats(): Promise<PgStats>;
   privilegeFacts(scopes: readonly string[]): Promise<PrivilegeFacts>;
+  applyWriterGuards(limits: { readonly timeoutMs: number }): Promise<void>;
+  changeVersion(plan: ChangePlan): Promise<string>;
+  estimateChange(plan: ChangePlan): Promise<(number | null)[]>;
+  applyChange(plan: ChangePlan, approvedVersion: string): Promise<ChangeApplyResult>;
 }
 
 /** Adapter'ın ihtiyaç duyduğu sürücü yüzü (DatabaseDriver + PostgreSQL'e özgü oturum yetenekleri). */
@@ -379,7 +524,6 @@ export class PgDriver implements DatabaseDriver, PgDriverApi {
   }
 
   async connect(handle: CredentialHandle, role: DbRole, opts: DbConnectOptions): Promise<PgSession> {
-    if (role !== "reader") throw new OpsError("writer_unsupported", "yazıcı kimliği bu sürümde desteklenmiyor (Faz 2)");
     const cred = this.resolver.db(handle);
     // Kimlik gönderilmeden ÖNCE: sunucu adresi ve (varsa) CA parmak izi profilin pinine uymalı.
     if (normalizeEndpoint(dbEndpoint(cred.host, cred.port)) !== normalizeEndpoint(opts.pin.endpoint)) {
@@ -428,6 +572,6 @@ export class PgDriver implements DatabaseDriver, PgDriverApi {
       opts.signal?.removeEventListener("abort", onAbort);
       throw dbError(e, "veritabanına bağlanılamadı");
     }
-    return new PgSession(client, { defaultSchema: opts.defaultSchema ?? "public", tls: cred.tls.mode !== "disable" });
+    return new PgSession(client, { defaultSchema: opts.defaultSchema ?? "public", tls: cred.tls.mode !== "disable", role });
   }
 }

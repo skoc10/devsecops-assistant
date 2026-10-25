@@ -3,6 +3,7 @@ import { defineTool } from "@ops/contracts";
 import type { ToolDefinition, ToolDescriptorMeta } from "@ops/contracts";
 import { MAX_SQL_CHARS } from "@ops/classifiers";
 import { SIMPLE_IDENT } from "./identifiers.ts";
+import { MAX_APPROVED_ROWS } from "./change.ts";
 
 const base = {
   profileKind: "db",
@@ -86,3 +87,36 @@ export const statsSummary = defineTool(
 );
 
 export const DB_READ_TOOLS: readonly ToolDefinition[] = [datasourceDescribe, schemaDescribe, queryRead, queryExplain, statsSummary];
+
+const changeBase = { ...base, toolset: "database-change", sensitivity: "internal" } as const satisfies Partial<ToolDescriptorMeta>;
+const maxRows = z.number().int().min(1).max(MAX_APPROVED_ROWS).optional();
+
+export const changePropose = defineTool(
+  {
+    ...changeBase,
+    name: "db.change.propose",
+    description: "INSERT/UPDATE/DELETE/DDL ifade kümesini ÇALIŞTIRMADAN sınıflar: ifade türü, etkilenecek tablolar, gereken sınıf, tahmini satır sayısı, ifade seti özeti. Önce bunu çağırın.",
+    limits: { timeoutMs: 20_000, maxBytes: 64 * 1024, maxItems: 20, maxOutputTokens: 1_200 },
+    untrustedOutput: false,
+    typicalOutputTokens: 400,
+  },
+  z.strictObject({ sql, maxRows }),
+);
+
+export const changeApply = defineTool(
+  {
+    ...changeBase,
+    name: "db.change.apply",
+    description: "Onaylanan ifade kümesini TEK işlemde uygular (yazıcı profili). Etkilenen satır `maxRows`ı aşarsa veya hata olursa tamamı ROLLBACK. propose ile AYNI sql/maxRows verilir.",
+    class: "mutate",
+    idempotent: false,
+    limits: { timeoutMs: 60_000, maxBytes: 64 * 1024, maxItems: 20, maxOutputTokens: 800 },
+    untrustedOutput: false,
+    typicalOutputTokens: 250,
+  },
+  z.strictObject({ sql, maxRows }),
+);
+
+export const DB_CHANGE_TOOLS: readonly ToolDefinition[] = [changePropose, changeApply];
+export const DB_ALL_TOOLS: readonly ToolDefinition[] = [...DB_READ_TOOLS, ...DB_CHANGE_TOOLS];
+export const DB_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(["db.change.apply"]);

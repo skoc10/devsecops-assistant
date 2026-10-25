@@ -116,6 +116,10 @@ interface Ctx {
   rowJsonArgs: string[];
   hasStar: boolean;
   kinds: string[];
+  /** Değişiklik sınıflayıcısı (sql-change.ts) için: SELECT allowlist'ine EK düğüm türleri / fonksiyonlar / düğüm denetimi. */
+  extraNodes?: ReadonlySet<string>;
+  extraFunctions?: ReadonlySet<string>;
+  check?: (kind: string, body: Obj, ctx: Ctx, depth: number) => void;
 }
 
 /** SELECT hedef listesindeki doğrudan sütun başvurusu mu? Üst düzey (UNION kolları dahil) SELECT'e bağlı. */
@@ -169,8 +173,9 @@ function recordColumn(fields: unknown[], ctx: Ctx, inside: boolean): void {
 
 function visitNode(kind: string, body: unknown, ctx: Ctx, depth: number, inside: boolean): void {
   if (++ctx.nodes > MAX_NODES) rej("sorgu çok karmaşık");
-  if (!ALLOWED_NODES.has(kind)) rej(`izinli olmayan düğüm türü: ${kind}`);
+  if (!ALLOWED_NODES.has(kind) && !ctx.extraNodes?.has(kind)) rej(`izinli olmayan düğüm türü: ${kind}`);
   const b = (isObj(body) ? body : {}) as Obj;
+  ctx.check?.(kind, b, ctx, depth);
   switch (kind) {
     case "SelectStmt":
       visitSelect(b, ctx, depth, false);
@@ -195,7 +200,7 @@ function visitNode(kind: string, body: unknown, ctx: Ctx, depth: number, inside:
       const parts = names as string[];
       if (parts.length > 2 || (parts.length === 2 && parts[0]?.toLowerCase() !== "pg_catalog")) rej(`şema nitelikli fonksiyon reddedilir: ${parts.join(".")}`);
       const fname = (parts[parts.length - 1] as string).toLowerCase();
-      if (!ALLOWED_FUNCTIONS.has(fname) && !ROW_JSON_FUNCS.has(fname)) rej(`izinli olmayan fonksiyon: ${fname}`);
+      if (!ALLOWED_FUNCTIONS.has(fname) && !ROW_JSON_FUNCS.has(fname) && !ctx.extraFunctions?.has(fname)) rej(`izinli olmayan fonksiyon: ${fname}`);
       ctx.functions.add(fname);
       if (ROW_JSON_FUNCS.has(fname)) {
         // to_jsonb(t) / row_to_json(t): tam-satır başvurusu
@@ -341,3 +346,22 @@ export function normalizeSqlForDisplay(sql: string, max = 160): string | null {
     return null;
   }
 }
+
+
+/**
+ * `sql-change.ts` ile paylaşılan yürüyüş yardımcıları (paket içi; `index.ts` dışa aktarmaz). Değişiklik
+ * sınıflayıcısı SELECT allowlist'inin aynı ifade/alt sorgu denetimini yeniden kullanır; EK düğüm türleri
+ * yalnız kendi `Ctx`'inde açılır, SELECT sınıflayıcısını genişletmez.
+ */
+export const walkKit = {
+  Reject,
+  rej,
+  isObj,
+  strVal,
+  ready: (): boolean => loaded,
+  newCtx: (): Ctx => ({ nodes: 0, relations: new Set(), aliases: new Set(), functions: new Set(), columnRefs: [], singleNameRefs: [], rowJsonArgs: [], hasStar: false, kinds: [] }),
+  walkAny,
+  visitNode,
+};
+export type WalkCtx = Ctx;
+export type WalkObj = Obj;
