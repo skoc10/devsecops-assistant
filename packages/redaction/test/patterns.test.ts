@@ -64,6 +64,15 @@ describe("M2 desen kuralları", () => {
     expect((out.match(/‹redacted:kv-secret›/g) ?? []).length).toBe(3);
   });
 
+  it("değer anahtarda/şemada/kullanıcı adında da geçse DEĞERİN kendisi maskelenir", () => {
+    expect(run("password: password", false).out).toBe("password: ‹redacted:kv-secret›");
+    expect(run("secret_key=secret", false).out).toBe("secret_key=‹redacted:kv-secret›");
+    expect(run("postgres://postgres:postgres@db.example.invalid:5432/app", false).out).toBe(
+      "postgres://postgres:‹redacted:url-credentials›@db.example.invalid:5432/app",
+    );
+    expect(run("redis://app:app@cache.invalid", false).out).toBe("redis://app:‹redacted:url-credentials›@cache.invalid");
+  });
+
   it("şablon/referans/sayaç değerlerini maskelemez (yanlış pozitif)", () => {
     const benign = [
       "token: ${TOKEN}",

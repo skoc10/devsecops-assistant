@@ -123,7 +123,11 @@ export function applyPatternRules(text: string, counter: Counter, opts: PatternO
       if (rule.accept && !rule.accept(value)) return match;
       if (isRedactedToken(value)) return match;
       counter.add(rule.id);
-      return match.replace(value, redacted(rule.id));
+      // değer eşleşmede kendinden ÖNCE de geçebilir (`password: password`, `postgres://postgres:postgres@`):
+      // ilk geçiş değil grubun kendisi maskelenir. Önceki gruplar baştan bitişikse konum kesindir, değilse son geçiş.
+      const before = groups.slice(0, rule.group - 1).join("");
+      const at = match.startsWith(before) && match.startsWith(value, before.length) ? before.length : match.lastIndexOf(value);
+      return `${match.slice(0, at)}${redacted(rule.id)}${match.slice(at + value.length)}`;
     });
   }
 
