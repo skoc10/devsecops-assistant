@@ -1,8 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { OpsError } from "@ops/contracts";
 import type { SecretStore } from "@ops/contracts";
+import { writeFileAtomic } from "../atomic-write.ts";
 
 /**
  * Şifreli yerel kasa. AEAD: AES-256-GCM (Node yerleşik); KDF: scrypt (Node yerleşik — Argon2id
@@ -148,11 +148,7 @@ export class EncryptedFileStore implements SecretStore {
   }
 
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.data), { mode: 0o600 });
-    await chmod(tmp, 0o600);
-    await rename(tmp, this.path);
+    await writeFileAtomic(this.path, JSON.stringify(this.data));
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
