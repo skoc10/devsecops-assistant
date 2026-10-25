@@ -38,6 +38,7 @@ export const REASON_CODES = [
   "target_changed",
   "preview_failed",
   "local_only",
+  "quarantined",
 ] as const;
 export type ReasonCode = (typeof REASON_CODES)[number];
 

@@ -96,6 +96,12 @@ export class OpsdClient implements ChatBackend {
   usage(): Promise<string> {
     return this.call<string>("usage.get");
   }
+  evidenceShow(id: string): Promise<string> {
+    return this.call<string>("evidence.show", { id });
+  }
+  evidenceRelease(id: string): Promise<string> {
+    return this.call<string>("evidence.release", { id });
+  }
   breakGlassStatus(): Promise<string[]> {
     return this.call<string[]>("breakglass.status");
   }

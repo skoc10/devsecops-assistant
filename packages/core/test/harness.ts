@@ -9,7 +9,7 @@ import { KnownSecrets, scrubText } from "@ops/redaction";
 import { CaptureSink, FakeAdapter, FakeBroker, makeCanary, makeTestProfile } from "@ops/testkit";
 import type { Canary } from "@ops/testkit";
 import { createLocalAdapter, EvidenceStore, Session, ToolGateway, ToolRegistry, formatForModel } from "../src/index.ts";
-import type { CommandClassifier } from "../src/index.ts";
+import type { CommandClassifier, Quarantine } from "../src/index.ts";
 
 export const AUDIT_KEY = randomBytes(32);
 
@@ -60,6 +60,7 @@ export interface HarnessOpts {
   /** Saat enjeksiyonu (break-glass süre testleri). */
   now?: () => Date;
   localOnly?: boolean;
+  quarantine?: Quarantine;
 }
 
 export async function makeHarness(opts: HarnessOpts = {}) {
@@ -113,6 +114,7 @@ export async function makeHarness(opts: HarnessOpts = {}) {
     ...(opts.classifiers ? { classifiers: opts.classifiers } : {}),
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.localOnly ? { localOnly: true } : {}),
+    ...(opts.quarantine ? { quarantine: opts.quarantine } : {}),
   });
 
   const profile: Profile = makeTestProfile({ id: "test-k8s", ...(opts.profile ?? {}) });

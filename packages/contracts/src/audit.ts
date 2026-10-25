@@ -13,6 +13,7 @@ export const AUDIT_EVENTS = [
   "alarm",
   "break_glass",
   "policy_change",
+  "evidence_release",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

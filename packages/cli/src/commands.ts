@@ -55,6 +55,8 @@ export interface CliEnv {
   readonly stop?: AbortSignal;
   /** `egress: local-only` (varsayılan: OPS_EGRESS=local-only): yalnız yerel sağlayıcı + yalnız okuma. */
   readonly localOnly?: boolean;
+  /** Karantina kipi (varsayılan: OPS_QUARANTINE): ham log/olay modele girmez, tipli özet gider. */
+  readonly quarantine?: "off" | "digest" | "model";
   /** Kontrol terminali (yeniden kimlik doğrulama, politika düzenleme onayı). Varsayılan `/dev/tty`; açılamazsa işlem REDDEDİLİR. */
   readonly openTty?: () => Promise<TtyIo | null>;
   /** Test: kasa parolası doğrulayıcı (varsayılan: kasa dosyasına karşı). */
@@ -87,8 +89,9 @@ const USAGE = [
   "  break-glass --profile ID --ceiling mutate|deploy|destroy --ttl 30m --reason \"…\"   çalışan opsd oturumunda GEÇİCİ tavan yükseltme (yeniden kimlik doğrulama; sohbette /breakglass da olur)",
   "  break-glass end --profile ID | status | review [--session S]",
   "  policy list | allow --tool T --profile P [--scope a,b] [--ttl 8h] | add --effect ask|deny --id ID [--tool T --profile P --environment e,.. --class c,..] | rm ID   politika düzenleme (diff + TTY onayı + denetim)",
-  "  daemon [--workspace ID] [--local-only]   opsd'yi başlat (UDS)",
-  "  chat [--embedded] [--workspace ID] [--local-only]   sohbet (opsd'ye bağlanır; --embedded süreç içi). --local-only / OPS_EGRESS=local-only: yalnız yerel model + yalnız okuma",
+  "  daemon [--workspace ID] [--local-only] [--quarantine digest|model]   opsd'yi başlat (UDS)",
+  "  chat [--embedded] [--workspace ID] [--local-only] [--quarantine digest|model]   sohbet (opsd'ye bağlanır; --embedded süreç içi). --local-only / OPS_EGRESS=local-only: yalnız yerel model + yalnız okuma",
+  "  (ortam) OPS_QUARANTINE=digest|model  ham log/olay modele GİRMEZ, tipli özet gider (ham: sohbette /show, /raw); model: ek olarak araçsız şemalı model sınıflaması (OPS_QUARANTINE_MODEL=küçük model)",
   "  (ortam) OPS_WORKDIR=DİZİN          shell.run iş alanı (salt-okunur; OS sandbox gerekir; ev dizini olamaz)",
   "  (ortam) OPS_WORKSPACE=ID           etkin IaC çalışma alanı; OPS_TOOL_DIRS=d1:d2 terraform/tofu/ansible dizinleri; OPS_IAC_PROVIDER_MIRROR=DİZİN yerel sağlayıcı aynası",
 ].join("\n");
@@ -96,9 +99,18 @@ const USAGE = [
 const out = (c: CliEnv, s: string): void => void c.io.output.write(`${s}\n`);
 const err = (c: CliEnv, s: string): void => void c.io.error.write(`${s}\n`);
 
+const QUARANTINE_MODES = ["off", "digest", "model"] as const;
+/** `--quarantine MOD` > `CliEnv.quarantine` > OPS_QUARANTINE; geçersiz değer = hata (sessizce kapatma YOK). */
+function quarantineMode(c: CliEnv, flag?: string): "digest" | "model" | undefined {
+  const v = flag ?? c.quarantine ?? c.env["OPS_QUARANTINE"];
+  if (v === undefined || v === "" || v === "off") return undefined;
+  if (!(QUARANTINE_MODES as readonly string[]).includes(v)) throw new OpsError("usage", `--quarantine / OPS_QUARANTINE şunlardan biri olmalı: ${QUARANTINE_MODES.join(", ")}`);
+  return v as "digest" | "model";
+}
+
 const isLocalOnly = (c: CliEnv, flag?: boolean): boolean => flag === true || c.localOnly === true || c.env["OPS_EGRESS"] === "local-only";
 
-async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approval?: TtyApprovalGate, workspace?: string, localOnly?: boolean): Promise<T> {
+async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approval?: TtyApprovalGate, workspace?: string, localOnly?: boolean, quarantine?: "digest" | "model"): Promise<T> {
   const ws = workspace ?? c.workspace ?? c.env["OPS_WORKSPACE"];
   const toolDirs = c.env["OPS_TOOL_DIRS"]?.split(":").filter(Boolean);
   const rt = await createRuntime({
@@ -108,6 +120,7 @@ async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approv
     ...(c.env["OPS_IAC_PROVIDER_MIRROR"] ? { providerMirror: c.env["OPS_IAC_PROVIDER_MIRROR"] } : {}),
     ...(approval ? { approval } : {}),
     ...(isLocalOnly(c, localOnly) ? { localOnly: true } : {}),
+    ...(quarantine ? { quarantine: { mode: quarantine } } : {}),
     ...(c.store ? { store: c.store } : { passphrase: () => readPassphrase(c.env, c.io) }),
     ...(c.scryptParams ? { scryptParams: c.scryptParams } : {}),
     ...(c.sandbox !== undefined ? { sandbox: c.sandbox } : {}),
@@ -123,13 +136,26 @@ async function withRuntime<T>(c: CliEnv, fn: (rt: Runtime) => Promise<T>, approv
 registerBuiltinProviders();
 
 /** Yapılandırılan sağlayıcıya göre host döngülü veya sağlayıcı döngülü orkestratör. */
-async function engineFor(c: CliEnv, rt: Runtime, localOnly?: boolean): Promise<Sender> {
+async function engineFor(c: CliEnv, rt: Runtime, localOnly?: boolean, quarantine?: "digest" | "model"): Promise<Sender> {
   const lo = isLocalOnly(c, localOnly);
-  const sel = c.provider ?? (await (c.providerFactory ?? createProvider)({ env: c.env, store: rt.store, known: rt.known, sandbox: rt.sandbox }));
+  const ctx = { env: c.env, store: rt.store, known: rt.known, sandbox: rt.sandbox };
+  const sel = c.provider ?? (await (c.providerFactory ?? createProvider)(ctx));
   if (lo) {
     // Sağlayıcı seçimi sırasında erken ret (PEP ayrıca her çağrıda zorlar): bağlam bulut modele HİÇ gitmez.
     if (isAgentRuntime(sel)) throw new OpsError("local_only", "egress: local-only kipinde sağlayıcı-döngülü çalışma zamanı (Cursor) kullanılamaz: model barındırması dış");
     if (sel.capabilities.trustZone !== "local") throw new OpsError("local_only", `egress: local-only kipinde yalnız yerel (local) sağlayıcı kullanılır; '${sel.id}' bölgesi '${sel.capabilities.trustZone}'. Yerel uç için OPS_PROVIDER_URL=http://127.0.0.1:… ayarlayın`);
+  }
+  if (quarantine === "model" && !isAgentRuntime(sel)) {
+    // Karantina özetleyicisi: ana sağlayıcı veya (OPS_QUARANTINE_MODEL ile) aynı sağlayıcının küçük kademesi.
+    let qp: ModelProvider = sel;
+    const qm = c.env["OPS_QUARANTINE_MODEL"];
+    if (qm && !c.provider) {
+      const made = await (c.providerFactory ?? createProvider)({ ...ctx, env: { ...c.env, OPS_PROVIDER_MODEL: qm, OPS_PROVIDER_TIER: "small" } });
+      if (isAgentRuntime(made)) throw new OpsError("usage", "OPS_QUARANTINE_MODEL ana model döngülü bir sağlayıcıyla kullanılamaz");
+      qp = made;
+    }
+    if (lo && qp.capabilities.trustZone !== "local") throw new OpsError("local_only", "egress: local-only kipinde karantina özetleyicisi de yerel olmalı");
+    rt.attachQuarantineProvider(qp);
   }
   return isAgentRuntime(sel) ? rt.createRuntimeOrchestrator(sel) : rt.createOrchestrator(sel);
 }
@@ -657,10 +683,11 @@ export async function runCli(c: CliEnv): Promise<number> {
         return await breakGlassCommand(c, sub, rest);
 
       case "daemon": {
-        const { values: dv } = parseArgs({ args: c.argv.slice(1), options: { workspace: { type: "string" }, "local-only": { type: "boolean" } }, strict: true });
+        const { values: dv } = parseArgs({ args: c.argv.slice(1), options: { workspace: { type: "string" }, "local-only": { type: "boolean" }, quarantine: { type: "string" } }, strict: true });
         const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
+        const dq = quarantineMode(c, dv.quarantine);
         return await withRuntime(c, async (rt) => {
-          const orch = await engineFor(c, rt, dv["local-only"]);
+          const orch = await engineFor(c, rt, dv["local-only"], dq);
           const d = new Opsd({ runtime: rt, orchestrator: orch, socketPath: c.paths.socket, onShutdown: () => stopper.abort() });
           const stopper = new AbortController();
           c.stop?.addEventListener("abort", () => stopper.abort(), { once: true });
@@ -669,19 +696,20 @@ export async function runCli(c: CliEnv): Promise<number> {
           await new Promise<void>((resolve) => stopper.signal.addEventListener("abort", () => resolve(), { once: true }));
           await d.close();
           return 0;
-        }, gate, dv.workspace, dv["local-only"]);
+        }, gate, dv.workspace, dv["local-only"], dq);
       }
 
       case "chat": {
-        const { values: cv } = parseArgs({ args: c.argv.slice(1), options: { embedded: { type: "boolean" }, workspace: { type: "string" }, "local-only": { type: "boolean" } }, strict: true });
+        const { values: cv } = parseArgs({ args: c.argv.slice(1), options: { embedded: { type: "boolean" }, workspace: { type: "string" }, "local-only": { type: "boolean" }, quarantine: { type: "string" } }, strict: true });
         const embedded = cv.embedded === true;
+        const cq = quarantineMode(c, cv.quarantine);
         if (cv.workspace && !embedded) throw new OpsError("usage", "--workspace yalnız --embedded veya `ops daemon --workspace ID` ile kullanılır (çalışma alanı opsd sürecine aittir)");
         if (embedded) {
           const gate = c.approval ?? new TtyApprovalGate({ openTty: openDevTty });
           await withRuntime(c, async (rt) => {
-            await runChat(new LocalBackend(rt, await engineFor(c, rt, cv["local-only"])), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events, reauth: makeReauth(c) });
+            await runChat(new LocalBackend(rt, await engineFor(c, rt, cv["local-only"], cq)), { input: c.io.input, output: c.io.output }, { approvalEvents: gate.events, reauth: makeReauth(c) });
             out(c, gate.summaryLine());
-          }, gate, cv.workspace, cv["local-only"]);
+          }, gate, cv.workspace, cv["local-only"], cq);
           return 0;
         }
         const client = await OpsdClient.connect(c.paths.socket).catch(() => {

@@ -1,5 +1,6 @@
 import type { Sensitivity } from "@ops/contracts";
 import type { EvidenceEntry } from "./evidence.ts";
+import { KNOWN_REASON_SET } from "./quarantine.ts";
 
 /**
  * `timeline.build`: kanıt deposundaki farklı kaynaklı sonuçları DETERMİNİSTİK anahtarlarla (imaj
@@ -170,9 +171,11 @@ function fromEntry(e: EvidenceEntry): { events: Raw[]; bridge: string[] } | { sk
       return { events, bridge };
     }
     case "k8s.events.list": {
+      // Karantinadaki (ham içeriği kullanıcı açmamış) olaylarda neden KAPALI listeden gelir: serbest ad kanal olmasın
+      const closed = e.quarantined === true && e.released !== true;
       for (const x of arr(d["items"]).map(obj)) {
         const t = iso(x["last"]);
-        const reason = clean(x["reason"], 40);
+        const reason = closed ? (typeof x["reason"] === "string" && KNOWN_REASON_SET.has(x["reason"]) ? x["reason"] : "other") : clean(x["reason"], 40);
         if (!t || !reason) continue;
         const count = num(x["count"]);
         events.push(mk({ t, source: "k8s", kind: reason, summary: `${clean(x["type"], 10) ?? "?"} ${reason}${x["object"] ? ` ${clean(x["object"])}` : ""}${count && count > 1 ? ` ×${count}` : ""}` }));

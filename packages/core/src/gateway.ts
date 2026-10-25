@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  estimateTokens,
   maxRisk,
   maxSensitivity,
   OpsError,
@@ -30,6 +31,7 @@ import type { PolicyEngine } from "@ops/policy";
 import { Counter, mapStrings, processOutput, scrubText } from "@ops/redaction";
 import type { KnownSecrets, MaskingRules } from "@ops/redaction";
 import type { EvidenceStore } from "./evidence.ts";
+import type { Quarantine, QuarantineResult } from "./quarantine.ts";
 import type { ToolRegistry } from "./registry.ts";
 import type { Session } from "./session.ts";
 import { normalizeEndpoint } from "./url.ts";
@@ -59,6 +61,11 @@ export interface GatewayDeps {
    * seçiminden bağımsız, PEP'te fail-closed zorlanır.
    */
   readonly localOnly?: boolean;
+  /**
+   * Karantina (tasarım §4.2): ham serbest metin (log/olay) ana bağlama girmez; modele tipli özet gider, ham içerik
+   * kanıt deposunda karantinada kalır. Yoksa untrusted sonuçlar eskisi gibi taint'li akar.
+   */
+  readonly quarantine?: Quarantine;
 }
 
 export interface InvokeRequest {
@@ -436,7 +443,7 @@ export class ToolGateway {
       clearTimeout(timer);
       req.signal?.removeEventListener("abort", onAbort);
       await this.releaseLease(st, lease);
-      const code: ReasonCode = e instanceof OpsError && e.code === "timeout" ? "timeout" : "adapter_error";
+      const code: ReasonCode = e instanceof OpsError && e.code === "timeout" ? "timeout" : e instanceof OpsError && e.code === "quarantined" ? "quarantined" : "adapter_error";
       return this.finishError(st, code, scrubText(e instanceof Error ? e.message : String(e), known));
     }
     clearTimeout(timer);
@@ -459,10 +466,27 @@ export class ToolGateway {
       masking,
       known,
     });
+    // `taint`: KANIT içeriğinin güvenilirliği. Karantinada modele giden görünümün taint'i ayrıdır (`viewTaint`).
     const taint = desc.untrustedOutput || raw.taint === "untrusted" ? "untrusted" : "trusted";
     const sensitivity: Sensitivity = maxSensitivity(desc.sensitivity, raw.sensitivity ?? "none");
     const subjects = [...new Set([...(raw.subjects ?? []), ...(target?.refs ?? [])])];
     const observedAt = this.now().toISOString();
+    let quarantined: QuarantineResult | null = null;
+    if (this.d.quarantine && taint === "untrusted") {
+      // Tipli özet çıkarılamazsa sonuç eskisi gibi (taint'li) akar: karantina yalnız DARALTIR, hiçbir şeyi genişletmez.
+      quarantined = await this.d.quarantine
+        .apply({
+          tool: desc.name,
+          evidence: processed.evidence,
+          sensitivity,
+          zoneCapAfter: session.zoneCapAfter({ ...(profile ? { profile } : {}), sensitivity }),
+          ...(req.signal ? { signal: req.signal } : {}),
+        })
+        .catch(() => null);
+    }
+    const viewTaint = quarantined ? quarantined.taint : taint;
+    const quarantineViewText = quarantined ? JSON.stringify(quarantined.view) : undefined;
+    const viewTokens = quarantineViewText !== undefined ? estimateTokens(quarantineViewText) : processed.byReference ? 0 : processed.tokens;
     const entry = evidence.put({
       callId: st.callId,
       tool: desc.name,
@@ -474,14 +498,15 @@ export class ToolGateway {
       taint,
       summary: processed.summary || desc.name,
       text: processed.evidenceText,
+      ...(quarantined ? { quarantined: true } : {}),
     });
 
     session.usage.toolCalls += 1;
-    session.usage.resultTokens += processed.byReference ? 0 : processed.tokens;
-    session.noteResult({ ...(profile ? { profile } : {}), sensitivity, tainted: taint === "untrusted" });
+    session.usage.resultTokens += viewTokens;
+    session.noteResult({ ...(profile ? { profile } : {}), sensitivity, tainted: viewTaint === "untrusted" });
 
     const redactionCounts = Object.fromEntries(processed.redactions.map((r) => [r.rule, r.count]));
-    const viewBytes = Buffer.byteLength(processed.viewText, "utf8");
+    const viewBytes = Buffer.byteLength(quarantineViewText ?? processed.viewText, "utf8");
 
     // 13. Denetim: result. Yazılamazsa sonuç modele VERİLMEZ (kanıt yerelde kalır).
     try {
@@ -498,6 +523,7 @@ export class ToolGateway {
         outputBytesToModel: viewBytes,
         redactionCounts,
         resultTokensEstimate: processed.tokens,
+        ...(quarantined && this.d.quarantine ? { message: `quarantine mode=${this.d.quarantine.mode} model=${quarantined.modelSummary}` } : {}),
         policyVersionHash: policy.versionHash,
         trustZone: req.providerZone,
         ...(req.provider ? { provider: req.provider.id, model: req.provider.model } : {}),
@@ -518,8 +544,8 @@ export class ToolGateway {
       status: "ok",
       evidenceId: entry.id,
       summary: processed.summary,
-      ...(processed.byReference ? {} : { view: processed.view }),
-      byReference: processed.byReference,
+      ...(quarantined ? { view: quarantined.view } : processed.byReference ? {} : { view: processed.view }),
+      byReference: quarantined ? false : processed.byReference,
       truncated: processed.truncated || raw.truncated === true,
       redactions: processed.redactions,
       provenance: {
@@ -529,9 +555,9 @@ export class ToolGateway {
         query: JSON.stringify(argsRedacted).slice(0, 200),
       },
       sensitivity,
-      taint,
+      taint: viewTaint,
       subjects,
-      tokens: { estimate: processed.byReference ? processed.fullTokens : processed.tokens },
+      tokens: { estimate: quarantined ? viewTokens : processed.byReference ? processed.fullTokens : processed.tokens },
     };
   }
 

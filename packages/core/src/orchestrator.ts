@@ -86,6 +86,14 @@ export class Orchestrator {
     return this.messages;
   }
 
+  /** Bir sonraki kullanıcı iletisine eklenecek sistem notları (ör. kullanıcı karantinadaki ham içeriği açtı). */
+  private pendingNotes: string[] = [];
+
+  /** Kullanıcı eylemini modele bildirir; ayrı bir model turu başlatmaz, sonraki iletiye eklenir. */
+  note(text: string): void {
+    this.pendingNotes.push(text.slice(0, 500));
+  }
+
   async *send(userText: string, signal?: AbortSignal): AsyncGenerator<OrchestratorEvent> {
     const { provider, session, policy, audit, evidence, known, registry } = this.d;
     const opts = this.d.options ?? {};
@@ -99,7 +107,8 @@ export class Orchestrator {
       yield { type: "warning", code: "user_input_redacted", message: "Mesajınızda secret benzeri bir değer vardı; maskelenerek gönderildi. Secret'ları sohbete yapıştırmayın." };
     }
     this.ledger.noteGoal(text);
-    this.messages.push({ role: "user", content: text });
+    const notes = this.pendingNotes.splice(0);
+    this.messages.push({ role: "user", content: notes.length > 0 ? `${notes.map((n) => `[sistem notu] ${n}`).join("\n")}\n${text}` : text });
 
     let citationRetries = 0;
     let iterations = 0;

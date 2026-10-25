@@ -143,12 +143,18 @@ export class Session {
     return [...this.bound.values()];
   }
 
+  /** Bir sonuç bağlama girerse bağlamın gidebileceği en uzak bölge (bağlamı DEĞİŞTİRMEZ). */
+  zoneCapAfter(info: { profile?: Profile; sensitivity: Sensitivity }): TrustZone {
+    let cap: TrustZone = stricterZone(this.context.zoneCap, SENSITIVITY_ZONE_CAP[info.sensitivity]);
+    if (info.profile) cap = stricterZone(cap, info.profile.egressClass);
+    return cap;
+  }
+
   /** Bir araç sonucu bağlama girdi: bağlam etiketini günceller. */
   noteResult(info: { profile?: Profile; sensitivity: Sensitivity; tainted: boolean }): void {
     const c = this.context;
     const touched = info.profile && !c.profilesTouched.includes(info.profile.id) ? [...c.profilesTouched, info.profile.id] : c.profilesTouched;
-    let cap: TrustZone = stricterZone(c.zoneCap, SENSITIVITY_ZONE_CAP[info.sensitivity]);
-    if (info.profile) cap = stricterZone(cap, info.profile.egressClass);
+    const cap = this.zoneCapAfter(info);
     this.context = {
       tainted: c.tainted || info.tainted,
       profilesTouched: touched,

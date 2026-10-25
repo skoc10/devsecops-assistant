@@ -30,6 +30,10 @@ export interface ChatBackend {
   bind(profileId: string): Promise<DoctorReport>;
   profiles(): Promise<ProfileRow[]>;
   usage(): Promise<string>;
+  /** Kanıtın (karantinadaki dahil) redakte içeriğini YALNIZ kullanıcı ekranı için döndürür; modele GİTMEZ. */
+  evidenceShow(id: string): Promise<string>;
+  /** Karantinadaki kanıtın ham içeriğini modele açar (bağlam, içerik alındığında tainted olur). */
+  evidenceRelease(id: string): Promise<string>;
   /** Etkin break-glass banner satırları (boşsa yok). */
   breakGlassStatus(): Promise<string[]>;
   breakGlassStart(a: BreakGlassStartArgs): Promise<string[]>;
@@ -66,6 +70,8 @@ const HELP = [
   "  /profiles          kayıtlı profilleri listele",
   "  /use <profil-id>   profili doktordan geçirip oturuma bağla",
   "  /usage             token kullanım raporu",
+  "  /show <ev-id>      kanıtın (karantinadaki ham logu dahil) redakte içeriğini YALNIZ ekranınıza basar; modele gitmez",
+  "  /raw <ev-id>       karantinadaki ham içeriği modele açar (bağlam güvenilmez içerik alır; denetime yazılır)",
   "  /breakglass start <profil> <tavan> <süre> <gerekçe…>   geçici tavan yükseltme (≤30dk; yeniden kimlik doğrulama + gerekçe zorunlu)",
   "  /breakglass end <profil> | status",
   "  /help              bu yardım",
@@ -151,6 +157,17 @@ export async function runChat(backend: ChatBackend, io: { input: Readable; outpu
           }
         }
       } else if (cmd === "/usage") out(await backend.usage());
+      else if (cmd === "/show" || cmd === "/raw") {
+        const id = rest[0];
+        if (!id || !/^ev-\d+$/.test(id)) out(`kullanım: ${cmd} <ev-id>  (ör. ${cmd} ev-3)`);
+        else {
+          try {
+            out(safe(cmd === "/show" ? await backend.evidenceShow(id) : await backend.evidenceRelease(id)));
+          } catch (e) {
+            out(`✗ ${safe(e instanceof Error ? e.message : String(e))}`);
+          }
+        }
+      }
       else if (cmd === "/breakglass") await breakGlassCommand(rest);
       else out(`bilinmeyen komut: ${safe(cmd ?? "")}. /help`);
       return;

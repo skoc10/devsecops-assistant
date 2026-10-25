@@ -19,9 +19,19 @@ export interface EvidenceEntry {
   readonly text: string;
   readonly tokens: number;
   readonly hash: string;
+  /**
+   * Karantinada: ham serbest metin (log/olay) modele verilmez, yalnız tipli özeti verilmiştir. `evidence.get`
+   * ve `evidence.search` içerik üzerinde ÇALIŞMAZ; yalnız kullanıcı `release` ile açabilir.
+   */
+  readonly quarantined?: boolean;
+  /** Kullanıcı ham içeriği modele açtı (bağlam, `evidence.get` ile alındığında tainted olur). */
+  readonly released?: boolean;
 }
 
-export type NewEvidence = Omit<EvidenceEntry, "id" | "tokens" | "hash">;
+export type NewEvidence = Omit<EvidenceEntry, "id" | "tokens" | "hash" | "released">;
+
+/** Modelin içeriğine dokunabileceği kanıt mı? */
+export const openToModel = (e: EvidenceEntry): boolean => e.quarantined !== true || e.released === true;
 
 export interface SliceResult {
   readonly data: unknown;
@@ -51,6 +61,15 @@ export class EvidenceStore {
 
   get(id: string): EvidenceEntry | undefined {
     return this.entries.get(id);
+  }
+
+  /** Kullanıcı eylemi: karantinadaki kanıtın ham içeriğini modele açar. Karantinada değilse/yoksa `undefined`. */
+  release(id: string): EvidenceEntry | undefined {
+    const e = this.entries.get(id);
+    if (!e || e.quarantined !== true) return undefined;
+    const next: EvidenceEntry = { ...e, released: true };
+    this.entries.set(id, next);
+    return next;
   }
 
   all(): EvidenceEntry[] {
@@ -90,7 +109,8 @@ export class EvidenceStore {
     const q = query.toLowerCase();
     const out: { id: string; tool: string; summary: string; matches: number }[] = [];
     for (const e of this.entries.values()) {
-      const hay = `${e.summary}\n${e.text}`.toLowerCase();
+      // karantinadaki ham içerik model aramasına AÇIK değildir (eşleşme sayısı bile içerik sızdırır)
+      const hay = (openToModel(e) ? `${e.summary}\n${e.text}` : e.summary).toLowerCase();
       let matches = 0;
       for (let i = hay.indexOf(q); i !== -1 && matches < 1000; i = hay.indexOf(q, i + q.length)) matches++;
       if (matches > 0) out.push({ id: e.id, tool: e.tool, summary: e.summary, matches });

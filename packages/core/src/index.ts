@@ -2,7 +2,7 @@ export { ToolGateway } from "./gateway.ts";
 export type { CommandClassifier, GatewayDeps, InvokeRequest } from "./gateway.ts";
 export { Session } from "./session.ts";
 export type { ActiveSkill, SessionUsage } from "./session.ts";
-export { EvidenceStore } from "./evidence.ts";
+export { EvidenceStore, openToModel } from "./evidence.ts";
 export type { EvidenceEntry, NewEvidence, SliceResult } from "./evidence.ts";
 export { ToolRegistry } from "./registry.ts";
 export type { RegisteredTool } from "./registry.ts";
@@ -32,3 +32,6 @@ export type { ChangeAdapterOptions, ChangeKind, ChangeSet } from "./changeset.ts
 export { BREAK_GLASS_MAX_TTL_SEC, BREAK_GLASS_MIN_TTL_SEC, BreakGlassController, breakGlassBanner, renderBreakGlassReview } from "./breakglass.ts";
 export type { BreakGlassDeps, BreakGlassRequest, BreakGlassStatus, ReauthProof } from "./breakglass.ts";
 export type { BreakGlassGrant } from "./session.ts";
+
+export { Quarantine, digestEvents, digestLog, parseModelSummary, quarantinedTools, KNOWN_EVENT_REASONS, LOG_SIGNALS } from "./quarantine.ts";
+export type { Digest, EventsDigest, LogDigest, LogSignal, ModelQuarantineDeps, ModelSummary, QuarantineInput, QuarantineMode, QuarantineOptions, QuarantineResult } from "./quarantine.ts";

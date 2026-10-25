@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ADAPTER_CONTRACT, AdapterManifestSchema, defineTool, OpsError } from "@ops/contracts";
 import type { Adapter, AdapterCall, Profile, RawToolOutput, Target, ToolDefinition } from "@ops/contracts";
+import { openToModel } from "./evidence.ts";
 import type { EvidenceStore } from "./evidence.ts";
 import { buildTimeline } from "./timeline.ts";
 
@@ -89,6 +90,7 @@ export function createLocalAdapter(evidence: EvidenceStore): { adapter: Adapter;
         const a = call.args as { id: string; select?: string[]; offset?: number; limit?: number };
         const e = evidence.get(a.id);
         if (!e) throw new OpsError("evidence_not_found", `kanıt bulunamadı: ${a.id}`);
+        if (!openToModel(e)) throw new OpsError("quarantined", `${a.id} karantinada: ham içerik modele verilmez (tipli özet zaten bağlamda). Kullanıcı /show ile görebilir, /raw ile açabilir`);
         const s = evidence.slice(a.id, {
           ...(a.select ? { select: a.select } : {}),
           ...(a.offset !== undefined ? { offset: a.offset } : {}),
@@ -114,7 +116,8 @@ export function createLocalAdapter(evidence: EvidenceStore): { adapter: Adapter;
           data: hits,
           summary: `${hits.length} eşleşme`,
           sensitivity: maxSens,
-          ...(touched.some((e) => e.taint === "untrusted") ? { taint: "untrusted" as const } : {}),
+          // yalnız modele AÇIK untrusted içerik bağlamı kirletir (karantinadakilerden salt kimlik/özet döner)
+          ...(touched.some((e) => e.taint === "untrusted" && openToModel(e)) ? { taint: "untrusted" as const } : {}),
         };
       }
       if (call.tool === "timeline.build") {

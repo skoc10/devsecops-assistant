@@ -21,7 +21,8 @@ import {
 } from "@ops/broker";
 import type { ProfileRegistryOptions } from "@ops/broker";
 import type { AgentRuntime, ApprovalGate, DoctorReport, ModelProvider, Profile, SecretStore } from "@ops/contracts";
-import { BreakGlassController, ChangeStore, EvidenceStore, Orchestrator, RuntimeOrchestrator, Session, ToolGateway, ToolRegistry, createChangeAdapter, createLocalAdapter, renderBreakGlassReview } from "@ops/core";
+import { BreakGlassController, ChangeStore, EvidenceStore, Orchestrator, Quarantine, RuntimeOrchestrator, Session, ToolGateway, ToolRegistry, createChangeAdapter, createLocalAdapter, renderBreakGlassReview } from "@ops/core";
+import type { QuarantineMode } from "@ops/core";
 import { DEFAULT_POLICY, PolicyEngine, loadPolicyFile } from "@ops/policy";
 import type { PolicyDocument } from "@ops/policy";
 import { KnownSecrets, scrubText } from "@ops/redaction";
@@ -56,6 +57,12 @@ export interface RuntimeOptions {
   readonly now?: () => Date;
   /** `egress: local-only`: yalnız yerel sağlayıcı, yalnız okuma sınıfı, MCP köprüsü ve break-glass kapalı. */
   readonly localOnly?: boolean;
+  /**
+   * Karantina (§4.2): log/olay gibi ham serbest metin ana bağlama girmez. `digest`: yalnız deterministik tipli özet;
+   * `model`: ek olarak araçsız, katı şemalı bir modelin sınıflandırması (`attachQuarantineProvider` ile bağlanır;
+   * bağlanmazsa tipli özet).
+   */
+  readonly quarantine?: { readonly mode: Exclude<QuarantineMode, "off"> };
 }
 
 export interface Runtime {
@@ -83,6 +90,12 @@ export interface Runtime {
   readonly sandbox: Sandbox | null;
   /** Geçici tavan yükseltme (break-glass); başlatma çağıranın yeniden kimlik doğrulama kanıtını ister. */
   readonly breakGlass: BreakGlassController;
+  /** `model` karantina kipinde özetleyici sağlayıcıyı bağlar (host döngülü `generate` gerekir). */
+  attachQuarantineProvider(provider: ModelProvider): void;
+  /** Kanıtın redakte içeriği — YALNIZ kullanıcı ekranı için (karantinadaki ham log dahil); modele gitmez. */
+  showEvidence(id: string): string;
+  /** Karantinadaki kanıtı modele açar (denetim kaydı yazılır; yazılamazsa açılmaz). */
+  releaseEvidence(id: string): Promise<string>;
   /** Profili doktordan geçirir (bağlamaz). */
   diagnose(id: string): Promise<DoctorReport>;
   /** Profili doktordan geçirip oturuma bağlar; `bindable=false` ise BAĞLAMAZ. */
@@ -215,6 +228,8 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
   const PROFILELESS = availableAdapters.filter((a) => !["kubernetes", "postgres", "github-actions", "github-scm"].includes(a));
   skills.setAvailabilityProvider(() => [...PROFILELESS, ...registry.list().flatMap((p) => (KIND_ADAPTER[p.kind] ? [KIND_ADAPTER[p.kind] as string] : []))]);
 
+  const quarantine = o.quarantine ? new Quarantine({ mode: o.quarantine.mode }) : undefined;
+
   const gateway = new ToolGateway({
     registry: toolRegistry,
     session,
@@ -228,13 +243,14 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     ...(o.approval ? { approval: o.approval } : {}),
     ...(o.now ? { now: o.now } : {}),
     ...(o.localOnly ? { localOnly: true } : {}),
+    ...(quarantine ? { quarantine } : {}),
   });
 
   await audit.append({
     event: "session_start",
     sessionId: session.id,
     policyVersionHash: policy.versionHash,
-    message: `egress=${o.localOnly ? "local-only" : "normal"} sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
+    message: `egress=${o.localOnly ? "local-only" : "normal"} quarantine=${o.quarantine?.mode ?? "off"} sandbox=${sandbox?.kind ?? "yok"} terminal=${terminalNote} workspace=${workspaceNote} mcp=${mcp ? mcp.definitions.length + " araç" : "kapalı"} skills=${skills.all().map((s) => s.name).join(",")}`,
   });
 
   const diagnoseWith = async (profile: Profile): Promise<{ report: DoctorReport; profile: Profile }> => {
@@ -293,6 +309,34 @@ export async function createRuntime(o: RuntimeOptions): Promise<Runtime> {
     mcp,
     sandbox,
     breakGlass,
+    attachQuarantineProvider(provider: ModelProvider): void {
+      quarantine?.attachModel({ provider, audit, known, sessionId: () => session.id, onUsage: (u) => session.addModelUsage({ ...u, cacheReadTokens: 0 }) });
+    },
+    showEvidence(id: string): string {
+      const e = evidence.get(id);
+      if (!e) throw new Error(`kanıt bulunamadı: ${id}`);
+      let body: string;
+      try {
+        const v: unknown = JSON.parse(e.text);
+        body = typeof v === "string" ? v : JSON.stringify(v, null, 2);
+      } catch {
+        body = e.text;
+      }
+      const MAX_CHARS = 20_000;
+      const shown = body.length > MAX_CHARS ? `${body.slice(0, MAX_CHARS)}\n…(${body.length - MAX_CHARS} karakter daha; kırpıldı)` : body;
+      const flags = [e.quarantined ? (e.released ? "karantina: modele AÇIK" : "karantina: modele KAPALI") : null, e.taint === "untrusted" ? "güvenilmez içerik" : null].filter(Boolean).join(", ");
+      return `── ${e.id} ${e.tool}${flags ? ` (${flags})` : ""} — yalnız sizin ekranınız, modele gitmedi ──\n${shown}`;
+    },
+    async releaseEvidence(id: string): Promise<string> {
+      const e = evidence.get(id);
+      if (!e) throw new Error(`kanıt bulunamadı: ${id}`);
+      if (!e.quarantined) return `${id} karantinada değil (zaten modele açık veya tipli özetsiz)`;
+      if (e.released) return `${id} zaten modele açık`;
+      // Önce denetim (write-ahead): yazılamıyorsa içerik modele AÇILMAZ.
+      await audit.append({ event: "evidence_release", sessionId: session.id, tool: e.tool, message: `${id} ham içeriği modele açıldı (${e.tokens} token tahmini)` });
+      evidence.release(id);
+      return `${id} (${e.tool}) ham içeriği modele AÇILDI; model evidence.get ile dilimleyebilir. Bağlam güvenilmez içerik aldığında tainted olur (mutasyon/başka profil okuması onay ister).`;
+    },
     async diagnose(id: string): Promise<DoctorReport> {
       return (await diagnoseProfile(id)).report;
     },
