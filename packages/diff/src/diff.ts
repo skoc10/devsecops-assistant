@@ -91,7 +91,11 @@ export function diffFile(path: string, before: string | null, after: string | nu
   if (before === null) head.push("new file mode 100644");
   if (after === null) head.push("deleted file mode 100644");
   head.push(before === null ? "--- /dev/null" : `--- a/${path}`, after === null ? "+++ /dev/null" : `+++ b/${path}`);
-  if (additions === 0 && deletions === 0) return { patch: "", additions, deletions };
+  if (additions === 0 && deletions === 0) {
+    // Boş dosya oluşturma/silme: hunk yok ama değişiklik var → git'in kendi çıktısı gibi yalnız başlık.
+    if ((before === null) !== (after === null)) return { patch: `${head.slice(0, 2).join("\n")}\n`, additions, deletions };
+    return { patch: "", additions, deletions };
+  }
 
   // hunk'lara böl
   const out: string[] = [];
