@@ -37,15 +37,18 @@ const CHECK_PLAINTEXT = Buffer.from("ops-vault-check-v1");
 const CHECK_NAME = "\u0000check";
 
 function deriveKey(passphrase: Uint8Array, kdf: KdfParams): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
+  // scrypt girdisi çağıranın tamponunun KOPYASI: çağıran kendi tamponunu sıfırlar, bu kopya da türetme bitince
+  // (başarı, hata veya geçersiz parametreyle eşzamanlı ret) sıfırlanır — en iyi çaba
+  const input = Buffer.from(passphrase);
+  return new Promise<Buffer>((resolve, reject) => {
     scrypt(
-      Buffer.from(passphrase),
+      input,
       Buffer.from(kdf.salt, "base64"),
       32,
       { N: kdf.N, r: kdf.r, p: kdf.p, maxmem: 256 * 1024 * 1024 },
       (err, key) => (err ? reject(err) : resolve(key)),
     );
-  });
+  }).finally(() => input.fill(0));
 }
 
 function seal(key: Buffer, name: string, plaintext: Uint8Array): Sealed {
