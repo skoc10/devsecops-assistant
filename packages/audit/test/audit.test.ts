@@ -1,6 +1,9 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { execFile, spawnSync } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isOpsError } from "@ops/contracts";
@@ -300,5 +303,141 @@ describe("dosya depolama", () => {
     await writeFile(path, text.replace('"allow"', '"deny"'));
     const v = await verifyAudit(new FileAuditStorage(path), key);
     expect(v.ok).toBe(false);
+  });
+
+  it("son satır sondan okunur: sondaki boş satırlar ve parça sınırını aşan uzun satır", async () => {
+    const path = join(dir, "audit.jsonl");
+    const storage = new FileAuditStorage(path);
+    await expect(storage.readLastLine()).resolves.toBeNull();
+    const long = "x".repeat(150_000);
+    await writeFile(path, `ilk\n${long}\n\n\n`);
+    await expect(storage.readLastLine()).resolves.toBe(long);
+    await writeFile(path, "tek-satır-sonsuz");
+    await expect(storage.readLastLine()).resolves.toBe("tek-satır-sonsuz");
+    await writeFile(path, "\n\n");
+    await expect(storage.readLastLine()).resolves.toBeNull();
+  });
+});
+
+describe("eşzamanlı yazıcılar: süreçler arası kilit (S-08)", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ops-audit-lock-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const logPath = () => join(dir, "audit", "audit.jsonl");
+  const anchorPath = () => join(dir, "audit", "head.anchor");
+  const openAt = (o: { lockTimeoutMs?: number; lockStaleMs?: number } = {}) =>
+    AuditLog.open({ storage: new FileAuditStorage(logPath(), { fsync: false, ...o }), key, anchor: new FileHeadAnchor(anchorPath()) });
+  const verifyFile = () => verifyAudit(new FileAuditStorage(logPath()), key, new FileHeadAnchor(anchorPath()));
+  const seqs = async () => (await new FileAuditStorage(logPath()).readLines()).map((l) => (JSON.parse(l) as { seq: number }).seq);
+  const plantLock = (owner: { pid: number; token: string }) => writeFile(`${logPath()}.lock`, JSON.stringify({ ...owner, host: hostname() }));
+  const deadPid = () => spawnSync(process.execPath, ["-e", ""]).pid as number; // süreç bitti: PID artık yaşamıyor
+
+  it("opsd açıkken tek seferlik `ops` komutu da yazar: zincir çatallanmaz, günlük yeniden açılır", async () => {
+    const daemon = await openAt();
+    await daemon.append({ ...base, event: "session_start", sessionId: "daemon" });
+    const cli = await openAt(); // ör. opsd çalışırken `ops profile list`
+    await cli.append({ ...base, event: "session_start", sessionId: "cli" });
+    await cli.append({ ...base, event: "session_end", sessionId: "cli" });
+    // daemon'ın bellekteki başı eski (seq 0); ekleme dosyadan tazelenen başa zincirlenir
+    await expect(daemon.append({ ...base, sessionId: "daemon", callId: "x" })).resolves.toMatchObject({ seq: 3 });
+    expect(await verifyFile()).toMatchObject({ ok: true, records: 4, problems: [] });
+    await expect(openAt()).resolves.toBeTruthy();
+    await expect(stat(`${logPath()}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("aynı süreçte üç örnek iç içe eşzamanlı eklerken seq kesintisiz, doğrulama temiz", async () => {
+    const logs = await Promise.all([openAt(), openAt(), openAt()]);
+    await Promise.all(Array.from({ length: 45 }, (_, i) => (logs[i % 3] as AuditLog).append({ ...base, callId: `c${i}` })));
+    expect(await verifyFile()).toMatchObject({ ok: true, records: 45 });
+    expect(await seqs()).toEqual(Array.from({ length: 45 }, (_, i) => i));
+  });
+
+  it("ayrı süreçler aynı günlüğe eşzamanlı yazar: zincir geçerli", async () => {
+    const worker = fileURLToPath(new URL("./fixtures/append-worker.ts", import.meta.url));
+    const run = promisify(execFile);
+    await Promise.all(["p1", "p2", "p3"].map((s) => run(process.execPath, [worker, logPath(), anchorPath(), Buffer.from(key).toString("hex"), s, "15"])));
+    expect(await verifyFile()).toMatchObject({ ok: true, records: 45 });
+    expect(await seqs()).toEqual(Array.from({ length: 45 }, (_, i) => i));
+  });
+
+  it("aynı depoyu paylaşan iki bellek içi yazıcı da çatallanmaz", async () => {
+    const storage = new MemoryAuditStorage();
+    const [a, b] = await Promise.all([AuditLog.open({ storage, key }), AuditLog.open({ storage, key })]);
+    await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).append({ ...base, callId: `m${i}` })));
+    expect(await verifyAudit(storage, key)).toMatchObject({ ok: true, records: 20 });
+  });
+
+  it("ölmüş sürecin bıraktığı kilit kırılır", async () => {
+    const log = await openAt({ lockTimeoutMs: 2_000 });
+    await plantLock({ pid: deadPid(), token: "ölü" });
+    await expect(log.append({ ...base })).resolves.toMatchObject({ seq: 0 });
+    await expect(stat(`${logPath()}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("bayat kilidi aynı anda gören bekleyenler birbirinin taze kilidini silmez", async () => {
+    const logs = await Promise.all([openAt(), openAt(), openAt()]);
+    await plantLock({ pid: deadPid(), token: "ölü" });
+    await Promise.all(Array.from({ length: 30 }, (_, i) => (logs[i % 3] as AuditLog).append({ ...base, callId: `b${i}` })));
+    expect(await verifyFile()).toMatchObject({ ok: true, records: 30 });
+    expect(await seqs()).toEqual(Array.from({ length: 30 }, (_, i) => i));
+  });
+
+  it("bu süreçte tutulmayan, kendi PID'imizi taşıyan kilit artığı beklemeden kırılır", async () => {
+    const log = await openAt({ lockTimeoutMs: 150 });
+    await plantLock({ pid: process.pid, token: "artık" });
+    await expect(log.append({ ...base })).resolves.toMatchObject({ seq: 0 });
+  });
+
+  it("canlı sahibin taze kilidi beklenir; süre aşımında ekleme reddedilir ama günlük bozuk işaretlenmez", async () => {
+    const log = await openAt({ lockTimeoutMs: 150 });
+    await plantLock({ pid: process.ppid, token: "canlı" });
+    const err = await log.append({ ...base }).catch((e: unknown) => e);
+    expect(isOpsError(err) && err.code).toBe("audit_unavailable");
+    expect(log.broken).toBe(false);
+    expect(await seqs()).toEqual([]);
+    await rm(`${logPath()}.lock`);
+    await expect(log.append({ ...base })).resolves.toMatchObject({ seq: 0 });
+  });
+
+  it("yaşlı kilit (PID yeniden kullanımı, takılmış sahip) bayat sayılır", async () => {
+    const log = await openAt({ lockTimeoutMs: 1_000, lockStaleMs: 5_000 });
+    await plantLock({ pid: process.ppid, token: "yaşlı" });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(`${logPath()}.lock`, old, old);
+    await expect(log.append({ ...base })).resolves.toMatchObject({ seq: 0 });
+  });
+
+  it("açık yazıcı, kesilen kuyruğu sonraki eklemede yakalar (kalıcı fail-closed)", async () => {
+    const log = await openAt();
+    await fill(log, 4);
+    const lines = await new FileAuditStorage(logPath()).readLines();
+    await writeFile(logPath(), `${lines.slice(0, 2).join("\n")}\n`);
+    await expect(log.append({ ...base })).rejects.toMatchObject({ code: "audit_truncated" });
+    expect(log.broken).toBe(true);
+    expect(await seqs()).toEqual([0, 1]);
+  });
+
+  it("kilit oluşturulamayan (salt-okunur) dizinde doğrulama kilitsiz okur", async () => {
+    await fill(await openAt(), 3);
+    await chmod(join(dir, "audit"), 0o500);
+    try {
+      expect(await verifyFile()).toMatchObject({ ok: true, records: 3 });
+    } finally {
+      await chmod(join(dir, "audit"), 0o700);
+    }
+  });
+
+  it("son kaydı doğrulanamayan günlüğe eklenmez", async () => {
+    const log = await openAt();
+    await fill(log, 2);
+    const text = await readFile(logPath(), "utf8");
+    await writeFile(logPath(), text.replace(/"callId":"c1"/, '"callId":"sahte"'));
+    await expect(log.append({ ...base })).rejects.toMatchObject({ code: "audit_corrupt" });
+    expect(log.broken).toBe(true);
   });
 });

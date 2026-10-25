@@ -23,9 +23,25 @@ export interface VerifyResult {
   readonly problems: VerifyProblem[];
 }
 
+/** Kilit dosyası oluşturulamayan konum (salt-okunur kopya, başkasının dizini): orada yazıcı kilidi de yoktur. */
+function isUnwritable(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException | null)?.code;
+  return code === "EROFS" || code === "EACCES" || code === "EPERM";
+}
+
 /** Zinciri baştan yeniden hesaplar. Düzenleme, silme, yeniden sıralama ve (çapa varsa) kuyruk kesme tespit edilir. */
 export async function verifyAudit(storage: AuditStorage, key: Uint8Array, anchor?: HeadAnchor): Promise<VerifyResult> {
-  const lines = await storage.readLines();
+  // Tutarlı anlık görüntü: satırlar ve çapa kilit altında okunur (eşzamanlı ekleme sahte kesme/yarım satır
+  // göstermez); hash hesabı kilit bırakıldıktan sonra yapılır, yazıcılar beklemez. Kilit hiç oluşturulamıyorsa
+  // (salt-okunur kopyanın adli incelemesi) kilitsiz okunur; çapa önce okunur ki eşzamanlı ekleme sahte kesme göstermesin.
+  const snapshot = async () => {
+    const head = anchor ? await anchor.read() : null;
+    return { head, lines: await storage.readLines() };
+  };
+  const { lines, head } = await storage.withLock(snapshot).catch((e: unknown) => {
+    if (isUnwritable(e)) return snapshot();
+    throw e;
+  });
   const problems: VerifyProblem[] = [];
   const records: AuditRecord[] = [];
   let prev = GENESIS_HASH;
@@ -58,7 +74,7 @@ export async function verifyAudit(storage: AuditStorage, key: Uint8Array, anchor
   }
 
   if (anchor) {
-    const a = await anchor.read();
+    const a = head;
     if (a) {
       const last = records[records.length - 1];
       if (!last || last.seq < a.seq) {

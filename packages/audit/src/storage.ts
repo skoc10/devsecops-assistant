@@ -1,23 +1,71 @@
 import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
+import { acquireFileLock } from "./lock.ts";
+import type { FileLock, FileLockOptions } from "./lock.ts";
 
 /** Dayanıklı, yalnız-ekleme satır deposu. */
 export interface AuditStorage {
   /** Satırı (sonunda `\n` olmadan) kalıcı olarak ekler; başarısızlıkta fırlatır. */
   append(line: string): Promise<void>;
   readLines(): Promise<string[]>;
+  /** Son (boş olmayan) satır; günlük boşsa `null`. Yazıcı başı her eklemede bununla tazeler (tüm dosya okunmaz). */
+  readLastLine(): Promise<string | null>;
+  /**
+   * `fn`'i, aynı günlüğe yazan öteki yazıcılara (başka süreçler dahil) karşı özel erişimle çalıştırır.
+   * Kilit zamanında alınamazsa fırlatır: çağıran yazmaz (fail-closed). Yeniden girişli değildir.
+   */
+  withLock<T>(fn: () => Promise<T>): Promise<T>;
 }
 
+export interface FileAuditStorageOptions {
+  fsync?: boolean;
+  /** Ekleme kilidi için bekleme üst sınırı (ms); aşılırsa ekleme reddedilir. */
+  lockTimeoutMs?: number;
+  /** Sahibi yaşıyor görünse de bu yaştan eski kilit bayat sayılır (ms). */
+  lockStaleMs?: number;
+}
+
+const TAIL_CHUNK = 64 * 1024;
+const MAX_LINE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Dosya deposu. Aynı günlüğe birden çok süreç yazar (opsd açıkken her tek seferlik `ops` komutu da
+ * `session_start` ekler): eklemeler günlüğün yanındaki `<günlük>.lock` dosyasıyla süreçler arası sıralanır.
+ */
 export class FileAuditStorage implements AuditStorage {
   private readonly path: string;
   private readonly fsync: boolean;
+  private readonly lockOpts: FileLockOptions;
+  private lockQueue: Promise<unknown> = Promise.resolve();
+  private lock: FileLock | null = null;
 
-  constructor(path: string, opts: { fsync?: boolean } = {}) {
+  constructor(path: string, opts: FileAuditStorageOptions = {}) {
     this.path = path;
     this.fsync = opts.fsync ?? true;
+    this.lockOpts = { timeoutMs: opts.lockTimeoutMs, staleMs: opts.lockStaleMs };
+  }
+
+  withLock<T>(fn: () => Promise<T>): Promise<T> {
+    // Aynı örnekteki kritik bölgeler önce süreç içinde sıralanır; dosya kilidi süreçler (ve örnekler) arası.
+    const run = this.lockQueue.then(async () => {
+      const lock = await acquireFileLock(`${this.path}.lock`, this.lockOpts);
+      this.lock = lock;
+      try {
+        return await fn();
+      } finally {
+        this.lock = null;
+        await lock.release();
+      }
+    });
+    this.lockQueue = run.catch(() => undefined);
+    return run;
   }
 
   async append(line: string): Promise<void> {
+    // Kilit altındaysa yazmadan hemen önce hâlâ bizim mi bakılır: uzun duraklama sonrası bayat sayılıp
+    // kırılmışsa eski başla yazmak zinciri çatallar.
+    if (this.lock && !(await this.lock.held())) throw new Error("denetim kilidi kaybedildi: kayıt yazılmadı");
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const fh = await open(this.path, "a", 0o600);
     try {
@@ -38,12 +86,52 @@ export class FileAuditStorage implements AuditStorage {
     }
     return text.split("\n").filter((l) => l.length > 0);
   }
+
+  async readLastLine(): Promise<string | null> {
+    let fh: FileHandle;
+    try {
+      fh = await open(this.path, "r");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw e;
+    }
+    try {
+      // Sondan geriye parça parça okunur; `readLines` ile aynı anlam: sondaki boş satırlar yok sayılır.
+      let pos = (await fh.stat()).size;
+      let tail = Buffer.alloc(0);
+      while (pos > 0) {
+        const len = Math.min(TAIL_CHUNK, pos);
+        const chunk = Buffer.alloc(len);
+        await readExactly(fh, chunk, pos - len);
+        pos -= len;
+        tail = Buffer.concat([chunk, tail]);
+        let end = tail.length;
+        while (end > 0 && tail[end - 1] === 0x0a) end--;
+        tail = tail.subarray(0, end);
+        const nl = tail.lastIndexOf(0x0a);
+        if (nl >= 0) return tail.subarray(nl + 1).toString("utf8");
+        if (tail.length > MAX_LINE_BYTES) throw new Error("denetim günlüğünün son satırı aşırı uzun");
+      }
+      return tail.length > 0 ? tail.toString("utf8") : null;
+    } finally {
+      await fh.close();
+    }
+  }
+}
+
+async function readExactly(fh: FileHandle, buf: Buffer, position: number): Promise<void> {
+  for (let off = 0; off < buf.length; ) {
+    const { bytesRead } = await fh.read(buf, off, buf.length - off, position + off);
+    if (bytesRead === 0) throw new Error("denetim günlüğü okunurken kısaldı");
+    off += bytesRead;
+  }
 }
 
 /** Test ve geçici kullanım için bellek içi depo. `failNext` ile yazma hatası simüle edilir. */
 export class MemoryAuditStorage implements AuditStorage {
   readonly lines: string[] = [];
   failNext = false;
+  private lockQueue: Promise<unknown> = Promise.resolve();
 
   async append(line: string): Promise<void> {
     if (this.failNext) throw new Error("yazma hatası (simüle)");
@@ -52,6 +140,17 @@ export class MemoryAuditStorage implements AuditStorage {
 
   async readLines(): Promise<string[]> {
     return [...this.lines];
+  }
+
+  async readLastLine(): Promise<string | null> {
+    return this.lines[this.lines.length - 1] ?? null;
+  }
+
+  /** Aynı depoyu paylaşan yazıcılar (ör. iki `AuditLog`) için süreç içi kilit. */
+  withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.lockQueue.then(fn);
+    this.lockQueue = run.catch(() => undefined);
+    return run;
   }
 }
 

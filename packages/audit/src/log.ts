@@ -1,4 +1,4 @@
-import { AuditBodySchema, AuditRecordSchema, OpsError } from "@ops/contracts";
+import { AuditBodySchema, AuditRecordSchema, isOpsError, OpsError } from "@ops/contracts";
 import type { AuditBody, AuditEntry, AuditRecord, AuditSink } from "@ops/contracts";
 import { chainHash, GENESIS_HASH } from "./chain.ts";
 import type { AuditStorage, HeadAnchor } from "./storage.ts";
@@ -31,11 +31,30 @@ function mapStrings(value: unknown, fn: (s: string) => string): unknown {
   return value;
 }
 
+function errMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** Satırı kayıt olarak ayrıştırır ve zincir MAC'ini doğrular; olmazsa nedeni. */
+function readRecord(key: Uint8Array, line: string): AuditRecord | "okunamadı" | "doğrulanamadı" {
+  let rec: AuditRecord;
+  try {
+    rec = AuditRecordSchema.parse(JSON.parse(line));
+  } catch {
+    return "okunamadı";
+  }
+  const { hash, ...rest } = rec;
+  return chainHash(key, rec.prevHash, rest) === hash ? rec : "doğrulanamadı";
+}
+
 /**
  * Hash zincirli, write-ahead, fail-closed denetim günlüğü.
  * - `append` başarısız olursa günlük "bozuk" işaretlenir ve sonraki tüm çağrılar reddedilir:
  *   çağıran (PEP) araç çağrısını ÇALIŞTIRMAZ.
  * - Anahtarsız yeniden yazım zinciri doğrulatamaz; kuyruk kesme çapa ile tespit edilir.
+ * - Aynı günlüğe birden çok süreç yazabilir (opsd + tek seferlik `ops` komutları): her ekleme depo kilidi
+ *   altında yapılır ve baş (seq/hash) yazmadan önce dosyanın son kaydından tazelenir. Bellekteki baş
+ *   yalnız "son bilinen"dir; zincir çatallanmaz.
  */
 export class AuditLog implements AuditSink {
   private readonly o: Required<Pick<AuditLogOptions, "storage" | "key" | "principal" | "now">> & AuditLogOptions;
@@ -52,20 +71,15 @@ export class AuditLog implements AuditSink {
   /** Var olan günlüğü açar: son kaydı ve çapayı doğrular; bozuksa AÇMAZ. */
   static async open(opts: AuditLogOptions): Promise<AuditLog> {
     const log = new AuditLog(opts);
-    const lines = await opts.storage.readLines();
-    const anchor = opts.anchor ? await opts.anchor.read() : null;
+    // Satırlar ve çapa kilit altında birlikte okunur: tam o anda başka bir süreç eklerken (satır yazıldı, çapa
+    // henüz yazılmadı) tutarsız görüntüden sahte "kuyruk kesilmiş" kararı çıkmaz.
+    const { lines, anchor } = await opts.storage.withLock(async () => ({
+      lines: await opts.storage.readLines(),
+      anchor: opts.anchor ? await opts.anchor.read() : null,
+    }));
     if (lines.length > 0) {
-      const last = lines[lines.length - 1] as string;
-      let rec: AuditRecord;
-      try {
-        rec = AuditRecordSchema.parse(JSON.parse(last));
-      } catch {
-        throw new OpsError("audit_corrupt", "denetim günlüğünün son kaydı okunamadı");
-      }
-      const { hash, ...rest } = rec;
-      if (chainHash(opts.key, rec.prevHash, rest) !== hash) {
-        throw new OpsError("audit_corrupt", "denetim günlüğünün son kaydı doğrulanamadı");
-      }
+      const rec = readRecord(opts.key, lines[lines.length - 1] as string);
+      if (typeof rec === "string") throw new OpsError("audit_corrupt", `denetim günlüğünün son kaydı ${rec}`);
       if (rec.seq !== lines.length - 1) throw new OpsError("audit_corrupt", "denetim günlüğü sıra numarası tutarsız");
       log.lastSeq = rec.seq;
       log.lastHash = rec.hash;
@@ -81,6 +95,7 @@ export class AuditLog implements AuditSink {
     return log;
   }
 
+  /** Bu yazıcının son bildiği baş (başka süreçlerin eklemeleri bir sonraki eklemede tazelenir). */
   get head(): { seq: number; hash: string } | null {
     return this.lastSeq < 0 ? null : { seq: this.lastSeq, hash: this.lastHash };
   }
@@ -100,18 +115,34 @@ export class AuditLog implements AuditSink {
     if (this.failure !== null) {
       throw new OpsError("audit_unavailable", "denetim günlüğü kullanılamıyor", { cause: this.failure });
     }
-    // Çağıran hatası (şema dışı alan vb.) günlüğü bozmaz: depolamaya dokunmadan reddedilir.
+    // Çağıran hatası (şema dışı alan vb.) günlüğü bozmaz: depolamaya (ve kilide) dokunmadan reddedilir.
+    let body: AuditBody;
+    try {
+      body = this.sanitize(entry);
+    } catch (e) {
+      throw new OpsError("audit_invalid_entry", "denetim girdisi geçersiz", { cause: errMessage(e) });
+    }
+    try {
+      return await this.o.storage.withLock(() => this.appendLocked(body));
+    } catch (e) {
+      if (isOpsError(e)) throw e;
+      // Kilit zamanında alınamadı ya da son kayıt okunamadı (G/Ç): hiçbir şey yazılmadı, zincir durumu belli →
+      // günlük bozuk işaretlenmez; yalnız bu kayıt reddedilir ve çağıran araç çağrısını ÇALIŞTIRMAZ.
+      throw new OpsError("audit_unavailable", "denetim kaydı yazılamadı", { cause: errMessage(e) });
+    }
+  }
+
+  /** Kilit altında: başı dosyadan tazele, kaydı zincirle, yaz. */
+  private async appendLocked(body: AuditBody): Promise<AuditRecord> {
+    await this.syncHead();
     let record: AuditRecord;
     try {
-      const body = this.sanitize(entry);
       const seq = this.lastSeq + 1;
       const rest = { ...body, seq, prevHash: this.lastHash };
       const hash = chainHash(this.o.key, this.lastHash, rest);
       record = AuditRecordSchema.parse({ ...rest, hash });
     } catch (e) {
-      throw new OpsError("audit_invalid_entry", "denetim girdisi geçersiz", {
-        cause: e instanceof Error ? e.message : String(e),
-      });
+      throw new OpsError("audit_invalid_entry", "denetim girdisi geçersiz", { cause: errMessage(e) });
     }
     try {
       await this.o.storage.append(JSON.stringify(record));
@@ -121,9 +152,35 @@ export class AuditLog implements AuditSink {
       return record;
     } catch (e) {
       // Depolama/çapa hatası: zincir durumu belirsiz → fail-closed, günlük artık kayıt kabul etmez.
-      this.failure = e instanceof Error ? e.message : String(e);
+      this.failure = errMessage(e);
       throw new OpsError("audit_unavailable", "denetim kaydı yazılamadı", { cause: this.failure });
     }
+  }
+
+  /**
+   * Kilit altında başı günlüğün son kaydından tazeler: başka bir süreç zinciri ilerletmiş olabilir. Son kayıt
+   * okunamıyor/doğrulanamıyorsa ya da bilinen başın gerisindeyse (kesilmiş/değiştirilmiş) zincire güvenilmez →
+   * kalıcı fail-closed. Tam zincir denetimi `verifyAudit`'tedir; burada yalnız son kayıt okunur.
+   */
+  private async syncHead(): Promise<void> {
+    const line = await this.o.storage.readLastLine();
+    if (line === null) {
+      if (this.lastSeq >= 0) this.fail("audit_truncated", "denetim günlüğü boşalmış: kuyruk kesilmiş olabilir");
+      return;
+    }
+    const rec = readRecord(this.o.key, line);
+    if (typeof rec === "string") return this.fail("audit_corrupt", `denetim günlüğünün son kaydı ${rec}`);
+    if (rec.seq < this.lastSeq || (rec.seq === this.lastSeq && rec.hash !== this.lastHash)) {
+      this.fail("audit_truncated", "denetim günlüğü bilinen başın gerisinde: kuyruk kesilmiş olabilir");
+    }
+    this.lastSeq = rec.seq;
+    this.lastHash = rec.hash;
+  }
+
+  /** Zincir bütünlüğü sorunu: günlük kalıcı olarak bozuk işaretlenir (fail-closed). */
+  private fail(code: "audit_corrupt" | "audit_truncated", problem: string): never {
+    this.failure = problem;
+    throw new OpsError(code, problem);
   }
 
   private sanitize(entry: AuditEntry): AuditBody {
