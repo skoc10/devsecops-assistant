@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
-import { access, chmod, constants, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, constants, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { Writable } from "node:stream";
 import { OpsError } from "@ops/contracts";
+import { roBindProblem } from "@ops/mcp-bridge";
 import { stripControlChars } from "@ops/redaction";
 import { DEFAULT_GUEST_ROOTS, GUEST_TOOL_DIRS, GUEST_TOOL_ROOT, VM_STATE_FILE, VmSandbox, loadVmState } from "@ops/sandbox";
 import type { VmShare, VmState } from "@ops/sandbox";
@@ -98,22 +99,47 @@ function run(file: string, args: readonly string[], env: Record<string, string>,
   });
 }
 
-/** Paylaşımlar (ADR-0011 §5): anlık kopya kökü (rw) + kayıtlı çalışma alanı depoları (ro). Başka hiçbir şey. */
-export async function computeShares(paths: OpsPaths, env: VmCliOptions["env"]): Promise<VmShare[]> {
+/**
+ * Paylaşımlar (ADR-0011 §5/§7): anlık kopya kökü (rw) + `workspaces.json`'daki her deponun GERÇEK yolu (realpath, ro).
+ * Başka hiçbir şey: asla üst dizin, asla `$HOME`. Kayıtlı yol yoksa ya da paylaşılmayacak bir yerdeyse (ev dizini,
+ * kimlik/secret konumu, OPS_HOME, çalışma zamanı dizinleri) sessizce daraltılmaz: `ops vm up` REDDEDER.
+ */
+export async function computeShares(paths: OpsPaths, env: VmCliOptions["env"], problem: (real: string, ctx: { home: string; opsHome: string }) => string | null = roBindProblem): Promise<VmShare[]> {
   await mkdir(paths.worktreesDir, { recursive: true, mode: 0o700 });
   await chmod(paths.worktreesDir, 0o700);
-  const shares: VmShare[] = [{ host: paths.worktreesDir, guest: paths.worktreesDir, mode: "rw" }];
+  const worktrees = await realpath(paths.worktreesDir);
+  const shares: VmShare[] = [{ host: worktrees, guest: worktrees, mode: "rw" }];
+  const home = env["HOME"] ?? homedir();
+  const ctx = { home, opsHome: paths.home };
   if (await exists(paths.workspacesFile)) {
     const reg = await WorkspaceRegistry.open(paths.workspacesFile);
-    for (const ws of reg.list()) if (!shares.some((s) => s.host === ws.path)) shares.push({ host: ws.path, guest: ws.path, mode: "ro" });
-  }
-  const home = env["HOME"] ?? homedir();
-  const isAncestorOrSelf = (a: string, b: string): boolean => a === b || b.startsWith(`${a.replace(/\/+$/, "")}/`);
-  for (const s of shares) {
-    if (s.host === "/" || isAncestorOrSelf(s.host, home)) throw new OpsError("vm_share_refused", `paylaşım ev dizini/kök veya atası olamaz: ${s.host}`);
-    if (s.host !== paths.worktreesDir && isAncestorOrSelf(s.host, paths.home)) throw new OpsError("vm_share_refused", `paylaşım OPS_HOME'u (kasa/denetim) kapsıyor: ${s.host}`);
+    for (const ws of reg.list()) {
+      const real = await realpath(ws.path).catch(() => null);
+      if (!real) throw new OpsError("vm_share_refused", `kayıtlı çalışma alanı '${ws.id}' yolu yok: ${ws.path} — \`ops workspace rm ${ws.id}\` ya da yolu düzeltin (eksik dizin konuğa boş paylaşılmaz)`);
+      const why = problem(real, ctx);
+      if (why) throw new OpsError("vm_share_refused", `kayıtlı çalışma alanı '${ws.id}' paylaşılamaz (${why}): ${real}`);
+      if (shares.some((s) => s.host !== real && (under(real, s.host) || under(s.host, real)))) {
+        throw new OpsError("vm_share_refused", `kayıtlı çalışma alanı '${ws.id}' başka bir paylaşımla iç içe: ${real} — paylaşımlar ayrık dizinler olmalı`);
+      }
+      if (!shares.some((s) => s.host === real)) shares.push({ host: real, guest: real, mode: "ro" });
+    }
   }
   return shares;
+}
+
+const under = (p: string, root: string): boolean => p === root || p.startsWith(`${root.replace(/\/+$/, "")}/`);
+
+/** Kayıtlı çalışma alanlarının paylaşım durumu (doktor / `vm status`): eksik olan `iac.*` için fail-closed demektir. */
+export async function workspaceShareStatus(paths: OpsPaths, state: VmState): Promise<string[]> {
+  if (!(await exists(paths.workspacesFile))) return [];
+  const reg = await WorkspaceRegistry.open(paths.workspacesFile);
+  const lines: string[] = [];
+  for (const ws of reg.list()) {
+    const real = (await realpath(ws.path).catch(() => null)) ?? ws.path;
+    const shared = state.shares.some((s) => s.mode === "ro" && s.host === real);
+    lines.push(shared ? `  ✓ ${ws.id}: ${real} konukta salt okunur` : `  ✗ ${ws.id}: ${real} konuğa PAYLAŞILMAMIŞ — \`iac.*\` bu alanda \`workspace_not_shared\` ile kapalı; \`ops vm reload\``);
+  }
+  return lines;
 }
 
 interface SshInfo {
@@ -288,6 +314,8 @@ export async function vmCommand(o: VmCliOptions, sub: string | undefined, rest: 
         return st === "running" ? 1 : 0;
       }
       out(`Paylaşımlar:\n${state.shares.map((s) => `  ${s.host}  [${s.mode}]`).join("\n")}`);
+      const wsLines = await workspaceShareStatus(o.paths, state);
+      if (wsLines.length) out(`Kayıtlı çalışma alanları:\n${wsLines.join("\n")}`);
       const sb = new VmSandbox({ state });
       const p1 = await sb.probe();
       if (!p1.ok) {

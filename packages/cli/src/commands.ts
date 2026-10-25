@@ -34,7 +34,7 @@ import { createProvider, isAgentRuntime, providerKeyName, providerNames } from "
 import type { ProviderFactory } from "./providers.ts";
 import { createRuntime } from "./runtime.ts";
 import type { Runtime } from "./runtime.ts";
-import { guestToolVersions, vmCommand } from "./vm.ts";
+import { guestToolVersions, vmCommand, workspaceShareStatus } from "./vm.ts";
 
 export interface CliEnv {
   readonly argv: readonly string[];
@@ -297,6 +297,7 @@ async function workspaceCommand(c: CliEnv, sub: string | undefined, rest: string
       if (!id) throw new OpsError("usage", "kullanım: ops workspace rm ID");
       const removed = await registry.remove(id);
       out(c, removed ? `Kayıt silindi: ${id} (anlık kopyalar ${c.paths.worktreesDir} altında kalır; elle silebilirsiniz)` : `Bulunamadı: ${id}`);
+      if (removed && (await loadVmState(c.paths.vmDir).catch(() => null))) out(c, "Sandbox VM'i kurulu: deponun konuk paylaşımını kaldırmak için `ops vm reload` çalıştırın.");
       return removed ? 0 : 1;
     }
     case "snapshots": {
@@ -690,6 +691,7 @@ export async function runCli(c: CliEnv): Promise<number> {
         if (sb instanceof VmSandbox) {
           out(c, `  paylaşımlar: ${sb.state.shares.map((s) => `${s.host} [${s.mode}]`).join(", ")}`);
           out(c, `  konuk araç dizinleri: ${sb.toolDirs.join(":")}`);
+          for (const l of await workspaceShareStatus(c.paths, sb.state)) out(c, l);
           for (const l of await guestToolVersions(sb)) out(c, l);
         }
         const envNames = scanAmbientEnv(c.env);

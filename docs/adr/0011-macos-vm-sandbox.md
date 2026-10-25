@@ -125,6 +125,19 @@ ikili çözümleyici, anlık kopya `git` seçimi ve MCP pin doğrulaması bu ara
   `/home`/`/root`/`/run` yok). VM yalnız ikinci bir sınırdır; bwrap'ı zayıflatmanın gerekçesi değildir.
 - Yol zorlaması (§4) ile model, paylaşılmamış bir host yolunu bağlatamaz; paylaşılan yollar da bwrap içinde yine açıkça
   bağlandığı kadar görünür.
+- **Kayıtlı depo paylaşımı kararı (ana oturum onayı, 2026-10-25):** Linux tasarımı anlık kopya için gerçek depoyu bwrap'a
+  `--ro-bind` ile zaten veriyor (`snapshot.ts`); VM bunu birebir yansıtır. Kurallar: (1) yalnız `workspaces.json`'daki her
+  deponun **gerçek yolu** (realpath), hipervizör düzeyinde salt okunur (hgfs `ro`) **ve** bwrap'ta `--ro-bind`; asla üst
+  dizin, asla `$HOME`; kayıtlı yol yoksa ya da paylaşılmayacak bir yerdeyse (ev dizini/atası, `.ssh`/`.aws`/`.kube`/… kimlik
+  konumları, `OPS_HOME`, `/tmp`/`/var/folders` gibi çalışma zamanı dizinleri — MCP köprüsünün `roBindProblem` kuralı) veya
+  başka bir paylaşımla iç içeyse `ops vm up/reload` sessizce daraltmaz, **reddeder** (`vm_share_refused`). (2) Konuk git aynı
+  sertleştirme önekiyle koşar (`core.fsmonitor=false`, `core.hooksPath=/dev/null`, `protocol.ext.allow=never`, `GIT_CONFIG_*`
+  boş; `ls-tree`/`cat-file --batch` süzgeç uygulamaz); `snapshot.test.ts`'in zararlı depo testleri VM'e karşı geçti. (3) Depo
+  konuğa paylaşılmamışsa anlık kopya **üretilmez**: `workspace_not_shared` (boş kopya yerine açık ret); `ops workspace add/rm`
+  `ops vm reload` gerektiğini söyler; `ops doctor` ve `ops vm status` her kayıtlı alanın paylaşım durumunu ✓/✗ listeler.
+  Seçenek B (host'ta sandbox'sız git) `sandbox_required` sözünü bozduğu, seçenek C (snapshot/IaC macOS'ta kapalı) VM'i ana
+  kullanım için anlamsız kıldığı için reddedildi. **Bugünkü paylaşım listesi:** `OPS_HOME/worktrees` (rw) + kayıtlı depo
+  gerçek yolları (ro); `state.json.shares` bunun kaydıdır ve `ops vm status` gösterir.
 
 ### 8. Paylaşım türü: hgfs (denenen)
 

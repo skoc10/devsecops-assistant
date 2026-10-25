@@ -50,27 +50,39 @@ describe("VM yol eşlemesi (ADR-0011 §4)", () => {
     expect(mapGuestPath("/Volumes/data", state)).toBeNull();
   });
 
-  it("translateSpec: bağlar paylaşım/konuk kökü altında olmalı; rw bağ yalnız rw paylaşımda; cwd ev dizini veya /tmp olabilir", () => {
-    const t = translateSpec({ ...base, argv: ["/Volumes/data/repo/run.sh", "--config=/Volumes/data/repo/cfg", "/Users/u/.ops-assistant/worktrees/a"], env: { TF_DATA_DIR: "/Volumes/data/repo/td", X: "/Users/u/.ssh/id" }, roBinds: ["/Volumes/data/repo", "/opt/ops-tools"], rwBinds: ["/Users/u/.ops-assistant/worktrees/s1--infra/work"], cwd: "/Volumes/data/repo", home: "/home/ops-iac" }, state);
+  const noReal = async (): Promise<string | null> => null;
+  const tr = (spec: SandboxSpec) => translateSpec(spec, state, noReal);
+
+  it("translateSpec: bağlar paylaşım/konuk kökü altında olmalı; rw bağ yalnız rw paylaşımda; cwd ev dizini veya /tmp olabilir", async () => {
+    const t = await tr({ ...base, argv: ["/Volumes/data/repo/run.sh", "--config=/Volumes/data/repo/cfg", "/Users/u/.ops-assistant/worktrees/a"], env: { TF_DATA_DIR: "/Volumes/data/repo/td", X: "/Users/u/.ssh/id" }, roBinds: ["/Volumes/data/repo", "/opt/ops-tools"], rwBinds: ["/Users/u/.ops-assistant/worktrees/s1--infra/work"], cwd: "/Volumes/data/repo", home: "/home/ops-iac" });
     expect(t.argv).toEqual(["/ops/repo/run.sh", "--config=/ops/repo/cfg", "/Users/u/.ops-assistant/worktrees/a"]);
     expect(t.env).toEqual({ TF_DATA_DIR: "/ops/repo/td", X: "/Users/u/.ssh/id" }); // paylaşılmayan yol değişmez (ve bağlanamaz)
     expect(t.roBinds).toEqual(["/ops/repo", "/opt/ops-tools"]);
     expect(t.rwBinds).toEqual(["/Users/u/.ops-assistant/worktrees/s1--infra/work"]);
     expect(t.cwd).toBe("/ops/repo");
-    expect(() => translateSpec({ ...base, roBinds: ["/Users/u/.ssh"] }, state)).toThrow(/vm_path_not_shared|paylaşılmamış/);
-    expect(() => translateSpec({ ...base, roBinds: ["/Users/u/.ops-assistant/vault"] }, state)).toThrow(/paylaşılmamış/);
-    expect(() => translateSpec({ ...base, rwBinds: ["/Users/u/src/infra"] }, state)).toThrow(/salt okunur/);
-    expect(() => translateSpec({ ...base, rwBinds: ["/opt/ops-tools"] }, state)).toThrow(/salt okunur|konuk kökü/);
-    expect(() => translateSpec({ ...base, cwd: "/Users/u" }, state)).toThrow(/çalışma dizini/);
-    expect(translateSpec({ ...base, cwd: "/home/ops-mcp", home: "/home/ops-mcp" }, state).cwd).toBe("/home/ops-mcp");
-    expect(translateSpec({ ...base, cwd: "/tmp" }, state).cwd).toBe("/tmp");
+    await expect(tr({ ...base, roBinds: ["/Users/u/.ssh"] })).rejects.toMatchObject({ code: "vm_path_not_shared" });
+    await expect(tr({ ...base, roBinds: ["/Users/u/.ops-assistant/vault"] })).rejects.toThrow(/paylaşılmamış/);
+    await expect(tr({ ...base, rwBinds: ["/Users/u/src/infra"] })).rejects.toThrow(/salt okunur/);
+    await expect(tr({ ...base, rwBinds: ["/opt/ops-tools"] })).rejects.toThrow(/salt okunur|konuk kökü/);
+    await expect(tr({ ...base, cwd: "/Users/u" })).rejects.toThrow(/çalışma dizini/);
+    expect((await tr({ ...base, cwd: "/home/ops-mcp", home: "/home/ops-mcp" })).cwd).toBe("/home/ops-mcp");
+    expect((await tr({ ...base, cwd: "/tmp" })).cwd).toBe("/tmp");
     // konuk ikilisi: paylaşım dışı argv[0] dokunulmaz (konukta var sayılır; yoksa bwrap açık hata verir)
-    expect(translateSpec({ ...base, argv: ["/usr/bin/git", "status"] }, state).argv).toEqual(["/usr/bin/git", "status"]);
+    expect((await tr({ ...base, argv: ["/usr/bin/git", "status"] })).argv).toEqual(["/usr/bin/git", "status"]);
   });
 
-  it("validateSpec kuralları VM'de de geçer ('..', göreli ikili)", () => {
-    expect(() => translateSpec({ ...base, roBinds: ["/Users/u/.ops-assistant/worktrees/../vault"] }, state)).toThrow(/'\.\.'/);
-    expect(() => translateSpec({ ...base, argv: ["git"] }, state)).toThrow(/mutlak/);
+  it("sembolik bağ: paylaşıma GİREN bağ gerçek yoluyla bağlanır; paylaşımdan ÇIKAN bağ reddedilir (realpath host'ta çözülür)", async () => {
+    const links: Record<string, string> = { "/Users/u/infra-link": "/Users/u/src/infra", "/Users/u/src/infra/evil": "/Users/u/.ssh" };
+    const resolve = async (p: string): Promise<string | null> => links[p] ?? null;
+    const t = await translateSpec({ ...base, roBinds: ["/Users/u/infra-link"], cwd: "/Users/u/infra-link" }, state, resolve);
+    expect(t.roBinds).toEqual(["/Users/u/src/infra"]);
+    expect(t.cwd).toBe("/Users/u/src/infra");
+    await expect(translateSpec({ ...base, roBinds: ["/Users/u/src/infra/evil"] }, state, resolve)).rejects.toMatchObject({ code: "vm_path_not_shared" });
+  });
+
+  it("validateSpec kuralları VM'de de geçer ('..', göreli ikili)", async () => {
+    await expect(tr({ ...base, roBinds: ["/Users/u/.ops-assistant/worktrees/../vault"] })).rejects.toThrow(/'\.\.'/);
+    await expect(tr({ ...base, argv: ["git"] })).rejects.toThrow(/mutlak/);
   });
 });
 

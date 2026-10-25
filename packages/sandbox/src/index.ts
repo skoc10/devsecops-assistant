@@ -20,6 +20,7 @@ export {
   defaultVmStateDir,
   layoutProbeCommand,
   loadVmState,
+  localRealpath,
   mapGuestPath,
   parseLayoutProbe,
   parseVmState,
@@ -28,4 +29,4 @@ export {
   translateSpec,
   withCallMarker,
 } from "./vm.ts";
-export type { VmSandboxOptions, VmShare, VmState } from "./vm.ts";
+export type { RealpathFn, VmSandboxOptions, VmShare, VmState } from "./vm.ts";

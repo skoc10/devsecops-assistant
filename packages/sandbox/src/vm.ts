@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { OpsError } from "@ops/contracts";
@@ -157,20 +157,29 @@ function mapEmbedded(s: string, state: VmState): string {
   return s;
 }
 
+/** Host yolunun gerçek yolu; yoksa/çözülemezse `null` (sözlük yol kullanılır). */
+export type RealpathFn = (p: string) => Promise<string | null>;
+export const localRealpath: RealpathFn = (p) => realpath(p).then((r) => r, () => null);
+
 /**
  * Spec'teki yolları konuk yollarına çevirir ve ZORLAR: `roBinds`/`rwBinds` paylaşım ya da konuk kökü altında olmalı
  * (`rwBinds` için `rw` paylaşım); `cwd` bunlardan biri, ev dizini (tmpfs) ya da `/tmp` altında olmalı; `home` olduğu
  * gibi kalır (sandbox içinde yaratılır). `argv[0]` paylaşım altındaysa çevrilir, değilse konuk ikilisi sayılır.
+ * Paylaşımlar GERÇEK yollarla (realpath) kayıtlıdır (ADR-0011 §5/§7); bağ ve cwd yolları da önce host'ta çözülür —
+ * sembolik bağ üzerinden paylaşıma giren yol konukta gerçek yoluyla bağlanır, paylaşım dışına çıkan reddedilir.
  */
-export function translateSpec(spec: SandboxSpec, state: VmState): SandboxSpec {
+export async function translateSpec(spec: SandboxSpec, state: VmState, resolve: RealpathFn = localRealpath): Promise<SandboxSpec> {
   validateSpec(spec);
-  const roBinds = (spec.roBinds ?? []).map((p) => requireGuest(p, state, "salt-okunur bağ", false));
-  const rwBinds = (spec.rwBinds ?? []).map((p) => requireGuest(p, state, "yazılabilir bağ", true));
+  const real = async (p: string): Promise<string> => (await resolve(p)) ?? p;
+  const roBinds: string[] = [];
+  for (const p of spec.roBinds ?? []) roBinds.push(requireGuest(await real(p), state, "salt-okunur bağ", false));
+  const rwBinds: string[] = [];
+  for (const p of spec.rwBinds ?? []) rwBinds.push(requireGuest(await real(p), state, "yazılabilir bağ", true));
   let cwd = spec.cwd;
   if (cwd !== undefined) {
     const c = stripSlash(cwd);
     const virtual = (spec.home && under(c, stripSlash(spec.home))) || under(c, "/tmp");
-    cwd = virtual ? cwd : requireGuest(cwd, state, "çalışma dizini", false);
+    cwd = virtual ? cwd : requireGuest(await real(cwd), state, "çalışma dizini", false);
   }
   const [bin, ...rest] = spec.argv as [string, ...string[]];
   const argv = [mapGuestPath(bin, state) ?? bin, ...rest.map((a) => mapEmbedded(a, state))];
@@ -286,7 +295,7 @@ export class VmSandbox implements Sandbox {
   }
 
   private async prepare(spec: SandboxSpec): Promise<{ cmd: string; token: string }> {
-    const tspec = translateSpec(spec, this.state);
+    const tspec = await translateSpec(spec, this.state);
     const args = await buildBwrapArgs(tspec, await this.layout());
     const token = randomBytes(8).toString("hex");
     return { cmd: buildRemoteCommand(withCallMarker(args, token), { timeoutMs: spec.timeoutMs }), token };
