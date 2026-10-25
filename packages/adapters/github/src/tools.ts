@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { defineTool } from "@ops/contracts";
 import type { ToolDefinition, ToolDescriptorMeta } from "@ops/contracts";
-import { REPO } from "./safe.ts";
+import { GIT_REF, GIT_REF_MESSAGE, REPO, isGitRef } from "./safe.ts";
 
 const repo = z.string().regex(REPO);
 const since = z.string().regex(/^\d{1,6}[smhd]$/);
-const gitRef = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/);
+const gitRef = z.string().regex(GIT_REF).refine(isGitRef, GIT_REF_MESSAGE);
 const wfPath = z.string().regex(/^\.github\/workflows\/[A-Za-z0-9._-]{1,100}\.ya?ml$/);
 const id = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
@@ -196,7 +196,7 @@ export const runCancel = defineTool(
   z.strictObject({ repo, runId: id }),
 );
 
-const headBranch = z.string().regex(/^ops\/[a-z0-9][a-z0-9._-]{0,60}$/);
+const headBranch = z.string().regex(/^ops\/[a-z0-9][a-z0-9._-]{0,60}$/).refine(isGitRef, GIT_REF_MESSAGE);
 
 export const prCreate = defineTool(
   {
