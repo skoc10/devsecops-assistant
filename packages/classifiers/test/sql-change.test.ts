@@ -228,6 +228,14 @@ describe("db.change SQL sınıflayıcı (gerçek PostgreSQL ayrıştırıcısı,
     expect(v("INSERT INTO t SELECT * FROM customers")).not.toEqual([]);
     expect(v("UPDATE customers SET name = 'x' WHERE id = 1")).toEqual([]);
     expect(v("UPDATE customers SET email = 'x' WHERE id = 1")).toEqual([]); // yazmak okuma değil
+    // tam satır, öznitelik gösterimi, küme işlemi, USING/NATURAL ve yeniden adlandırma yoluyla okuma
+    expect(v("INSERT INTO t SELECT json_agg(c)::text FROM customers c")).not.toEqual([]);
+    expect(v("UPDATE orders SET status = 'x' FROM customers c WHERE c.id = orders.customer_id AND c::text LIKE '%a%'")).not.toEqual([]);
+    expect(v("INSERT INTO t SELECT c.to_jsonb FROM customers c")).not.toEqual([]);
+    expect(v("INSERT INTO t SELECT 1 UNION SELECT 2 FROM customers")).not.toEqual([]);
+    expect(v("INSERT INTO t SELECT count(*) FROM customers JOIN v USING (email)")).not.toEqual([]);
+    expect(v("INSERT INTO t SELECT count(*) FROM customers NATURAL JOIN v")).not.toEqual([]);
+    expect(v("INSERT INTO t SELECT lower(e) FROM customers AS x(a, b, e)")).not.toEqual([]);
   });
 
   it("özellik: rastgele metin hiçbir zaman istisna fırlatmaz ve izinli ise her ifade metni tek ifadedir", () => {

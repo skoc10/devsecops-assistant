@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { parseSync } from "libpg-query";
 import { riskRank } from "@ops/contracts";
 import type { RiskClass, SqlClassification } from "@ops/contracts";
-import { MAX_SQL_CHARS, walkKit } from "./sql.ts";
-import type { WalkCtx, WalkObj } from "./sql.ts";
+import { MAX_SQL_CHARS, emptyClassification, walkKit } from "./sql.ts";
+import type { PgSqlClassification, WalkCtx, WalkObj } from "./sql.ts";
 
 /**
  * PostgreSQL DEĞİŞİKLİK sınıflayıcısı (`db.change.*`): gerçek ayrıştırıcıyla her ifadeyi AST allowlist'ten
@@ -55,7 +55,7 @@ export interface ChangeAnalysis {
   readonly risk: RiskClass;
   /** İfade metinlerinin sha256'sı (onaylanan ifade seti). */
   readonly digest: string;
-  readonly classification: SqlClassification;
+  readonly classification: PgSqlClassification;
 }
 
 const LOCK_ORDER: readonly LockMode[] = ["ACCESS SHARE", "ROW EXCLUSIVE", "SHARE", "ACCESS EXCLUSIVE"];
@@ -76,7 +76,7 @@ const ALTER_RISK: Readonly<Record<string, RiskClass>> = {
   AT_AlterColumnType: "destroy",
 };
 
-const empty = (n = 0): SqlClassification => ({ parsed: n > 0, statementCount: n, statementKinds: [], relations: [], columnRefs: [], functions: [], wholeRowRefs: [], hasStarSelect: false });
+const empty = (n = 0): PgSqlClassification => emptyClassification(n > 0, n);
 const deny = (reason: string, n = 0): ChangeAnalysis => ({ allowed: false, reason, statements: [], risk: "destroy", digest: "", classification: empty(n) });
 
 /** Değişiklik ifadesinde bulunmaması gereken (boş olmayan) alanlar. */
@@ -351,7 +351,10 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
   const columnRefs: SqlClassification["columnRefs"][number][] = [];
   const functions = new Set<string>();
   const wholeRow = new Set<string>();
+  const renamed = new Set<string>();
   let hasStar = false;
+  let setOperation = false;
+  let naturalJoin = false;
   let risk: RiskClass = "mutate";
   try {
     let parts: { text: string; node: WalkObj }[];
@@ -379,8 +382,11 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
       }
       for (const c of ctx.columnRefs) columnRefs.push(c);
       for (const f of ctx.functions) functions.add(f);
-      for (const w of [...ctx.rowJsonArgs, ...ctx.singleNameRefs.filter((n) => ctx.aliases.has(n))]) wholeRow.add(w);
+      for (const w of walkKit.wholeRowOf(ctx)) wholeRow.add(w);
+      for (const r of ctx.renamed) renamed.add(r);
       if (ctx.hasStar) hasStar = true;
+      if (ctx.setOp) setOperation = true;
+      if (ctx.natural) naturalJoin = true;
       kinds.push(Object.keys(p.node)[0] as string);
       if (riskRank(built.risk) > riskRank(risk)) risk = built.risk;
       statements.push({ index, kind: built.kind, risk: built.risk, text: p.text, targets: built.targets, lockMode: built.lockMode, reads, unbounded: built.unbounded, creates: built.creates });
@@ -389,7 +395,7 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
     if (e instanceof Reject) return deny(e.message);
     throw e;
   }
-  const classification: SqlClassification = {
+  const classification: PgSqlClassification = {
     parsed: true,
     statementCount: statements.length,
     statementKinds: kinds,
@@ -398,6 +404,9 @@ export function classifySqlChange(sql: string): ChangeAnalysis {
     functions: [...functions],
     wholeRowRefs: [...wholeRow],
     hasStarSelect: hasStar,
+    setOperation,
+    naturalJoin,
+    renamedRelations: [...renamed],
   };
   const digest = createHash("sha256").update(JSON.stringify(statements.map((s) => s.text))).digest("hex");
   return { allowed: true, statements, risk, digest, classification };

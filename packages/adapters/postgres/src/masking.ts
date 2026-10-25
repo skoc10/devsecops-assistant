@@ -7,7 +7,8 @@ import type { ColumnRule, MaskAction, MaskingRules } from "@ops/redaction";
 /**
  * `masking.yaml` — maskeli sütun bildirimi. İKİ yerde kullanılır:
  *  1. AST kuralı (`maskedViolations`): maskeli sütun yalnız doğrudan seçim öğesi olabilir; ifade/koşul/
- *     JOIN/`SELECT *`/tam-satır başvurusu sorgu çalışmadan REDDEDİLİR.
+ *     JOIN (ON/USING)/`SELECT *`/tam-satır başvurusu (`f(t)`, `t::text`, `t.to_jsonb`) ve maskeli tabloyla küme
+ *     işlemi, NATURAL JOIN, sütun takma adı listesi sorgu çalışmadan REDDEDİLİR (köken bildirilmeyen çıktılar).
  *  2. Köken kuralı (M4 b): sonuç sütununun kökeni biliniyorsa değer maskelenir (hash/kısalt/at/redakte).
  * Bu iki katman Best-effort'tur; en güçlü savunma reader rolünü yalnız maskeli view'lara yetkilendirmektir.
  */

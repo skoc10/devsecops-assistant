@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { parseSync } from "libpg-query";
 import { beforeAll, describe, expect, it } from "vitest";
-import { classifySql, initSqlClassifier, maskedViolations } from "../src/index.ts";
+import { RENAMED_JOIN, classifySql, initSqlClassifier, maskedViolations } from "../src/index.ts";
 
 beforeAll(async () => {
   await initSqlClassifier();
@@ -177,6 +177,97 @@ describe("M4 AST kuralı: maskeli sütunlar", () => {
     ["CASE", "SELECT CASE WHEN email IS NULL THEN 0 ELSE 1 END FROM users"],
   ])("ihlal: %s", (_n, sql) => {
     expect(viol(sql as string).length).toBeGreaterThan(0);
+  });
+});
+
+describe("M4 AST kuralı: kökensiz çıktılar (tam satır, hesaplanan, küme işlemi) ve birleştirme oracle'ı", () => {
+  const masked = new Map([["customers", new Set(["name", "email"])]]);
+  const viol = (s: string) => maskedViolations(ok(s), masked);
+
+  it("çıplak FROM öğesi adı her konumda tam-satır başvurusudur (fonksiyon, dönüşüm, ROW, dizi, CASE, alt sorgu, alan seçimi)", () => {
+    for (const [sql, ref] of [
+      ["SELECT json_build_object('r', c) FROM customers c", "c"],
+      ["SELECT json_agg(c) FROM customers c", "c"],
+      ["SELECT array_agg(c)::text FROM customers c", "c"],
+      ["SELECT c::text FROM customers c", "c"],
+      ["SELECT format('%s', c) FROM customers c", "c"],
+      ["SELECT ROW(c) FROM customers c", "c"],
+      ["SELECT ARRAY[c] FROM customers c", "c"],
+      ["SELECT coalesce(c, c) FROM customers c", "c"],
+      ["SELECT CASE WHEN true THEN c END FROM customers c", "c"],
+      ["SELECT c || 'x' FROM customers c", "c"],
+      ["SELECT (SELECT c) FROM customers c", "c"],
+      ["SELECT lower((c).email) FROM customers c", "c"],
+      ["SELECT count(*) FROM customers WHERE customers::text LIKE '%Ayse%'", "customers"],
+      ["SELECT json_agg(j) FROM (customers c JOIN orders o ON o.customer_id = c.id) j", "j"],
+      ["SELECT u FROM customers JOIN v USING (id) AS u", "u"],
+    ] as const) {
+      expect(ok(sql).classification.wholeRowRefs, sql).toContain(ref);
+      expect(viol(sql), sql).toContainEqual(expect.stringMatching(/tam-satır/));
+    }
+  });
+
+  it("öznitelik gösterimi `t.f` = `f(t)`: satırı döndürenler tam-satır sayılır, allowlist dışındakiler reddedilir", () => {
+    for (const sql of ["SELECT c.to_jsonb FROM customers c", "SELECT customers.row_to_json FROM customers", "SELECT public.customers.json_agg FROM public.customers", "SELECT c.concat FROM customers c"]) {
+      expect(ok(sql).classification.wholeRowRefs.length, sql).toBeGreaterThan(0);
+      expect(viol(sql), sql).toContainEqual(expect.stringMatching(/tam-satır/));
+    }
+    for (const fn of ["quote_literal", "quote_nullable", "record_out", "record_send", "hash_record"]) {
+      bad(`SELECT c.${fn} FROM customers c`, /öznitelik gösterimi/);
+      bad(`SELECT id FROM t WHERE length(t.${fn}::text) > 1`, /öznitelik gösterimi/);
+    }
+    // sıradan nitelikli sütunlar ve allowlist'teki satır dışı fonksiyon adları etkilenmez
+    expect(ok("SELECT c.id, c.status FROM orders c").classification.wholeRowRefs).toEqual([]);
+    expect(ok("SELECT s.count FROM stats s").classification.wholeRowRefs).toEqual([]);
+  });
+
+  it("küme işlemleri maskeli tabloya dokunuyorsa reddedilir (sonuç sütununun kökeni bildirilmez)", () => {
+    for (const sql of [
+      "SELECT 'x' UNION ALL SELECT name FROM customers",
+      "SELECT name FROM customers INTERSECT SELECT 'Ayse'",
+      "SELECT id FROM customers EXCEPT SELECT 1",
+      "SELECT id FROM orders WHERE customer_id IN (SELECT id FROM customers UNION SELECT 0)",
+    ]) {
+      expect(ok(sql).classification.setOperation, sql).toBe(true);
+      expect(viol(sql), sql).toContainEqual(expect.stringMatching(/küme işlemi/));
+    }
+    expect(ok("SELECT id FROM customers").classification.setOperation).toBe(false);
+    expect(viol("SELECT 1 UNION SELECT 2")).toEqual([]);
+    expect(viol("SELECT id FROM orders UNION ALL SELECT id FROM orders")).toEqual([]);
+  });
+
+  it("JOIN … USING (maskeli sütun) ve maskeli tabloyla NATURAL JOIN reddedilir", () => {
+    expect(viol("SELECT count(*) FROM customers JOIN (VALUES ('Ayse')) v(name) USING (name)")).toContainEqual(expect.stringMatching(/maskeli sütun ifade\/koşul içinde: name/));
+    expect(viol("SELECT o.id FROM orders o JOIN customers c USING (email)")).not.toEqual([]);
+    const nat = "SELECT count(*) FROM customers NATURAL JOIN (VALUES ('Ayse')) v(name)";
+    expect(ok(nat).classification.naturalJoin).toBe(true);
+    expect(viol(nat)).toContainEqual(expect.stringMatching(/NATURAL JOIN/));
+    // maskeli olmayan sütunla USING ve maskeli tabloya dokunmayan NATURAL JOIN serbest
+    expect(viol("SELECT o.id, c.name FROM orders o JOIN customers c USING (id)")).toEqual([]);
+    expect(viol("SELECT count(*) FROM orders NATURAL JOIN invoices")).toEqual([]);
+  });
+
+  it("sütun takma adı listesiyle yeniden adlandırma: maskeli tabloda ve birleşim takma adında reddedilir", () => {
+    const rv = ok("SELECT lower(c) FROM customers AS x(a, b, c)");
+    expect(rv.classification.renamedRelations).toEqual(["customers"]);
+    expect(maskedViolations(rv, masked)).toContainEqual(expect.stringMatching(/takma adı listesi/));
+    const j = ok("SELECT lower(e) FROM (customers c JOIN orders o ON true) AS j(a, b, e)");
+    expect(j.classification.renamedRelations).toEqual([RENAMED_JOIN]);
+    expect(maskedViolations(j, masked)).toContainEqual(expect.stringMatching(/takma adı listesi/));
+    // maskeli olmayan tablo, VALUES ve alt sorgu sütun adları serbest (alt sorgu hedefleri zaten ifade sayılır)
+    expect(viol("SELECT o.n FROM orders AS o(n) JOIN customers c ON c.id = o.n")).toEqual([]);
+    expect(viol("SELECT c.name, v.x FROM customers c JOIN (VALUES (1)) v(x) ON v.x = c.id")).toEqual([]);
+  });
+
+  it("doğrudan seçim ve maskeli sütunsuz koşullar serbest kalır", () => {
+    for (const sql of [
+      "SELECT id, name, email FROM customers",
+      "SELECT c.id, c.name FROM customers c WHERE c.id = 1",
+      "SELECT o.id, c.email FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id",
+      "SELECT x FROM generate_series(1, 3) AS x",
+    ]) {
+      expect(viol(sql), sql).toEqual([]);
+    }
   });
 });
 

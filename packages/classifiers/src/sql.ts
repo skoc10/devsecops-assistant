@@ -48,9 +48,33 @@ export const ALLOWED_FUNCTIONS: ReadonlySet<string> = new Set([
   "string_to_array", "pg_typeof",
 ]);
 
-/** Tam satırı JSON'a çevirenler: tam-satır başvurusu ile maskelemeyi atlatır (ayrıca `wholeRowRefs`). */
-const WHOLE_ROW_FUNCS = new Set(["to_json", "to_jsonb", "row_to_json", "json_build_object", "jsonb_build_object"]);
+/** Yalnız tam-satır kuralıyla birlikte izinli olanlar: argümanları `wholeRowRefs`'e yazılır. */
 const ROW_JSON_FUNCS = new Set(["to_json", "to_jsonb", "row_to_json"]);
+
+/**
+ * Tek bir satır (bileşik) argümanla çağrılabilen yerleşik fonksiyonlar (pg_proc: ilk parametresi record/anyelement/
+ * anynonarray/"any"). PostgreSQL `t.f` öznitelik gösterimini, `t` içinde `f` sütunu yoksa `f(t)` çağrısına çevirir:
+ * bu yol fonksiyon allowlist'ine uğramaz. Allowlist dışındakiler bu biçimde de reddedilir.
+ */
+const ROW_ARG_FUNCS = new Set([
+  "to_json", "to_jsonb", "row_to_json", "json_build_object", "jsonb_build_object", "json_build_array", "jsonb_build_array",
+  "json_agg", "jsonb_agg", "array_agg", "concat", "quote_literal", "quote_nullable", "record_out", "record_send", "hash_record",
+  "any_out", "anyelement_out", "anynonarray_out", "anycompatible_out", "anycompatiblenonarray_out", "count", "mode",
+  "first_value", "last_value", "lag", "lead", "rank", "dense_rank", "percent_rank", "cume_dist", "num_nulls", "num_nonnulls",
+  "pg_typeof", "pg_column_size", "pg_column_compression", "pg_collation_for",
+]);
+
+/**
+ * Satırın TÜM sütun değerlerini (JSON/metin/dizi/özet olarak) döndürenler: `f(t.*)` ve `t.f` biçimleri tam-satır
+ * başvurusudur. Sunucu hesaplanan sütunun kökenini bildirmediğinden köken maskelemesi bunları yakalayamaz.
+ */
+const WHOLE_ROW_FUNCS = new Set([
+  "to_json", "to_jsonb", "row_to_json", "json_build_object", "jsonb_build_object", "json_build_array", "jsonb_build_array",
+  "json_agg", "jsonb_agg", "array_agg", "concat", "quote_literal", "quote_nullable", "record_out", "record_send", "hash_record",
+]);
+
+/** `renamedRelations` içinde: sütun takma adı listeli birleşim (`(a JOIN b ON …) AS j(x, y)`); hangi tablo olduğu bilinmez. */
+export const RENAMED_JOIN = "(join)";
 
 const ALLOWED_OPERATORS = new Set([
   "=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "^", "||", "~~", "!~~", "~~*", "!~~*", "~", "~*", "!~", "!~*",
@@ -79,14 +103,27 @@ export interface SelectItem {
   readonly relation?: string;
 }
 
+/**
+ * Sözleşmedeki `SqlClassification`'ın PostgreSQL'e özgü genişlemesi: maskeleme kuralının (`maskedViolations`)
+ * ihtiyaç duyduğu, sütun başvurusu olarak görünmeyen yapılar.
+ */
+export interface PgSqlClassification extends SqlClassification {
+  /** UNION/INTERSECT/EXCEPT: sunucu sonuç sütunlarının kökenini bildirmez (kol kol köken izlenemez). */
+  readonly setOperation: boolean;
+  /** NATURAL JOIN: ortak adlı tüm sütunlar, sorguda adları geçmeden birleştirme koşulu olur. */
+  readonly naturalJoin: boolean;
+  /** Sütun takma adı listesiyle yeniden adlandırılan ilişkiler (`t AS x(a, b)`); birleşim için {@link RENAMED_JOIN}. */
+  readonly renamedRelations: readonly string[];
+}
+
 export interface SqlAnalysis {
   readonly allowed: boolean;
   readonly reason?: string;
   readonly explain: boolean;
-  readonly classification: SqlClassification;
+  readonly classification: PgSqlClassification;
 }
 
-const empty = (parsed: boolean, count = 0): SqlClassification => ({
+export const emptyClassification = (parsed: boolean, count = 0): PgSqlClassification => ({
   parsed,
   statementCount: count,
   statementKinds: [],
@@ -95,7 +132,11 @@ const empty = (parsed: boolean, count = 0): SqlClassification => ({
   functions: [],
   wholeRowRefs: [],
   hasStarSelect: false,
+  setOperation: false,
+  naturalJoin: false,
+  renamedRelations: [],
 });
+const empty = emptyClassification;
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -109,12 +150,17 @@ const strVal = (n: unknown): string | null => (isObj(n) && isObj(n["String"]) &&
 interface Ctx {
   nodes: number;
   relations: Set<string>;
+  /** Tam satırı başvurulabilen FROM öğesi adları: ilişki adı/takma adı ve birleşim takma adları. */
   aliases: Set<string>;
   functions: Set<string>;
   columnRefs: { relation?: string; column: string; insideExpression: boolean }[];
+  /** Tek parçalı sütun başvuruları (her konumda): FROM öğesi adıyla eşleşen tam-satır başvurusudur. */
   singleNameRefs: string[];
   rowJsonArgs: string[];
   hasStar: boolean;
+  setOp: boolean;
+  natural: boolean;
+  renamed: Set<string>;
   kinds: string[];
   /** Değişiklik sınıflayıcısı (sql-change.ts) için: SELECT allowlist'ine EK düğüm türleri / fonksiyonlar / düğüm denetimi. */
   extraNodes?: ReadonlySet<string>;
@@ -122,10 +168,23 @@ interface Ctx {
   check?: (kind: string, body: Obj, ctx: Ctx, depth: number) => void;
 }
 
+function newCtx(): Ctx {
+  return { nodes: 0, relations: new Set(), aliases: new Set(), functions: new Set(), columnRefs: [], singleNameRefs: [], rowJsonArgs: [], hasStar: false, setOp: false, natural: false, renamed: new Set(), kinds: [] };
+}
+
+/** Takma adı (varsa) tam-satır başvurulabilen ad olarak kaydeder; sütun takma adı listesi varsa `true` döner. */
+function noteAlias(alias: unknown, ctx: Ctx): boolean {
+  const al = isObj(alias) ? ((alias as Obj)["Alias"] ?? alias) : undefined;
+  if (!isObj(al)) return false;
+  if (typeof al["aliasname"] === "string") ctx.aliases.add(al["aliasname"]);
+  return Array.isArray(al["colnames"]) && (al["colnames"] as unknown[]).length > 0;
+}
+
 /** SELECT hedef listesindeki doğrudan sütun başvurusu mu? Üst düzey (UNION kolları dahil) SELECT'e bağlı. */
 function visitSelect(body: Obj, ctx: Ctx, depth: number, top: boolean): void {
   if (body["intoClause"] !== undefined) rej("SELECT ... INTO yazma yapar");
   if (Array.isArray(body["lockingClause"]) && (body["lockingClause"] as unknown[]).length > 0) rej("FOR UPDATE/SHARE kilit alır");
+  if (typeof body["op"] === "string" && body["op"] !== "SETOP_NONE") ctx.setOp = true;
   const wc = body["withClause"];
   if (isObj(wc)) {
     const w = (wc as Obj)["WithClause"] ?? wc;
@@ -139,11 +198,7 @@ function visitSelect(body: Obj, ctx: Ctx, depth: number, top: boolean): void {
       const rt = isObj(t) ? ((t as Obj)["ResTarget"] as Obj | undefined) : undefined;
       const val = rt?.["val"];
       if (isObj(val) && isObj(val["ColumnRef"])) {
-        const fields = ((val["ColumnRef"] as Obj)["fields"] as unknown[] | undefined) ?? [];
-        const last = fields[fields.length - 1];
-        if (isObj(last) && isObj(last["A_Star"])) ctx.hasStar = true;
-        else if (fields.length === 1 && strVal(fields[0]) !== null) ctx.singleNameRefs.push(strVal(fields[0]) as string);
-        recordColumn(fields, ctx, false);
+        recordColumn(((val["ColumnRef"] as Obj)["fields"] as unknown[] | undefined) ?? [], ctx, false);
         continue;
       }
       walkAny(t, ctx, depth + 1, true);
@@ -168,6 +223,14 @@ function recordColumn(fields: unknown[], ctx: Ctx, inside: boolean): void {
   const column = names[names.length - 1] as string;
   const relation = names.length >= 2 ? (names[names.length - 2] as string) : undefined;
   if (column === "*") ctx.hasStar = true;
+  // Tek ad: o adda sütun yoksa PostgreSQL onu FROM öğesinin TAM SATIRI olarak çözer (`f(t)`, `t::text`, `ROW(t)`, `(t).x`).
+  else if (names.length === 1) ctx.singleNameRefs.push(column);
+  // Öznitelik gösterimi: `t.f` (veya `şema.t.f`), `t` içinde `f` sütunu yoksa `f(t)` çağrısıdır.
+  else if (relation !== undefined && ROW_ARG_FUNCS.has(column.toLowerCase())) {
+    const fname = column.toLowerCase();
+    if (!ALLOWED_FUNCTIONS.has(fname) && !ROW_JSON_FUNCS.has(fname) && !ctx.extraFunctions?.has(fname)) rej(`izinli olmayan fonksiyon (öznitelik gösterimi): ${fname}`);
+    if (WHOLE_ROW_FUNCS.has(fname)) ctx.rowJsonArgs.push(relation);
+  }
   ctx.columnRefs.push({ ...(relation ? { relation } : {}), column, insideExpression: inside });
 }
 
@@ -189,11 +252,22 @@ function visitNode(kind: string, body: unknown, ctx: Ctx, depth: number, inside:
       if (typeof b["catalogname"] === "string") rej("katalog adı belirtilemez");
       ctx.relations.add(schema ? `${schema}.${rel}` : rel);
       ctx.aliases.add(rel);
-      const al = isObj(b["alias"]) ? ((b["alias"] as Obj)["Alias"] ?? b["alias"]) : undefined;
-      const alias = isObj(al) ? al["aliasname"] : undefined;
-      if (typeof alias === "string") ctx.aliases.add(alias);
+      // `t AS x(a, b, c)`: sütunlar konumla yeniden adlandırılır; maskeli sütun sorguda başka adla geçebilir.
+      if (noteAlias(b["alias"], ctx)) ctx.renamed.add(rel);
       return;
     }
+    case "JoinExpr":
+      if (b["isNatural"] === true) ctx.natural = true;
+      // `USING (a)`: `a` her iki tarafın sütunudur ve birleştirme koşulunda (ifade içinde) kullanılır.
+      for (const u of (b["usingClause"] as unknown[] | undefined) ?? []) {
+        const name = strVal(u);
+        if (name !== null) ctx.columnRefs.push({ column: name, insideExpression: true });
+      }
+      // Birleşim takma adı (`(a JOIN b ON …) j`, `USING (x) AS u`) tablo sütunlarını tam satır olarak açar. Alt sorgu ve
+      // fonksiyon takma adları gerekmez: alt sorgu hedefleri zaten ifade sayılır, fonksiyon çıktısı argümanlarından gelir.
+      if (noteAlias(b["alias"], ctx)) ctx.renamed.add(RENAMED_JOIN);
+      noteAlias(b["join_using_alias"], ctx);
+      break;
     case "FuncCall": {
       const names = ((b["funcname"] as unknown[] | undefined) ?? []).map(strVal);
       if (names.length === 0 || names.some((n) => n === null)) rej("fonksiyon adı okunamadı");
@@ -202,8 +276,8 @@ function visitNode(kind: string, body: unknown, ctx: Ctx, depth: number, inside:
       const fname = (parts[parts.length - 1] as string).toLowerCase();
       if (!ALLOWED_FUNCTIONS.has(fname) && !ROW_JSON_FUNCS.has(fname) && !ctx.extraFunctions?.has(fname)) rej(`izinli olmayan fonksiyon: ${fname}`);
       ctx.functions.add(fname);
-      if (ROW_JSON_FUNCS.has(fname)) {
-        // to_jsonb(t) / row_to_json(t): tam-satır başvurusu
+      if (WHOLE_ROW_FUNCS.has(fname)) {
+        // to_jsonb(t) / json_agg(t.*): tam-satır başvurusu (çıplak ad ayrıca `singleNameRefs` ile de yakalanır)
         for (const a of (b["args"] as unknown[] | undefined) ?? []) {
           const cr = isObj(a) ? ((a as Obj)["ColumnRef"] as Obj | undefined) : undefined;
           const fields = (cr?.["fields"] as unknown[] | undefined) ?? [];
@@ -256,7 +330,7 @@ function walkAny(v: unknown, ctx: Ctx, depth: number, inside: boolean): void {
 }
 
 export function classifySql(sql: string): SqlAnalysis {
-  const deny = (reason: string, cls: SqlClassification = empty(false)): SqlAnalysis => ({ allowed: false, reason, explain: false, classification: cls });
+  const deny = (reason: string, cls: PgSqlClassification = empty(false)): SqlAnalysis => ({ allowed: false, reason, explain: false, classification: cls });
   if (!loaded) return deny("SQL sınıflayıcı başlatılmadı (initSqlClassifier)");
   if (typeof sql !== "string" || sql.trim() === "") return deny("boş ifade");
   if (sql.length > MAX_SQL_CHARS) return deny("ifade çok uzun");
@@ -273,7 +347,7 @@ export function classifySql(sql: string): SqlAnalysis {
 
   const top = stmts[0]?.stmt;
   const kind = top ? Object.keys(top)[0] : undefined;
-  const ctx: Ctx = { nodes: 0, relations: new Set(), aliases: new Set(), functions: new Set(), columnRefs: [], singleNameRefs: [], rowJsonArgs: [], hasStar: false, kinds: [] };
+  const ctx = newCtx();
   let explain = false;
   try {
     if (kind === "SelectStmt") {
@@ -299,34 +373,54 @@ export function classifySql(sql: string): SqlAnalysis {
     throw e;
   }
 
-  const wholeRow = [...new Set([...ctx.rowJsonArgs, ...ctx.singleNameRefs.filter((n) => ctx.aliases.has(n))])];
-  const classification: SqlClassification = {
+  const classification: PgSqlClassification = {
     parsed: true,
     statementCount: 1,
     statementKinds: ctx.kinds,
     relations: [...ctx.relations],
     columnRefs: ctx.columnRefs,
     functions: [...ctx.functions],
-    wholeRowRefs: wholeRow,
+    wholeRowRefs: wholeRowOf(ctx),
     hasStarSelect: ctx.hasStar,
+    setOperation: ctx.setOp,
+    naturalJoin: ctx.natural,
+    renamedRelations: [...ctx.renamed],
   };
   return { allowed: true, explain, classification };
 }
 
 /**
- * M4 AST kuralı: maskeli sütunlar yalnız DOĞRUDAN seçim öğesi olabilir. İfade/fonksiyon/WHERE/JOIN
- * içinde kullanım, `SELECT *`, tam-satır başvurusu → ihlal listesi (boş = uygun). Sütun adı
- * eşleşmesi nitelik çözümlemesi yapmadan (muhafazakâr) tüm sorgudaki başvurulara bakar.
+ * Tam-satır başvuruları: satır fonksiyonu argümanları (`to_jsonb(t)`, `t.to_jsonb`, `f(t.*)` → `*`) ve FROM öğesi
+ * adıyla eşleşen HER tek parçalı başvuru (`json_agg(t)`, `t::text`, `ROW(t)`, `coalesce(t, t)`, `(t).sütun`).
+ * Sözdizimseldir: FROM öğesiyle aynı adı taşıyan sütun da (PostgreSQL önce sütunu seçer) muhafazakârca sayılır.
+ */
+function wholeRowOf(ctx: Ctx): string[] {
+  return [...new Set([...ctx.rowJsonArgs, ...ctx.singleNameRefs.filter((n) => ctx.aliases.has(n))])];
+}
+
+/**
+ * M4 AST kuralı: maskeli sütunlar yalnız DOĞRUDAN seçim öğesi olabilir. İfade/fonksiyon/WHERE/JOIN (ON ve
+ * USING) içinde kullanım, `SELECT *`, tam-satır başvurusu → ihlal listesi (boş = uygun). Sütun adı
+ * eşleşmesi nitelik çözümlemesi yapmadan (muhafazakâr) tüm sorgudaki başvurulara bakar. Maskeli tabloya
+ * dokunan sorguda ayrıca reddedilir: küme işlemleri (sunucu sonuç sütunu kökenini bildirmez, doğrudan seçim
+ * bile maskelenemez), NATURAL JOIN (birleştirme sütunları görünmez) ve sütun takma adı listesiyle yeniden
+ * adlandırma (maskeli sütun başka adla ifadeye girebilir).
  */
 export function maskedViolations(a: SqlAnalysis, masked: ReadonlyMap<string, ReadonlySet<string>>): string[] {
   const out: string[] = [];
-  const rels = a.classification.relations.map((r) => (r.split(".").pop() as string).toLowerCase());
-  const touched = rels.filter((r) => masked.has(r));
+  const cls = a.classification;
+  const base = (r: string): string => (r.split(".").pop() as string).toLowerCase();
+  const touched = cls.relations.map(base).filter((r) => masked.has(r));
   if (touched.length === 0) return out;
-  if (a.classification.hasStarSelect) out.push(`maskeli tabloda SELECT *: ${touched.join(",")}`);
-  if (a.classification.wholeRowRefs.length > 0) out.push(`tam-satır başvurusu maskeli tabloda: ${a.classification.wholeRowRefs.join(",")}`);
+  if (cls.hasStarSelect) out.push(`maskeli tabloda SELECT *: ${touched.join(",")}`);
+  if (cls.wholeRowRefs.length > 0) out.push(`tam-satır başvurusu maskeli tabloda: ${cls.wholeRowRefs.join(",")}`);
+  if (cls.setOperation) out.push(`küme işlemi (UNION/INTERSECT/EXCEPT) maskeli tabloyla: sonuç sütunlarının kökeni bilinmez`);
+  if (cls.naturalJoin) out.push(`NATURAL JOIN maskeli tabloyla: birleştirme sütunları açıkça yazılmalı (ON)`);
+  for (const r of cls.renamedRelations) {
+    if (r === RENAMED_JOIN || masked.has(base(r))) out.push(`maskeli tabloda sütun takma adı listesi: ${r}`);
+  }
   const cols = new Set(touched.flatMap((t) => [...(masked.get(t) ?? [])].map((c) => c.toLowerCase())));
-  for (const c of a.classification.columnRefs) {
+  for (const c of cls.columnRefs) {
     if (cols.has(c.column.toLowerCase()) && c.insideExpression) out.push(`maskeli sütun ifade/koşul içinde: ${c.column}`);
   }
   return [...new Set(out)];
@@ -359,7 +453,8 @@ export const walkKit = {
   isObj,
   strVal,
   ready: (): boolean => loaded,
-  newCtx: (): Ctx => ({ nodes: 0, relations: new Set(), aliases: new Set(), functions: new Set(), columnRefs: [], singleNameRefs: [], rowJsonArgs: [], hasStar: false, kinds: [] }),
+  newCtx,
+  wholeRowOf,
   walkAny,
   visitNode,
 };
