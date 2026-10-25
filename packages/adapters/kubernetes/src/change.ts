@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { parseAllDocuments, stringify } from "yaml";
 import { OpsError } from "@ops/contracts";
 import type { ActionPreview, RawToolOutput } from "@ops/contracts";
@@ -280,14 +281,35 @@ export function fieldManagerConflicts(resp: ApiResponse): { field: string; manag
     });
 }
 
+/** 422 Invalid yanıtı `metadata.uid` alanına mı ilişkin? (oluşturma koşulunun reddi; başka doğrulama hatası değil) */
+function touchesUid(resp: ApiResponse): boolean {
+  try {
+    const j = JSON.parse(resp.body) as { details?: { causes?: { field?: string }[] } };
+    return (j.details?.causes ?? []).some((c) => c.field === "metadata.uid");
+  } catch {
+    return false;
+  }
+}
+
 export async function doApply(client: K8sClient, manifest: string, approvedVersion: string | undefined): Promise<RawToolOutput> {
   const parsed = parseManifest(manifest);
   if (approvedVersion === undefined) throw new OpsError("approval_version_missing", "onaylanan hedef sürümü yok; uygulama reddedildi");
   const { kind, namespace, name, obj, ref } = parsed;
   let resp: ApiResponse;
   if (approvedVersion === "yok") {
-    resp = await client.create(resourcePath(kind, namespace), obj, { fieldManager: FIELD_MANAGER });
-    if (resp.status === 409) throw new OpsError("target_changed", `${ref} onaydan sonra başkası tarafından oluşturuldu; yeniden inceleyin`);
+    // Oluşturma da server-side apply ile: POST ile oluşturulan alanlar (operation Update) aynı yöneticinin sonraki
+    // Apply'ıyla ÇAKIŞIYORDU (yönetici kimliği ad + işlemdir; kind'da bulundu). "Yalnız yoksa oluştur" koşulu: gövdeye
+    // rastgele bir uid konur — sunucu oluşturmada uid'i kendisi atar; nesne onaydan sonra başkasınca oluşturulduysa
+    // değişmez uid alanı (422) veya alan çakışması (409) isteği reddeder, var olan nesne DEĞİŞMEZ.
+    const body = { ...obj, metadata: { ...(obj["metadata"] as Obj), uid: randomUUID() } };
+    resp = await client.patch(resourcePath(kind, namespace, name), body, "application/apply-patch+yaml", { fieldManager: FIELD_MANAGER, force: false });
+    if (resp.status === 409 || (resp.status === 422 && touchesUid(resp))) {
+      throw new OpsError("target_changed", `${ref} onaydan sonra başkası tarafından oluşturuldu; hiçbir şey uygulanmadı, yeniden inceleyin`);
+    }
+    if (resp.status === 200) {
+      // 201 beklenir; 200 = nesne vardı ve güncellendi (uid koşulu sunucuda uygulanmadı). Sessiz geçilmez.
+      throw new OpsError("target_changed", `${ref} beklenmedik biçimde zaten vardı ve bu çağrıyla GÜNCELLENDİ (onaylanan: yeni nesne); nesneyi inceleyin`);
+    }
   } else {
     const body = { ...obj, metadata: { ...(obj["metadata"] as Obj), resourceVersion: approvedVersion } };
     resp = await client.patch(resourcePath(kind, namespace, name), body, "application/apply-patch+yaml", { fieldManager: FIELD_MANAGER, force: false });

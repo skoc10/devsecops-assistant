@@ -327,7 +327,7 @@ describe("k8s.apply", () => {
     expect(stored.spec.template.spec.containers[0]!.image).toBe("registry.test.invalid/web:2.0");
   });
 
-  it("olmayan nesne: POST ile oluşturulur (sürüm 'yok'); onay sonrası başkası oluşturursa target_changed", async () => {
+  it("olmayan nesne: server-side apply ile oluşturulur (sürüm 'yok'; POST değil — kind'da POST+Apply aynı yöneticiyle çakışıyordu)", async () => {
     const { h, gate, ev } = await setup("deploy");
     // atıf: yeni nesne için hedef kanıtı gerekir → apply.diff kanıtı
     const m = MANIFEST().replace("name: web", "name: fresh");
@@ -335,9 +335,28 @@ describe("k8s.apply", () => {
     const created = await h.call("k8s.apply", { manifest: m }, { cited: [d.evidenceId as string] });
     expect(created.status, JSON.stringify(created)).toBe("ok");
     expect(gate.requests[0]!.summary.preview).toMatchObject({ targetVersion: "yok" });
-    expect(writes(h)[0]).toMatchObject({ method: "POST", path: `/apis/apps/v1/namespaces/${NS}/deployments` });
-    expect(h.api.peek("Deployment", NS, "fresh")).toBeTruthy();
+    const w = writes(h);
+    expect(w).toHaveLength(1);
+    expect(w[0]).toMatchObject({ method: "PATCH", path: `/apis/apps/v1/namespaces/${NS}/deployments/fresh`, query: { fieldManager: "ops-assistant", force: "false" } });
+    // "yalnız yoksa oluştur" koşulu: gövdede rastgele uid; sunucu kendi uid'ini atar
+    const sent = JSON.parse(w[0]!.body) as { metadata: { uid?: string; resourceVersion?: string } };
+    expect(sent.metadata.uid).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sent.metadata.resourceVersion).toBeUndefined();
+    expect(h.api.peek("Deployment", NS, "fresh")?.metadata["uid"]).not.toBe(sent.metadata.uid);
     void ev;
+  });
+
+  it("'yok' onayıyla çağrıldığında nesne o arada oluşturulmuşsa var olan nesne DEĞİŞMEZ (uid koşulu → target_changed)", async () => {
+    const { h } = await setup("deploy");
+    const lease = await h.broker.acquire({ profile: h.profile, purpose: "t", callId: "c-yok", ttlSec: 60 }, h.known);
+    try {
+      const before = JSON.stringify(h.api.peek("Deployment", NS, "web"));
+      const call = { tool: "k8s.apply", args: { manifest: MANIFEST("registry.test.invalid/web:9.9", 7) }, profile: h.profile, handle: lease.handle, callId: "c-yok", signal: new AbortController().signal, limits: h.adapter.definitions.find((d) => d.descriptor.name === "k8s.apply")!.descriptor.limits, approvedVersion: "yok" };
+      await expect(h.adapter.invoke(call)).rejects.toMatchObject({ code: "target_changed" });
+      expect(JSON.stringify(h.api.peek("Deployment", NS, "web"))).toBe(before);
+    } finally {
+      await lease.release();
+    }
   });
 
   it("S-09: onay sırasında nesne oluşturulursa/değişirse uygulanmaz", async () => {

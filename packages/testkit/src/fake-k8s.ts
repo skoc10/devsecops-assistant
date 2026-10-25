@@ -275,6 +275,12 @@ export class FakeK8sApi {
         : this.handleDelete(url.pathname, query, body, res);
     }
     if (method !== "GET") return this.send(res, 405, statusBody(405, "MethodNotAllowed", "method not allowed"));
+    // Gerçek API sunucusu gibi: Accept bir serileştiriciyle (json/yaml/protobuf) veya */* ile eşleşmeli; `pods/log`
+    // dahil (gövde düz metin olsa bile). Eskiden sahte API `text/plain`'i kabul ediyordu; gerçek küme 406 veriyor.
+    const accept = String(req.headers.accept ?? "");
+    if (accept !== "" && !/(^|,)\s*(\*\/\*|application\/(json|yaml|vnd\.kubernetes\.protobuf))(\s*[;,]|\s*$)/.test(accept)) {
+      return this.send(res, 406, statusBody(406, "NotAcceptable", "only the following media types are accepted: application/json, application/yaml, application/vnd.kubernetes.protobuf"));
+    }
 
     if (url.pathname === "/version") return this.send(res, 200, JSON.stringify({ major: "1", minor: "31", gitVersion: "v1.31.0-fake" }));
 
@@ -469,7 +475,11 @@ export class FakeK8sApi {
     } else if (r.sub !== undefined) {
       return this.send(res, 404, statusBody(404, "NotFound", "unknown subresource"));
     } else {
-      const { resourceVersion: _rv, ...metaRest } = (patch["metadata"] ?? {}) as Record<string, unknown>;
+      const { resourceVersion: _rv, uid: wantedUid, ...metaRest } = (patch["metadata"] ?? {}) as Record<string, unknown>;
+      // Gerçek sunucu gibi: oluşturmada uid'i sunucu atar; var olan nesnede farklı uid değişmez alan hatasıdır (422).
+      if (cur && wantedUid !== undefined && wantedUid !== cur.metadata["uid"]) {
+        return this.send(res, 422, JSON.stringify({ kind: "Status", apiVersion: "v1", status: "Failure", reason: "Invalid", code: 422, message: `${r.res.kind} "${r.name}" is invalid: metadata.uid: Invalid value: field is immutable`, details: { causes: [{ reason: "FieldValueInvalid", message: "field is immutable", field: "metadata.uid" }] } }));
+      }
       next = this.merge(cur ?? { kind: r.res.kind, apiVersion: r.res.apiVersion, metadata: { name: r.name, ...(r.res.namespaced ? { namespace: r.ns } : {}), uid: `uid-${r.name}` } }, { ...patch, metadata: metaRest }) as K8sObject;
     }
     next.metadata = { ...next.metadata, resourceVersion: String((cur ? this.rvOf(cur) : 0) + 1), uid: cur?.metadata["uid"] ?? next.metadata["uid"] ?? `uid-${r.name}` };
