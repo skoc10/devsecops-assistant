@@ -473,6 +473,23 @@ describe.skipIf(!pg)("bağlantı güvenliği: pin, TLS, ortam değişkenleri, pa
     expect(results[4]?.summary).toMatch(/\[42P01\]/);
     expect(results[6]?.summary).toMatch(/\[22012\]/);
   });
+
+  it("veri istisnası mesajı hücre değerini taşımaz (sorgu başına bir değerlik kanal kapalı); SQLSTATE ve hata türü kalır", async () => {
+    const h = await makePgHarness();
+    const results = [
+      await h.call("db.query.read", { sql: "SELECT note::int AS n FROM public.customers ORDER BY id" }),
+      await h.call("db.query.read", { sql: "SELECT name::int AS n FROM public.customers ORDER BY id" }),
+      await h.call("db.query.read", { sql: "SELECT name::date AS d FROM public.customers ORDER BY id DESC" }),
+    ];
+    for (const r of results) {
+      expect(r.status, JSON.stringify(r)).toBe("error");
+      expect(r.summary).toMatch(/\[22(P02|007|008)\] invalid input syntax for type (integer|date) \(değer gizlendi\)/);
+    }
+    // ad sütunu dedektörlere takılmaz: tek savunma dbError; hiçbir kanalda (denetim, kanıt, model) yok
+    const sink = await h.sinkFor(results);
+    expect(sink.text()).not.toMatch(/Ayse|Mehmet|call \+90|555 111/);
+    expect(sink.leaks([canaries.readerPw])).toEqual([]);
+  });
 });
 
 afterAll(async () => {
