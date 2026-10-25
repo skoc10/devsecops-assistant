@@ -1,5 +1,6 @@
 import { AuditBodySchema, AuditRecordSchema, isOpsError, OpsError } from "@ops/contracts";
 import type { AuditBody, AuditEntry, AuditRecord, AuditSink } from "@ops/contracts";
+import { checkAnchor, signAnchor } from "./anchor.ts";
 import { chainHash, GENESIS_HASH } from "./chain.ts";
 import type { AuditStorage, HeadAnchor } from "./storage.ts";
 
@@ -51,7 +52,7 @@ function readRecord(key: Uint8Array, line: string): AuditRecord | "okunamadı" |
  * Hash zincirli, write-ahead, fail-closed denetim günlüğü.
  * - `append` başarısız olursa günlük "bozuk" işaretlenir ve sonraki tüm çağrılar reddedilir:
  *   çağıran (PEP) araç çağrısını ÇALIŞTIRMAZ.
- * - Anahtarsız yeniden yazım zinciri doğrulatamaz; kuyruk kesme çapa ile tespit edilir.
+ * - Anahtarsız yeniden yazım zinciri doğrulatamaz; kuyruk kesme MAC'li çapa ile tespit edilir (bkz. `anchor.ts`).
  * - Aynı günlüğe birden çok süreç yazabilir (opsd + tek seferlik `ops` komutları): her ekleme depo kilidi
  *   altında yapılır ve baş (seq/hash) yazmadan önce dosyanın son kaydından tazelenir. Bellekteki baş
  *   yalnız "son bilinen"dir; zincir çatallanmaz.
@@ -84,11 +85,14 @@ export class AuditLog implements AuditSink {
       log.lastSeq = rec.seq;
       log.lastHash = rec.hash;
     }
-    if (anchor) {
-      if (log.lastSeq < anchor.seq) {
+    // Yalnız MAC'i doğrulanan çapaya göre karar verilir. Çapa yok ya da doğrulanamıyorsa (eski biçim, sahte)
+    // içeriğine güvenilmez; açılış sürer, ilk yazım çapayı `since` izi bırakarak yeniden kurar (`anchorSince`).
+    const a = opts.anchor ? checkAnchor(opts.key, anchor) : null;
+    if (a?.status === "ok") {
+      if (log.lastSeq < a.seq) {
         throw new OpsError("audit_truncated", "denetim günlüğü çapadan kısa: kuyruk kesilmiş olabilir");
       }
-      if (log.lastSeq === anchor.seq && log.lastHash !== anchor.hash) {
+      if (log.lastSeq === a.seq && log.lastHash !== a.hash) {
         throw new OpsError("audit_truncated", "denetim günlüğü çapayla uyuşmuyor");
       }
     }
@@ -132,9 +136,10 @@ export class AuditLog implements AuditSink {
     }
   }
 
-  /** Kilit altında: başı dosyadan tazele, kaydı zincirle, yaz. */
+  /** Kilit altında: başı dosyadan tazele, çapayı denetle, kaydı zincirle, yaz. */
   private async appendLocked(body: AuditBody): Promise<AuditRecord> {
     await this.syncHead();
+    const since = this.o.anchor ? await this.anchorSince(this.o.anchor) : 0;
     let record: AuditRecord;
     try {
       const seq = this.lastSeq + 1;
@@ -148,7 +153,7 @@ export class AuditLog implements AuditSink {
       await this.o.storage.append(JSON.stringify(record));
       this.lastSeq = record.seq;
       this.lastHash = record.hash;
-      if (this.o.anchor) await this.o.anchor.write({ seq: record.seq, hash: record.hash });
+      if (this.o.anchor) await this.o.anchor.write(signAnchor(this.o.key, record, since));
       return record;
     } catch (e) {
       // Depolama/çapa hatası: zincir durumu belirsiz → fail-closed, günlük artık kayıt kabul etmez.
@@ -175,6 +180,21 @@ export class AuditLog implements AuditSink {
     }
     this.lastSeq = rec.seq;
     this.lastHash = rec.hash;
+  }
+
+  /**
+   * Kilit altında çapayı denetler; yazılacak çapanın `since` değerini döndürür. Doğrulanan çapa günlükten
+   * ilerideyse (bu süreç bakmazken kuyruk kesilmiş) kalıcı fail-closed. Çapa yok ya da doğrulanamıyorsa
+   * içeriğine güvenilmez: günlük boşsa yeni zincirdir (`since` 0); doluysa çapa bu kayıtta yeniden kurulur ve
+   * `since` bu kaydın seq'i olur. İz kalıcıdır, `verifyAudit` onu `anchor_reset` olarak bildirir.
+   */
+  private async anchorSince(anchor: HeadAnchor): Promise<number> {
+    const a = checkAnchor(this.o.key, await anchor.read());
+    if (a.status !== "ok") return this.lastSeq + 1;
+    if (this.lastSeq < a.seq || (this.lastSeq === a.seq && this.lastHash !== a.hash)) {
+      this.fail("audit_truncated", "denetim günlüğü çapadan kısa: kuyruk kesilmiş olabilir");
+    }
+    return a.since;
   }
 
   /** Zincir bütünlüğü sorunu: günlük kalıcı olarak bozuk işaretlenir (fail-closed). */

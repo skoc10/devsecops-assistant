@@ -1,6 +1,7 @@
 import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
+import type { AnchorRecord } from "./anchor.ts";
 import { acquireFileLock } from "./lock.ts";
 import type { FileLock, FileLockOptions } from "./lock.ts";
 
@@ -154,10 +155,14 @@ export class MemoryAuditStorage implements AuditStorage {
   }
 }
 
-/** Zincir başının ikinci bir konuma yazıldığı çapa (kuyruk kesmeyi tespit için). */
+/**
+ * Zincir başının ikinci bir konuma yazıldığı çapa (kuyruk kesmeyi tespit için). Depo içeriği yorumlamaz:
+ * MAC denetimi anahtarı tutan yazıcı/doğrulayıcıdadır (`checkAnchor`).
+ */
 export interface HeadAnchor {
-  read(): Promise<{ seq: number; hash: string } | null>;
-  write(head: { seq: number; hash: string }): Promise<void>;
+  /** Ham, güvenilmez içerik (dosyada JSON metni); çapa yoksa `null`. */
+  read(): Promise<unknown>;
+  write(anchor: AnchorRecord): Promise<void>;
 }
 
 export class FileHeadAnchor implements HeadAnchor {
@@ -167,36 +172,35 @@ export class FileHeadAnchor implements HeadAnchor {
     this.path = path;
   }
 
-  async read(): Promise<{ seq: number; hash: string } | null> {
+  async read(): Promise<string | null> {
     try {
-      const j = JSON.parse(await readFile(this.path, "utf8")) as { seq?: unknown; hash?: unknown };
-      if (typeof j.seq === "number" && typeof j.hash === "string") return { seq: j.seq, hash: j.hash };
-      return null;
+      return await readFile(this.path, "utf8");
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw e;
     }
   }
 
-  async write(head: { seq: number; hash: string }): Promise<void> {
+  async write(anchor: AnchorRecord): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(head), { mode: 0o600 });
+    await writeFile(tmp, JSON.stringify(anchor), { mode: 0o600 });
     await chmod(tmp, 0o600);
     await rename(tmp, this.path);
   }
 }
 
 export class MemoryHeadAnchor implements HeadAnchor {
-  head: { seq: number; hash: string } | null = null;
+  /** Son yazılan çapa. */
+  head: AnchorRecord | null = null;
   failNext = false;
 
-  async read(): Promise<{ seq: number; hash: string } | null> {
+  async read(): Promise<AnchorRecord | null> {
     return this.head ? { ...this.head } : null;
   }
 
-  async write(head: { seq: number; hash: string }): Promise<void> {
+  async write(anchor: AnchorRecord): Promise<void> {
     if (this.failNext) throw new Error("çapa yazma hatası (simüle)");
-    this.head = { ...head };
+    this.head = { ...anchor };
   }
 }

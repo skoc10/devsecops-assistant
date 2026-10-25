@@ -16,6 +16,7 @@ import {
   MemoryHeadAnchor,
   verifyAudit,
 } from "../src/index.ts";
+import { signAnchor } from "../src/anchor.ts";
 import { chainHash } from "../src/chain.ts";
 
 const key = randomBytes(32);
@@ -316,6 +317,103 @@ describe("dosya depolama", () => {
     await expect(storage.readLastLine()).resolves.toBe("tek-satır-sonsuz");
     await writeFile(path, "\n\n");
     await expect(storage.readLastLine()).resolves.toBeNull();
+  });
+});
+
+describe("çapa: zincir anahtarıyla MAC'li baş (S-08)", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ops-audit-anchor-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const logPath = () => join(dir, "audit.jsonl");
+  const anchorPath = () => join(dir, "head.anchor");
+  const openAt = () => AuditLog.open({ storage: new FileAuditStorage(logPath(), { fsync: false }), key, anchor: new FileHeadAnchor(anchorPath()) });
+  const verifyFile = () => verifyAudit(new FileAuditStorage(logPath()), key, new FileHeadAnchor(anchorPath()));
+  const codes = async () => (await verifyFile()).problems.map((p) => p.code);
+  const lines = async () => new FileAuditStorage(logPath()).readLines();
+  /** Anahtarsız saldırgan: günlüğü ilk `n` kayda keser. */
+  const truncateTo = async (n: number) => writeFile(logPath(), `${(await lines()).slice(0, n).join("\n")}\n`);
+  const lastOf = async () => JSON.parse((await lines()).at(-1) as string) as { seq: number; hash: string };
+
+  it("olağan işleyişte çapa v2 ve MAC'lidir; doğrulama temiz", async () => {
+    await fill(await openAt(), 3);
+    const a = JSON.parse(await readFile(anchorPath(), "utf8")) as Record<string, unknown>;
+    expect(a).toMatchObject({ v: 2, seq: 2, since: 0, hash: (await lastOf()).hash });
+    expect(a["mac"]).toMatch(/^[a-f0-9]{64}$/);
+    expect(await verifyFile()).toMatchObject({ ok: true, records: 3, problems: [] });
+  });
+
+  it("kesme + kesik günlükten yeniden yazılmış MAC'siz çapa: doğrulama sorun bildirir", async () => {
+    await fill(await openAt(), 6);
+    await truncateTo(3);
+    const last = await lastOf();
+    await writeFile(anchorPath(), JSON.stringify({ seq: last.seq, hash: last.hash }));
+    const v = await verifyFile();
+    expect(v.ok).toBe(false);
+    expect(v.problems).toContainEqual(expect.objectContaining({ code: "anchor_unauthenticated", message: expect.stringContaining("MAC yok") }));
+  });
+
+  it("kesme + anahtarsız uydurulan v2 çapa (MAC tutmuyor) da reddedilir", async () => {
+    await fill(await openAt(), 6);
+    await truncateTo(3);
+    const last = await lastOf();
+    const forged = { v: 2, seq: last.seq, hash: last.hash, since: 0, mac: "ab".repeat(32) };
+    await writeFile(anchorPath(), JSON.stringify(forged));
+    const v = await verifyFile();
+    expect(v.ok).toBe(false);
+    expect(v.problems).toEqual([expect.objectContaining({ code: "anchor_unauthenticated", message: expect.stringContaining("MAC geçersiz") })]);
+    // başka bir anahtarla imzalanmış ya da okunamayan çapa da aynı
+    await writeFile(anchorPath(), JSON.stringify(signAnchor(randomBytes(32), last, 0)));
+    expect(await codes()).toEqual(["anchor_unauthenticated"]);
+    await writeFile(anchorPath(), "{bozuk");
+    expect(await codes()).toEqual(["anchor_unauthenticated"]);
+  });
+
+  it("kesme + silinmiş çapa: doğrulama `anchor_missing` bildirir", async () => {
+    await fill(await openAt(), 6);
+    await truncateTo(3);
+    await rm(anchorPath());
+    expect(await codes()).toEqual(["anchor_missing"]);
+  });
+
+  it("çapa silinip ardından yazım yaptırılırsa kesme aklanmaz: `anchor_reset` kalıcıdır", async () => {
+    await fill(await openAt(), 6);
+    await truncateTo(3);
+    await rm(anchorPath());
+    await fill(await openAt(), 2); // ör. sonraki herhangi bir `ops` komutu (session_start)
+    let v = await verifyFile();
+    expect(v.records).toBe(5);
+    expect(v.problems).toEqual([expect.objectContaining({ code: "anchor_reset", seq: 3 })]);
+    // iz sonraki çapalara taşınır
+    await fill(await openAt(), 1);
+    v = await verifyFile();
+    expect(v.problems).toEqual([expect.objectContaining({ code: "anchor_reset", seq: 3 })]);
+  });
+
+  it("eski biçim (MAC'siz) çapalı kurulum: açılır, ilk yazım çapayı v2'ye geçirir, doğrulama sıfırlamayı bildirir", async () => {
+    await fill(await openAt(), 3);
+    const last = await lastOf();
+    await writeFile(anchorPath(), JSON.stringify({ seq: last.seq, hash: last.hash })); // düzeltme öncesi biçim
+    expect(await codes()).toEqual(["anchor_unauthenticated"]);
+    // içeriğine güvenilmez ama açılışı da engellemez (iddia ettiği seq ne olursa olsun)
+    await writeFile(anchorPath(), JSON.stringify({ seq: 100, hash: last.hash }));
+    const log = await openAt();
+    await log.append({ ...base });
+    expect(JSON.parse(await readFile(anchorPath(), "utf8"))).toMatchObject({ v: 2, seq: 3, since: 3 });
+    expect(await codes()).toEqual(["anchor_reset"]);
+  });
+
+  it("bu süreç bakmazken kesilen kuyruğu, geçerli çapa sonraki eklemede yakalar", async () => {
+    const idle = await openAt(); // boş günlükte açıldı, bellekteki baş yok
+    await fill(await openAt(), 6);
+    await truncateTo(3);
+    await expect(idle.append({ ...base })).rejects.toMatchObject({ code: "audit_truncated" });
+    expect(idle.broken).toBe(true);
+    await expect(openAt()).rejects.toMatchObject({ code: "audit_truncated" });
   });
 });
 
