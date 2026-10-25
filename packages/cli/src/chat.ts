@@ -129,6 +129,19 @@ export async function runChat(backend: ChatBackend, io: { input: Readable; outpu
     io.output.write(`${s}\n`);
   };
   const rl = createInterface({ input: io.input, crlfDelay: Infinity });
+  // Girdi biterse (boru/dosya) arayüz kapanır ama yineleyici tamponlu satırları vermeye devam eder. Node 24, kapalı
+  // arayüzde pause/resume'u `ERR_USE_AFTER_CLOSE` ile reddeder (Node 22 sessizce yok sayıyordu): onay/yeniden doğrulama
+  // sırasında duraklatma kapanmışsa atlanır (Node 24 CI matrisinde bulundu).
+  let rlClosed = false;
+  rl.once("close", () => {
+    rlClosed = true;
+  });
+  const pauseInput = (): void => {
+    if (!rlClosed) rl.pause();
+  };
+  const resumeInput = (): void => {
+    if (!rlClosed) rl.resume();
+  };
   let turn: AbortController | null = null;
   const onStop = (): void => {
     turn?.abort();
@@ -138,8 +151,8 @@ export async function runChat(backend: ChatBackend, io: { input: Readable; outpu
   else opts.stop?.addEventListener("abort", onStop, { once: true });
   // Onay istemi kontrol terminalinden okunur; sohbet girdisi o sırada DURAKLATILIR ki yanıt
   // sohbet satırı olarak (modele) gitmesin.
-  opts.approvalEvents?.on("start", () => rl.pause());
-  opts.approvalEvents?.on("end", () => rl.resume());
+  opts.approvalEvents?.on("start", pauseInput);
+  opts.approvalEvents?.on("end", resumeInput);
   out("ops-assistant — /help ile komutlar. Secret'ları sohbete yapıştırmayın.");
   // Kalıcı banner: etkin break-glass varken her istemden önce yeniden basılır.
   const banner = async (): Promise<void> => {
@@ -235,12 +248,12 @@ export async function runChat(backend: ChatBackend, io: { input: Readable; outpu
           out("✗ yeniden kimlik doğrulama bu arayüzde yapılandırılmamış: break-glass başlatılamaz");
         } else {
           // yanıt sohbet satırı olarak (modele) gitmesin: sohbet girdisi duraklatılır, parola kontrol terminalinden okunur
-          rl.pause();
+          pauseInput();
           let proof: { method: string; verifiedAtMs: number };
           try {
             proof = await opts.reauth();
           } finally {
-            rl.resume();
+            resumeInput();
           }
           const lines = await backend.breakGlassStart({ profile, ceiling: ceiling as RiskClass, ttlSec, reason: reason.join(" "), reauth: proof });
           for (const l of lines) out(safe(l));
