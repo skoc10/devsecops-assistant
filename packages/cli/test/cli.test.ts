@@ -174,6 +174,23 @@ describe("ops init / parola kaynağı (gerçek şifreli dosya kasası)", () => {
     expect(r.code).toBe(1);
     expect(r.err).toContain("passphrase_unavailable");
   });
+
+  it("parola dosyası: sembolik bağ, normal olmayan dosya ve başka kullanıcıya ait dosya reddedilir", async () => {
+    const real = join(home, "pw");
+    await writeFile(real, "dogru-parola-123\n", { mode: 0o600 });
+    const link = join(home, "pw-bag");
+    await symlink(real, link); // hedef 0600 ve bize ait olsa da bağ izlenmez
+    const viaLink = await cli(["init"], { OPS_PASSPHRASE_FILE: link });
+    expect(viaLink.code).toBe(1);
+    expect(viaLink.err).toMatch(/passphrase_file_permissions: .*sembolik bağ/);
+    expect((await cli(["init"], { OPS_PASSPHRASE_FILE: home })).err).toMatch(/passphrase_file_permissions: .*normal bir dosya/);
+    if (process.getuid?.() !== 0) {
+      const foreign = await cli(["init"], { OPS_PASSPHRASE_FILE: "/etc/passwd" }); // root'a ait
+      expect(foreign.err).toMatch(/passphrase_file_permissions: .*ait olmalı/);
+    }
+    const ok = await cli(["init"], { OPS_PASSPHRASE_FILE: real });
+    expect(ok.code, ok.err).toBe(0);
+  });
 });
 
 describe("OPS_HOME sahiplik ve izin denetimi", () => {
