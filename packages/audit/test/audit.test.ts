@@ -477,7 +477,7 @@ describe("eşzamanlı yazıcılar: süreçler arası kilit (S-08)", () => {
     const worker = fileURLToPath(new URL("./fixtures/append-worker.ts", import.meta.url));
     const run = promisify(execFile);
     // bayrak Node 22.18+ için varsayılan; `engines` alt sınırı (22.13) için açıkça verilir
-    const args = (s: string) => ["--experimental-strip-types", worker, logPath(), anchorPath(), Buffer.from(key).toString("hex"), s, "15"];
+    const args = (s: string) => [worker, logPath(), anchorPath(), Buffer.from(key).toString("hex"), s, "15"];
     await Promise.all(["p1", "p2", "p3"].map((s) => run(process.execPath, args(s))));
     expect(await verifyFile()).toMatchObject({ ok: true, records: 45 });
     expect(await seqs()).toEqual(Array.from({ length: 45 }, (_, i) => i));
