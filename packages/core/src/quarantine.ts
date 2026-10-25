@@ -287,6 +287,8 @@ export interface QuarantineInput {
   readonly sensitivity: Sensitivity;
   /** Bu sonuç bağlama girdiğinde bağlamın gidebileceği en uzak bölge (model özeti bunu aşan bir sağlayıcıya gitmez). */
   readonly zoneCapAfter: TrustZone;
+  /** PEP local-only kipinde: özetleyici de yerel olmalı (yerel olmayan özetleyiciye ham içerik GİTMEZ). */
+  readonly localOnly?: boolean;
   readonly signal?: AbortSignal;
 }
 
@@ -339,6 +341,7 @@ export class Quarantine {
       const m = this.model;
       if (!m) modelSummary = "unavailable";
       else if (!zoneAllows(m.provider.capabilities.trustZone, i.zoneCapAfter)) modelSummary = "skipped_egress";
+      else if (i.localOnly && m.provider.capabilities.trustZone !== "local") modelSummary = "skipped_egress";
       else {
         const s = await this.summarize(m, i);
         if (s === "invalid") modelSummary = "invalid";

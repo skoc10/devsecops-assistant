@@ -91,7 +91,7 @@ export class RuntimeOrchestrator {
     let prompt = text;
     let toolCallsThisSend = 0;
     for (let attempt = 0; ; attempt++) {
-      const budget = policy.checkBudget({ toolCalls: session.usage.toolCalls, sessionTokens: session.usage.sessionTokens });
+      const budget = policy.checkBudget({ toolCalls: session.usage.attemptedCalls, sessionTokens: session.usage.sessionTokens });
       if (!budget.ok) {
         yield { type: "error", code: budget.reason, message: "oturum bütçesi aşıldı; yeni oturum başlatın" };
         return;

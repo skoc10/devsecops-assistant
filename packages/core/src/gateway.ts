@@ -29,7 +29,7 @@ import type {
   TrustZone,
 } from "@ops/contracts";
 import type { PolicyEngine } from "@ops/policy";
-import { Counter, mapStrings, processOutput, scrubText, stripControlChars } from "@ops/redaction";
+import { Counter, mapStrings, maskByDetectors, processOutput, scrubText, stripControlChars } from "@ops/redaction";
 import type { KnownSecrets, MaskingRules } from "@ops/redaction";
 import type { EvidenceStore } from "./evidence.ts";
 import { ToolExecutor } from "./executor.ts";
@@ -174,9 +174,11 @@ export class ToolGateway {
       return this.deny(st, "local_only", `egress: local-only kipinde yalnız yerel sağlayıcı kullanılır (sağlayıcı bölgesi '${req.providerZone}')`);
     }
 
-    // Oturum bütçesi
-    const budget = policy.checkBudget({ toolCalls: session.usage.toolCalls, sessionTokens: session.usage.sessionTokens });
+    // Oturum bütçesi: her girişim KABUL anında sayılır (reddedilen/hatalı dahil). Bu noktaya kadar `await` yoktur:
+    // aynı turdaki paralel çağrılar sayacı sırayla görür, tavan paralellikle aşılamaz.
+    const budget = policy.checkBudget({ toolCalls: session.usage.attemptedCalls, sessionTokens: session.usage.sessionTokens });
     if (!budget.ok) return this.deny(st, budget.reason, "oturum bütçesi aşıldı");
+    session.usage.attemptedCalls += 1;
 
     // 1. Şema doğrulama (strictObject: fazladan alan reddedilir)
     const parsed = reg.def.input.safeParse(req.args);
@@ -470,6 +472,15 @@ export class ToolGateway {
       return this.deny(st, "timeout", "çağrı iptal edildi; adapter çalıştırılmadı");
     }
 
+    // Break-glass lease + yeniden önizleme sırasında dolmuş olabilir: yükseltilmiş tavanla son kez denetlenir.
+    if (st.breakGlass && profile) {
+      const live = session.breakGlass.get(profile.id);
+      if (!live || live.id !== st.breakGlass || this.now().getTime() >= Date.parse(live.expiresAt)) {
+        await this.releaseLease(st, lease);
+        return this.deny(st, "ceiling_exceeded", "break-glass süresi/izni çalıştırmadan hemen önce sona erdi; çağrı çalıştırılmadı");
+      }
+    }
+
     // 10. Adapter (zaman aşımı + iptal)
     let raw: RawToolOutput;
     const ac = new AbortController();
@@ -488,7 +499,14 @@ export class ToolGateway {
       req.signal?.removeEventListener("abort", onAbort);
       await this.releaseLease(st, lease);
       const code: ReasonCode = e instanceof OpsError && e.code === "timeout" ? "timeout" : e instanceof OpsError && e.code === "quarantined" ? "quarantined" : "adapter_error";
-      return this.finishError(st, code, scrubText(e instanceof Error ? e.message : String(e), known));
+      // Hata metni hedef kaynaklı olabilir (k8s Status.message, PostgreSQL hata satırındaki hücre değeri, MCP hatası):
+      // çıktıyla aynı değer dedektörlerinden (M4) geçer ve çıktısı untrusted olan araçta hata da untrusted sayılır
+      // (zarf + bağlam taint'i). Aksi halde taint yükseltmesi hata yoluyla atlanırdı.
+      let message = scrubText(e instanceof Error ? e.message : String(e), known);
+      const masking = this.d.maskingFor?.(desc, profile) ?? null;
+      if (masking) message = maskByDetectors(message, new Counter(), masking);
+      if (desc.untrustedOutput) session.noteResult({ ...(profile ? { profile } : {}), sensitivity: desc.sensitivity, tainted: true });
+      return this.finishError(st, code, message, desc.untrustedOutput ? "untrusted" : "trusted");
     }
     clearTimeout(timer);
     req.signal?.removeEventListener("abort", onAbort);
@@ -524,6 +542,7 @@ export class ToolGateway {
           evidence: processed.redacted,
           sensitivity,
           zoneCapAfter: session.zoneCapAfter({ ...(profile ? { profile } : {}), sensitivity }),
+          ...(this.d.localOnly ? { localOnly: true } : {}),
           ...(req.signal ? { signal: req.signal } : {}),
         })
         .catch(() => null);
@@ -695,7 +714,7 @@ export class ToolGateway {
     }
   }
 
-  private async finishError(st: CallState, code: ReasonCode, message: string): Promise<ToolResult> {
+  private async finishError(st: CallState, code: ReasonCode, message: string, taint: ToolResult["taint"] = "trusted"): Promise<ToolResult> {
     const { audit, session, policy } = this.d;
     try {
       await audit.append({
@@ -713,7 +732,7 @@ export class ToolGateway {
     } catch {
       // günlük bozuk: sonraki çağrılar reddedilecek
     }
-    return this.resultShell(st, "error", code, message);
+    return this.resultShell(st, "error", code, message, taint);
   }
 
   private async deny(st: CallState, code: ReasonCode, detail?: string, opts: { skipAudit?: boolean; policyDecision?: boolean } = {}): Promise<ToolResult> {
@@ -749,7 +768,7 @@ export class ToolGateway {
     return { ...this.resultShell(st, "denied", code, message), evidenceId };
   }
 
-  private resultShell(st: CallState, status: "denied" | "error", code: ReasonCode, message: string): ToolResult {
+  private resultShell(st: CallState, status: "denied" | "error", code: ReasonCode, message: string, taint: ToolResult["taint"] = "trusted"): ToolResult {
     return {
       callId: st.callId,
       tool: st.desc?.name ?? cleanName(st.req.tool),
@@ -760,7 +779,7 @@ export class ToolGateway {
       redactions: new Counter().toSummary(),
       provenance: { source: st.desc?.name ?? cleanName(st.req.tool), observedAt: this.now().toISOString() },
       sensitivity: "none",
-      taint: "trusted",
+      taint,
       subjects: [],
       tokens: { estimate: 0 },
       reasonCode: code,
