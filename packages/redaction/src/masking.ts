@@ -70,7 +70,9 @@ function ibanValid(raw: string): boolean {
   return rem === 1;
 }
 
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// yerel kısım ≤ 64, alan adı ≤ 253 (RFC 5321/1035): sınırsız `+` her konumda satır sonuna kadar tarıyordu
+// (`a`×n tek satırda karesel). Daha uzun bir koşuda eşleşme yine bulunur, yalnız baştaki fazlalık kalır.
+const EMAIL = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}/g;
 const CARD = /\b(?:\d[ -]?){13,19}\b/g;
 const IBAN = /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}\s?[A-Z0-9]{1,4}\b/g;
 const PHONE = /(?:\+\d{1,3}[ -]?)(?:\(?\d{2,4}\)?[ -]?){2,4}\d{2,4}\b/g;

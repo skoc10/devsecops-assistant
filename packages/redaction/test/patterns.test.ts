@@ -105,6 +105,21 @@ describe("M2 desen kuralları", () => {
     expect(run(once).out).toBe(once);
   });
 
+  it("ReDoS sınırları normal girdide tespiti daraltmaz (uzun anahtar soneki, şema, '-' sonrası JWT, kırpılmış blok)", () => {
+    const pw = fake.password();
+    const longKey = `DB_PASSWORD_FOR_THE_PRIMARY_REPLICA_IN_EU_WEST_1_CLUSTER_B=${pw}`;
+    expect(run(longKey).out).toBe(longKey.replace(pw, "‹redacted:kv-secret›"));
+    expect(run(`postgresql+asyncpg://app:${pw}@db.invalid/x`).out).toBe("postgresql+asyncpg://app:‹redacted:url-credentials›@db.invalid/x");
+    const jwt = fake.jwt();
+    expect(run(`session-${jwt} ok`).out).toBe("session-‹redacted:jwt› ok");
+    // END'siz blok ardından tam blok: ikisinin de gövdesi maskelenir
+    const full = fake.privateKeyBlock();
+    const cut = full.slice(0, full.indexOf("-----END"));
+    const { out } = run(`${cut}\n${full}`, false);
+    expect(out).not.toMatch(/[A-Za-z0-9+/]{40,}/);
+    expect(out.match(/‹redacted:private-key-block›/g)).toHaveLength(2);
+  });
+
   it("PEM sertifikasını secret saymaz ama token için sıkıştırır", () => {
     const cert = ["-----BEGIN CERTIFICATE-----", "A".repeat(64), "-----END CERTIFICATE-----"].join("\n");
     const { out, c } = run(`ca:\n${cert}`);

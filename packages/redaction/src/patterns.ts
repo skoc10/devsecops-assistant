@@ -23,17 +23,25 @@ function plausibleSecretValue(v: string): boolean {
   return v.length >= 6 || /[A-Za-z]/.test(v) && v.length >= 4;
 }
 
+/*
+ * Doğrusal zaman (ReDoS): kurallar HER araç sonucunda çalışır ve tek bir satır yüzlerce KB olabilir.
+ * Tekrarlanan bir önek (`token`×n, `eyJ-`×n, `a-`×n, END'siz `BEGIN`×n) her başlangıç konumunda uzun bir
+ * sınıf koşusunu baştan taramamalı/geri izlememeli: koşu ya sınırlıdır (`{0,64}`) ya da bir sonraki olası
+ * başlangıçta durur (`(?!-eyJ)`, `(?!-----BEGIN )`). Normal girdilerde eşleşme kümesi değişmez.
+ */
 export const PATTERN_RULES: readonly PatternRule[] = [
   {
+    // gövde bir sonraki BEGIN'de durur: END'siz BEGIN dizisi her başlangıçta metnin sonuna kadar taranmaz
     id: "private-key-block",
-    regex: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    regex: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:(?!-----BEGIN )[\s\S])*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
   },
   {
     // BEGIN var, END yok (kırpılmış çıktı): başlıktan sonraki makul uzunlukta base64'ü de maskele
     id: "private-key-block",
     regex: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]{0,6000}/g,
   },
-  { id: "jwt", regex: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
+  // başlık bölümü bir sonraki `-eyJ` başlangıcında durur (`eyJ-`×n karesel taramaz); gerçek başlıkta `-eyJ` yok
+  { id: "jwt", regex: /\beyJ(?:(?!-eyJ)[A-Za-z0-9_-]){8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   { id: "aws-access-key-id", regex: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[0-9A-Z]{16}\b/g },
   { id: "github-token", regex: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,})\b/g },
   { id: "gitlab-token", regex: /\bglpat-[A-Za-z0-9_-]{20,}\b/g },
@@ -44,21 +52,22 @@ export const PATTERN_RULES: readonly PatternRule[] = [
   { id: "npm-token", regex: /\bnpm_[A-Za-z0-9]{36}\b/g },
   { id: "bearer-token", regex: /\b(Bearer\s+)([A-Za-z0-9._~+/=-]{16,})/gi, group: 2 },
   { id: "basic-auth", regex: /\b(Basic\s+)([A-Za-z0-9+/=]{12,})/g, group: 2 },
-  // scheme://user:PAROLA@host
-  { id: "url-credentials", regex: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/?#@]+:)([^\s@/]+)(@)/gi, group: 2 },
+  // scheme://user:PAROLA@host — şema ≤ 32 karakter (`postgresql+asyncpg`); sınırsız şema `a-`×n'de karesel
+  { id: "url-credentials", regex: /\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/?#@]+:)([^\s@/]+)(@)/gi, group: 2 },
   { id: "azure-storage-key", regex: /(AccountKey=)([A-Za-z0-9+/=]{20,})/g, group: 2 },
   { id: "sas-signature", regex: /([?&]sig=)([A-Za-z0-9%+/=]{16,})/g, group: 2 },
   {
+    // anahtar soneki ≤ 64 karakter (`DB_PASSWORD_FILE`, `client_secret.prod`); sınırsız sonek `token`×n'de karesel
     id: "kv-secret",
     regex:
-      /((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential)[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?)([^\s"',;]{4,})/gi,
+      /((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential)[A-Za-z0-9_.-]{0,64}["']?\s*[:=]\s*["']?)([^\s"',;]{4,})/gi,
     group: 2,
     accept: plausibleSecretValue,
   },
 ];
 
 /** PEM sertifika blokları secret değildir; token ekonomisi için sıkıştırılır (kompaktlaştırma). */
-const PEM_CERT = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+const PEM_CERT = /-----BEGIN CERTIFICATE-----(?:(?!-----BEGIN )[\s\S])*?-----END CERTIFICATE-----/g;
 
 function shannon(s: string): number {
   const freq = new Map<string, number>();

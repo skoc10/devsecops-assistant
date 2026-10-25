@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { estimateTokens } from "@ops/contracts";
 import { findCanary, makeCanary } from "@ops/testkit";
 import type { Canary } from "@ops/testkit";
-import { KnownSecrets, processOutput, registerProfile, scrubText } from "../src/index.ts";
+import { DEFAULT_MASKING, KnownSecrets, processOutput, registerProfile, scrubText } from "../src/index.ts";
 import type { OutputPolicy } from "../src/index.ts";
 import { fake } from "./helpers.ts";
 
@@ -138,5 +138,52 @@ describe("B-03: referansla taşıma ve token tavanı", () => {
     expect(out.evidenceText).not.toContain("example.invalid");
     expect(out.viewText).not.toContain("example.invalid");
     expect(out.redactions.some((r) => r.rule === "m4:column:hash")).toBe(true);
+  });
+});
+
+describe("ReDoS: tek satırlık saldırgan girdi olay döngüsünü kilitlemez", () => {
+  const N = 256 * 1024; // günlük araçlarının izin verdiği tek satır üst sınırı
+  const rep = (unit: string): string => unit.repeat(Math.ceil(N / unit.length)).slice(0, N);
+  // Düzeltme öncesi her biri processOutput'ta saniyeler–dakikalar sürüyordu (karesel geri izleme):
+  // ör. 256 KB `token`×n ≈ 51 sn, `eyJ-`×n ≈ 107 sn, `a`×n ≈ 41 sn.
+  const hostile: readonly (readonly [string, () => string])[] = [
+    ["kv-secret: token×n", () => rep("token")],
+    ["jwt: eyJ-×n", () => rep("eyJ-")],
+    ["url-credentials + e-posta: a-×n", () => rep("a-")],
+    ["e-posta yerel kısım: a×n", () => rep("a")],
+    ["e-posta alan adı geri izlemesi", () => rep(`${"a".repeat(64)}@${"b.".repeat(126)}b1`)],
+    ["END'siz BEGIN PRIVATE KEY×n", () => rep("-----BEGIN PRIVATE KEY-----!\n")],
+    ["END'siz BEGIN CERTIFICATE×n", () => rep("-----BEGIN CERTIFICATE-----!\n")],
+    ["M3 çözme: %C5×n", () => rep("%C5")],
+    ["M3 çözme: \\u0041×n", () => rep("\\u0041")],
+    ["M3 çözme: &amp;×n", () => rep("&amp;")],
+  ];
+  const known = new KnownSecrets();
+  known.add("db", "Tr0ub4dor&3!/x+y=ab");
+  known.add("tok", fake.highEntropy());
+  const p = policy({ maxBytes: 300_000, masking: DEFAULT_MASKING }, known);
+
+  // Cömert sınır (titrek olmasın): hedef ≪ 300 ms, yerelde ≈ 10–90 ms; karesel davranış onlarca saniye.
+  it.each(hostile)("%s: 256 KB tek satır (nesne ve günlük metni) 1,5 sn'nin altında", (_name, gen) => {
+    const line = gen();
+    for (const data of [{ log: line }, line]) {
+      const t = performance.now();
+      processOutput(data, "özet", { ...p, logLike: typeof data === "string" });
+      expect(performance.now() - t).toBeLessThan(1500);
+    }
+  });
+
+  it("uzun saldırgan satırın sonundaki secret ve PII yine maskelenir (sınırlı nicelikler tespiti daraltmaz)", () => {
+    const pw = fake.password();
+    const jwt = fake.jwt();
+    const tail = ` password=${pw} dsn=postgres://app:${pw}@db.example.invalid/x auth ${jwt} mail ali.veli@example.invalid`;
+    const out = processOutput({ log: `${rep("token-a-eyJ-")}${tail}` }, undefined, p);
+    for (const ch of [out.evidenceText, out.viewText]) {
+      expect(ch).not.toContain(pw);
+      expect(ch).not.toContain(jwt.split(".")[1] as string);
+      expect(ch).not.toContain("ali.veli@");
+    }
+    const rules = out.redactions.map((r) => r.rule);
+    expect(rules).toEqual(expect.arrayContaining(["kv-secret", "url-credentials", "jwt", "m4:email"]));
   });
 });

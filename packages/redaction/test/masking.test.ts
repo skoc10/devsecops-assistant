@@ -25,6 +25,14 @@ describe("M4 dedektörler", () => {
     expect(maskByDetectors(text, new Counter())).toBe(text);
   });
 
+  it("e-posta: 64 karakterlik yerel kısım ve bitişik adresler maskelenir; daha uzun koşuda adres yine yakalanır", () => {
+    const local = `${"a".repeat(30)}.${"b".repeat(33)}`;
+    expect(maskByDetectors(`to ${local}@mail.example.invalid ok`, new Counter())).toBe("to ‹redacted:email› ok");
+    expect(maskByDetectors("ali@x.invalid.v@y.invalid", new Counter())).toBe("‹redacted:email›‹redacted:email›");
+    const out = maskByDetectors(`${"x".repeat(100)}@example.invalid`, new Counter());
+    expect(out).toBe(`${"x".repeat(36)}‹redacted:email›`);
+  });
+
   it("detectors:false ile devre dışı", () => {
     expect(maskByDetectors("a@b.invalid", new Counter(), { columns: [], detectors: false })).toBe("a@b.invalid");
   });
