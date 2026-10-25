@@ -52,6 +52,12 @@ export function toWireMessages(system: string, messages: readonly Message[]): Wi
   return out;
 }
 
+/**
+ * `local` = veri makineden ÇIKMAZ (local-only kipi ve `egress: local` profiller buna güvenir). Bu yüzden yalnız
+ * loopback uca verilebilir; yapılandırmayla (`OPS_PROVIDER_ZONE=local`) uzak bir uç yerel sayılamaz.
+ */
+export const LOCAL_ZONE_NEEDS_LOOPBACK = "trustZone 'local' yalnız loopback uç için geçerli (veri makineden çıkmaz); kurum içi sunucu için 'private-net' veya 'tenant-cloud' kullanın";
+
 export function defaultZone(baseUrl: string): TrustZone {
   try {
     return LOOPBACK.has(new URL(baseUrl).hostname) ? "local" : "third-party-cloud";
@@ -89,6 +95,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
     if (url.username || url.password) throw new OpsError("provider_config", "baseUrl kimlik bilgisi içeremez");
     const zone = cfg.trustZone ?? defaultZone(cfg.baseUrl);
     if (!TRUST_ZONES.includes(zone)) throw new OpsError("provider_config", "trustZone geçersiz");
+    if (zone === "local" && !loopback) throw new OpsError("provider_config", LOCAL_ZONE_NEEDS_LOOPBACK);
     this.cfg = cfg;
     this.url = url;
     this.model = cfg.model;

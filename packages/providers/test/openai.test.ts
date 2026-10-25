@@ -81,6 +81,11 @@ describe("yapılandırma güvenliği", () => {
     const p = new OpenAiCompatibleProvider({ baseUrl: "https://llm.corp.example.invalid/v1", model: "m", trustZone: "private-net" });
     expect(p.capabilities).toMatchObject({ loopOwner: "host", trustZone: "private-net", toolCalling: true });
   });
+  it("'local' bölgesi yalnız loopback uca verilebilir (OPS_PROVIDER_ZONE=local uzak ucu local-only'den geçiremez)", () => {
+    expect(() => new OpenAiCompatibleProvider({ baseUrl: "https://api.example.invalid/v1", model: "m", trustZone: "local" })).toThrow(/yalnız loopback/);
+    expect(() => new OpenAiCompatibleProvider({ baseUrl: "https://10.0.0.5:8000/v1", model: "m", trustZone: "local" })).toThrow(/private-net/);
+    expect(new OpenAiCompatibleProvider({ baseUrl: "http://127.0.0.1:11434/v1", model: "m", trustZone: "local" }).capabilities.trustZone).toBe("local");
+  });
 });
 
 describe("HTTP davranışı (sahte uç)", () => {
