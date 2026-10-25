@@ -1,5 +1,5 @@
 import { createConnection, createServer } from "node:net";
-import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -111,6 +111,38 @@ describe("opsd (UDS)", () => {
     c.close();
     await d.close();
     await expect(stat(fx.rt.paths.socket)).rejects.toThrow();
+  });
+
+  it("aynı yolda ikinci opsd: canlı soket DEVRALINMAZ ('zaten çalışıyor'); başlayamayan örneğin close'u soketi silmez", async () => {
+    const c = await start(new ScriptedProvider([say("x")]));
+    const second = new Opsd({ runtime: fx.rt, orchestrator: fx.rt.createOrchestrator(new ScriptedProvider([say("y")])), socketPath: fx.rt.paths.socket });
+    await expect(second.listen()).rejects.toMatchObject({ code: "opsd_running", message: expect.stringContaining("opsd zaten çalışıyor") });
+    await second.close();
+    expect(await c.ping()).toMatchObject({ pong: true });
+    const c2 = await OpsdClient.connect(fx.rt.paths.socket); // yeni bağlantılar da ilk daemon'a gider
+    expect(await c2.ping()).toMatchObject({ pong: true });
+    c.close();
+    c2.close();
+  });
+
+  it("ölü soket (çökmüş süreç) silinip yeniden dinlenir; soket olmayan dosyaya dokunulmaz", async () => {
+    const sock = fx.rt.paths.socket;
+    // ölü soket: başka adda dinleyip sabit bağla hedef yola koy, sonra kapat (libuv yalnız kendi adını siler)
+    const tmp = join(dirname(sock), "eski.sock");
+    const old = createServer();
+    await new Promise<void>((r) => old.listen(tmp, () => r()));
+    await link(tmp, sock);
+    await new Promise<void>((r) => old.close(() => r()));
+    expect((await lstat(sock)).isSocket()).toBe(true);
+    const c = await start(new ScriptedProvider([say("x")]));
+    expect(await c.ping()).toMatchObject({ pong: true });
+    c.close();
+    await d.close();
+
+    await writeFile(sock, "soket değil");
+    const third = new Opsd({ runtime: fx.rt, orchestrator: fx.rt.createOrchestrator(new ScriptedProvider([say("z")])), socketPath: sock });
+    await expect(third.listen()).rejects.toMatchObject({ code: "socket_path_occupied" });
+    expect(await readFile(sock, "utf8")).toBe("soket değil");
   });
 
   describe("soket yolu ve izinleri", () => {

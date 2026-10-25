@@ -1,5 +1,5 @@
 import { chmod, lstat, mkdir, rm } from "node:fs/promises";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
@@ -31,6 +31,41 @@ function withUmask(mask: number, fn: () => void): void {
   } finally {
     if (prev !== undefined) process.umask(prev);
   }
+}
+
+/** UDS'ye bağlanmayı dener: biri dinliyorsa `alive`; ECONNREFUSED/ENOENT `dead` (kanıtlanmış ölü); diğer hata/zaman aşımı `unknown`. */
+function probeSocket(path: string, timeoutMs = 1_000): Promise<"alive" | "dead" | "unknown"> {
+  return new Promise((resolve) => {
+    const s = connect(path);
+    const done = (r: "alive" | "dead" | "unknown"): void => {
+      clearTimeout(timer);
+      s.destroy();
+      resolve(r);
+    };
+    const timer = setTimeout(() => done("unknown"), timeoutMs);
+    s.once("connect", () => done("alive"));
+    s.on("error", (e: NodeJS.ErrnoException) => done(e.code === "ECONNREFUSED" || e.code === "ENOENT" ? "dead" : "unknown"));
+  });
+}
+
+const alreadyRunning = (path: string): OpsError => new OpsError("opsd_running", `opsd zaten çalışıyor (${path}): ikinci daemon başlatılmadı; önce çalışanı kapatın`);
+
+/**
+ * Önceki çalışmadan kalan soket yalnız ÖLÜ olduğu kanıtlanırsa silinir. Yanıt veren soket başka bir opsd'dir ve
+ * devralınmaz (eskiden koşulsuz silinip üzerine bağlanılıyordu: çalışan daemon sessizce erişilmez oluyordu). Soket
+ * olmayan dosyaya ve durumu belirlenemeyen sokete dokunulmaz.
+ */
+async function removeStaleSocket(path: string): Promise<void> {
+  const st = await lstat(path).catch((e: NodeJS.ErrnoException) => {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  });
+  if (st === null) return;
+  if (!st.isSocket()) throw new OpsError("socket_path_occupied", `${path} soket değil: silinmedi (elle inceleyin)`);
+  const state = await probeSocket(path);
+  if (state === "alive") throw alreadyRunning(path);
+  if (state === "unknown") throw new OpsError("socket_path_occupied", `${path} yanıt vermedi ama ölü olduğu da kanıtlanamadı: silinmedi, daemon başlatılmadı`);
+  await rm(path, { force: true });
 }
 
 /** Soket BEKLENEN yolda, bu kullanıcıya ait ve 0600 mü? (kesik/başka yere bağlanma, izin uyuşmazlığı) */
@@ -72,6 +107,8 @@ export interface OpsdOptions {
 export class Opsd {
   private readonly o: OpsdOptions;
   private server: Server | undefined;
+  /** Soket bu örnek tarafından bağlanıp doğrulandı mı? (yalnız o zaman kapanışta silinir) */
+  private bound = false;
   private busy = false;
   private readonly sockets = new Set<Socket>();
 
@@ -80,8 +117,9 @@ export class Opsd {
   }
 
   /**
-   * Sıra: yol uzunluğu (kesilmez) → dizin 0700 ve bu kullanıcıya ait → soket 0600 DOĞAR (bind sırasında umask) →
-   * son durum doğrulanır (beklenen yolda, bu kullanıcıya ait, 0600); uyuşmazlıkta dinleme bırakılır.
+   * Sıra: yol uzunluğu (kesilmez) → dizin 0700 ve bu kullanıcıya ait → kalan soket yalnız ölüyse silinir (canlıysa
+   * "zaten çalışıyor") → soket 0600 DOĞAR (bind sırasında umask) → son durum doğrulanır (beklenen yolda, bu
+   * kullanıcıya ait, 0600); uyuşmazlıkta dinleme bırakılır.
    */
   async listen(): Promise<void> {
     const path = this.o.socketPath;
@@ -90,12 +128,13 @@ export class Opsd {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await chmod(dir, 0o700);
     await assertPrivateDir(dir, { forbiddenMode: 0o077 });
-    await rm(path, { force: true }); // eski soket (süreç ölmüş olabilir)
+    await removeStaleSocket(path);
     const server = createServer((sock) => this.onConnection(sock));
     this.server = server;
     try {
       await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
+        // ölü soket silindikten sonra araya başka bir daemon girdiyse bind EADDRINUSE verir: yine devralma yok
+        server.once("error", (e: NodeJS.ErrnoException) => reject(e.code === "EADDRINUSE" ? alreadyRunning(path) : e));
         // bind, listen() içinde eşzamanlıdır: dosya 0600 doğar, chmod'a kadar açık pencere kalmaz
         withUmask(0o177, () => server.listen(path, resolve));
       });
@@ -106,12 +145,19 @@ export class Opsd {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       throw e;
     }
+    this.bound = true;
   }
 
   async close(): Promise<void> {
     for (const s of this.sockets) s.destroy();
-    await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
-    await rm(this.o.socketPath, { force: true });
+    const server = this.server;
+    this.server = undefined;
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    // Yalnız BU örneğin bağladığı soket silinir: dinleyemeyen örnek (ör. "zaten çalışıyor") başkasının soketini silmez.
+    if (this.bound) {
+      this.bound = false;
+      await rm(this.o.socketPath, { force: true });
+    }
   }
 
   private onConnection(sock: Socket): void {
